@@ -225,7 +225,105 @@ def ingest(conn: sqlite3.Connection) -> dict[str, int]:
         except Exception:
             conn.execute("ROLLBACK")
             raise
-    return {"files_read": files, "requests_added": requests}
+    return {"files_read": files, "requests_added": requests,
+            "desktop_quota_added": ingest_desktop_quota(conn)}
+
+
+# ------------------------------------------------- Claude Desktop quota file
+#
+# Claude Desktop keeps its own record of plan limits at
+# %APPDATA%/Claude/plan-usage-history.json: {"version":2,"samples":[
+#   {"t": <epoch ms>, "org": "...", "u": {"fh": <5h pct>, "sd": <7d pct>}}, ...]}
+#
+# This is the *shared pool* number, so it covers claude.ai chat, the Desktop
+# app and mobile as well as Claude Code. It has no reset timestamps and is
+# sampled sparsely (median 19 minutes, but hours when Desktop is closed), so
+# it complements the statusLine hook rather than replacing it.
+#
+# Undocumented internals: treat as a bonus source, never a required one.
+
+
+def desktop_quota_path() -> Path:
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return Path(os.environ.get("COORD_DESKTOP_USAGE", base / "Claude" / "plan-usage-history.json"))
+
+
+def _read_bytes(path: Path) -> bytes | None:
+    """Read a file, falling back to the shell.
+
+    Python installed from the Microsoft Store runs in an AppContainer that
+    redirects %APPDATA%, so a direct open of Claude Desktop's data raises
+    FileNotFoundError even though the file is there. The shell is not
+    redirected, so it can read what we cannot.
+    """
+    try:
+        return path.read_bytes()
+    except OSError:
+        pass
+    try:
+        argv = ["cmd", "/c", "type", str(path)] if sys.platform == "win32" else ["cat", str(path)]
+        out = subprocess.run(argv, capture_output=True, timeout=15,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0)
+        return out.stdout if out.returncode == 0 and out.stdout else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def desktop_quota_note() -> str | None:
+    """None when the Desktop file is readable, otherwise why it isn't.
+
+    The common Windows cause is subtle: Python installed from the Microsoft
+    Store runs in an AppContainer that redirects %APPDATA%, and a child
+    process it spawns inherits the same redirection, so even shelling out
+    cannot reach the file. The fix is a different interpreter, not more code.
+    """
+    p = desktop_quota_path()
+    if _read_bytes(p):
+        return None
+    if sys.platform == "win32" and "WindowsApps" in sys.prefix:
+        return ("Claude Desktop's plan-usage history could not be read: this is the Microsoft Store "
+                "build of Python, which is sandboxed away from %APPDATA%. Install coord-mcp under a "
+                "non-Store Python (python.org, or whatever `py -0p` lists) and re-run setup, and the "
+                "shared-pool limit history becomes available.")
+    return f"No Claude Desktop plan-usage history at {p}, so shared-pool limit history is unavailable."
+
+
+def ingest_desktop_quota(conn: sqlite3.Connection) -> int:
+    """Load Claude Desktop's plan-usage samples as quota snapshots. Idempotent."""
+    raw = _read_bytes(desktop_quota_path())
+    if not raw:
+        return 0
+    try:
+        doc = json.loads(raw.decode("utf-8-sig", "replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return 0
+    samples = doc.get("samples") if isinstance(doc, dict) else doc
+    if not isinstance(samples, list):
+        return 0
+    rows = []
+    for s in samples:
+        if not isinstance(s, dict):
+            continue
+        u = s.get("u") or {}
+        t = s.get("t")
+        if not isinstance(t, (int, float)) or not isinstance(u, dict):
+            continue
+        fh, sd = u.get("fh"), u.get("sd")
+        if fh is None and sd is None:
+            continue
+        rows.append((int(t / 1000 if t > 1e11 else t), "desktop", fh, sd))
+    if not rows:
+        return 0
+    before = conn.execute("SELECT COUNT(*) n FROM quota_snapshots WHERE source='desktop'").fetchone()["n"]
+    conn.executemany(
+        "INSERT OR IGNORE INTO quota_snapshots(ts, source, five_hour_pct, seven_day_pct) VALUES (?,?,?,?)", rows)
+    after = conn.execute("SELECT COUNT(*) n FROM quota_snapshots WHERE source='desktop'").fetchone()["n"]
+    return after - before
 
 
 # --------------------------------------------------------------- statusline
@@ -332,54 +430,133 @@ def _until(reset: int | None) -> str:
 
 
 def latest_quota(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """Most recent percentages from either source, with reset times borrowed
+    from the last statusLine row if the newest sample is a Desktop one (which
+    carries percentages but no resets)."""
     r = conn.execute("SELECT * FROM quota_snapshots ORDER BY ts DESC LIMIT 1").fetchone()
-    return dict(r) if r else None
+    if r is None:
+        return None
+    d = dict(r)
+    # A row can carry one percentage and not the other; fall back to the most
+    # recent reading of whichever is missing, so a tile is never blank because
+    # of one partial sample.
+    for k in ("five_hour_pct", "seven_day_pct"):
+        if d.get(k) is None:
+            back = conn.execute(
+                f"SELECT {k} FROM quota_snapshots WHERE {k} IS NOT NULL AND ts >= ? ORDER BY ts DESC LIMIT 1",
+                (d["ts"] - 86400,)).fetchone()
+            if back:
+                d[k] = back[k]
+    if d.get("five_hour_reset") is None:
+        r2 = conn.execute(
+            "SELECT five_hour_reset, seven_day_reset FROM quota_snapshots "
+            "WHERE five_hour_reset IS NOT NULL ORDER BY ts DESC LIMIT 1").fetchone()
+        if r2 and r2["five_hour_reset"] and r2["five_hour_reset"] > now():
+            d["five_hour_reset"] = r2["five_hour_reset"]
+            d["seven_day_reset"] = d.get("seven_day_reset") or r2["seven_day_reset"]
+    return d
+
+
+def quota_series(conn: sqlite3.Connection, start: int, end: int, bucket: int = 300) -> list[dict[str, Any]]:
+    """Both sources merged into one series, bucketed so they can't double-count.
+
+    Within a bucket the highest reading wins: the two sources report the same
+    underlying number, so small disagreements would otherwise read as a
+    sawtooth of fake rises and falls.
+    """
+    out: dict[int, dict[str, Any]] = {}
+    for r in conn.execute(
+        "SELECT ts, source, five_hour_pct, seven_day_pct FROM quota_snapshots "
+        "WHERE ts BETWEEN ? AND ? ORDER BY ts", (start, end)
+    ):
+        b = out.setdefault(r["ts"] // bucket, {"ts": r["ts"], "five_hour_pct": None, "seven_day_pct": None,
+                                               "sources": set()})
+        b["ts"] = max(b["ts"], r["ts"])
+        b["sources"].add(r["source"])
+        for k in ("five_hour_pct", "seven_day_pct"):
+            if r[k] is not None:
+                b[k] = r[k] if b[k] is None else max(b[k], r[k])
+    return [out[k] for k in sorted(out)]
 
 
 def burn(conn: sqlite3.Connection, window_min: int = 45) -> dict[str, Any]:
     """Burn rate of the 5-hour window from recent snapshots, and a projection.
 
-    Slope is taken over the last `window_min` minutes within the same reset
-    window (a reset would show as a drop; we don't fit across it). Also
-    reports spend per hour from the requests table, which exists even when
-    no snapshots do.
+    The series is trimmed at the last reset: a drop of more than 5 points is a
+    new window, and fitting a slope across one would be meaningless. Works
+    from either source, so it does not depend on reset timestamps.
     """
     t = now()
     out: dict[str, Any] = {"pct_per_hour": None, "hits_limit_before_reset": False}
     latest = latest_quota(conn)
-    spend_60 = conn.execute("SELECT COALESCE(SUM(cost_usd),0) c FROM requests WHERE ts >= ?", (t - 3600,)).fetchone()["c"]
-    spend_15 = conn.execute("SELECT COALESCE(SUM(cost_usd),0) c FROM requests WHERE ts >= ?", (t - 900,)).fetchone()["c"]
-    out["spend_last_hour"] = spend_60
-    out["spend_last_15m"] = spend_15
+    q = lambda s: conn.execute(f"SELECT COALESCE(SUM(cost_usd),0) c FROM requests WHERE {s}", (t - 3600,)).fetchone()["c"]  # noqa: E731
+    out["spend_last_hour"] = q("ts >= ?")
+    out["spend_last_15m"] = conn.execute(
+        "SELECT COALESCE(SUM(cost_usd),0) c FROM requests WHERE ts >= ?", (t - 900,)).fetchone()["c"]
     if not latest or latest["five_hour_pct"] is None:
         return out
-    rows = conn.execute(
-        """SELECT ts, five_hour_pct FROM quota_snapshots
-           WHERE ts >= ? AND five_hour_pct IS NOT NULL AND five_hour_reset IS ? ORDER BY ts""",
-        (t - window_min * 60, latest["five_hour_reset"]),
-    ).fetchall()
     out["current_pct"] = latest["five_hour_pct"]
-    out["reset_at"] = latest["five_hour_reset"]
-    out["reset_text"] = when(latest["five_hour_reset"]) if latest["five_hour_reset"] else "unknown"
-    if len(rows) >= 2 and rows[-1]["ts"] > rows[0]["ts"]:
-        dp = rows[-1]["five_hour_pct"] - rows[0]["five_hour_pct"]
-        dt_h = (rows[-1]["ts"] - rows[0]["ts"]) / 3600
-        if dp > 0 and dt_h >= 5 / 60:
-            slope = dp / dt_h
-            out["pct_per_hour"] = slope
-            hours_left = (100 - latest["five_hour_pct"]) / slope
-            hit_at = latest["ts"] + int(hours_left * 3600)
-            out["hit_at"] = hit_at
-            out["hit_at_text"] = when(hit_at)
-            if latest["five_hour_reset"] and hit_at < latest["five_hour_reset"]:
-                out["hits_limit_before_reset"] = True
-            # Empirical exchange rate: dollars of API-equivalent spend per percent of the window.
-            spend = conn.execute("SELECT COALESCE(SUM(cost_usd),0) c FROM requests WHERE ts BETWEEN ? AND ?",
-                                 (rows[0]["ts"], rows[-1]["ts"])).fetchone()["c"]
-            if spend > 0:
-                out["usd_per_pct"] = spend / dp
-                out["headroom_usd"] = (100 - latest["five_hour_pct"]) * out["usd_per_pct"]
+    out["reset_at"] = latest.get("five_hour_reset")
+    out["reset_text"] = when(latest["five_hour_reset"]) if latest.get("five_hour_reset") else "unknown"
+    out["age_seconds"] = t - latest["ts"]
+
+    rows = [r for r in quota_series(conn, t - window_min * 60, t) if r["five_hour_pct"] is not None]
+    cut = 0
+    for i in range(1, len(rows)):
+        if rows[i]["five_hour_pct"] < rows[i - 1]["five_hour_pct"] - 5:
+            cut = i
+    rows = rows[cut:]
+    if len(rows) < 2:
+        return out
+    dp = rows[-1]["five_hour_pct"] - rows[0]["five_hour_pct"]
+    dt_h = (rows[-1]["ts"] - rows[0]["ts"]) / 3600
+    if dp <= 0 or dt_h < 5 / 60:
+        return out
+    slope = dp / dt_h
+    out["pct_per_hour"] = slope
+    hit_at = rows[-1]["ts"] + int((100 - rows[-1]["five_hour_pct"]) / slope * 3600)
+    out["hit_at"] = hit_at
+    out["hit_at_text"] = when(hit_at)
+    if latest.get("five_hour_reset") and hit_at < latest["five_hour_reset"]:
+        out["hits_limit_before_reset"] = True
+    spend = conn.execute("SELECT COALESCE(SUM(cost_usd),0) c FROM requests WHERE ts BETWEEN ? AND ?",
+                         (rows[0]["ts"], rows[-1]["ts"])).fetchone()["c"]
+    if spend > 0:
+        out["usd_per_pct"] = spend / dp
+        out["headroom_usd"] = (100 - rows[-1]["five_hour_pct"]) * out["usd_per_pct"]
     return out
+
+
+def attribution(conn: sqlite3.Connection, start: int, end: int, max_gap: int = 6 * 3600) -> dict[str, Any]:
+    """Split 5-hour limit consumption into what Claude Code can account for and
+    what it cannot.
+
+    Each rise between consecutive readings is credited to Claude Code if any
+    local request fell in that interval, and to "elsewhere" otherwise, which
+    means claude.ai chat, the Desktop app, mobile, or Claude Code on another
+    machine. Intervals longer than max_gap are too coarse to attribute and are
+    reported separately rather than guessed at.
+    """
+    rows = [r for r in quota_series(conn, start, end) if r["five_hour_pct"] is not None]
+    per_day: dict[str, dict[str, float]] = {}
+    totals = {"claude_code": 0.0, "elsewhere": 0.0}
+    unattributed = 0.0
+    for a, b in zip(rows, rows[1:]):
+        dp = b["five_hour_pct"] - a["five_hour_pct"]
+        if dp <= 0:
+            continue
+        if b["ts"] - a["ts"] > max_gap:
+            unattributed += dp
+            continue
+        n = conn.execute("SELECT COUNT(*) n FROM requests WHERE ts > ? AND ts <= ?",
+                         (a["ts"], b["ts"])).fetchone()["n"]
+        key = "claude_code" if n else "elsewhere"
+        day = datetime.fromtimestamp(b["ts"]).strftime("%Y-%m-%d")
+        per_day.setdefault(day, {"claude_code": 0.0, "elsewhere": 0.0})[key] += dp
+        totals[key] += dp
+    tot = totals["claude_code"] + totals["elsewhere"]
+    return {"per_day": per_day, "totals": totals, "unattributed": unattributed,
+            "points": tot, "claude_code_share": (totals["claude_code"] / tot) if tot else None}
 
 
 def live(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -406,7 +583,8 @@ def live(conn: sqlite3.Connection) -> dict[str, Any]:
         i = min(19, (r["ts"] - since) // 900)
         buckets[i] += r["cost_usd"]
     return {"as_of": t, "window_start": since, "quota": q, "burn": burn(conn), "sessions": sessions,
-            "buckets": buckets, "total": sum(s["cost"] for s in sessions)}
+            "buckets": buckets, "total": sum(s["cost"] for s in sessions),
+            "attribution": attribution(conn, t - 7 * 86400, t)}
 
 
 def _range(days: int) -> tuple[int, int]:
@@ -471,14 +649,15 @@ def summary(conn: sqlite3.Connection, days: int = 7) -> dict[str, Any]:
         total_in = s["cache_read"] + s["uncached"]
         s["cache_hit"] = (s["cache_read"] / total_in) if total_in else None
 
-    snaps = q("SELECT ts, five_hour_pct, seven_day_pct FROM quota_snapshots WHERE ts BETWEEN ? AND ? ORDER BY ts",
-              start, end)
+    snaps = [{k: r[k] for k in ("ts", "five_hour_pct", "seven_day_pct")} for r in quota_series(conn, start, end)]
+    sources = {r["source"] for r in conn.execute("SELECT DISTINCT source FROM quota_snapshots")}
 
     return {
         "days": days, "start": start, "end": end, "generated": now(),
         "totals": totals, "prev_cost": prev["cost"],
         "days_list": days_list, "by_day": by_day, "by_hour": by_hour, "by_model": by_model,
         "projects": projects, "sessions": sessions, "quota": latest_quota(conn), "snapshots": snaps,
+        "attribution": attribution(conn, start, end), "quota_sources": sorted(sources),
     }
 
 
@@ -584,6 +763,11 @@ def live_text(v: dict[str, Any]) -> str:
         lines.append(line)
     lines.append(f"spend  last 15m ${b['spend_last_15m']:.2f}   last hour ${b['spend_last_hour']:.2f}   "
                  f"this window ${v['total']:.2f}")
+    a = v.get("attribution")
+    if a and a.get("claude_code_share") is not None:
+        lines.append(f"limit split (last 7d)  Claude Code {a['claude_code_share'] * 100:.0f}%   "
+                     f"elsewhere {100 - a['claude_code_share'] * 100:.0f}%  "
+                     f"(chat, Desktop, mobile, other machines)")
     if v["sessions"]:
         lines.append("sessions in this window:")
         for s in v["sessions"][:10]:
@@ -678,8 +862,15 @@ def main(argv: list[str] | None = None) -> int:
         t = s["totals"]
         print(f"7 days  ${t['cost']:.2f} est  {t['requests']} requests  {t['sessions']} sessions  "
               f"(prev 7d ${s['prev_cost']:.2f})")
+        at = s["attribution"]
+        if at["claude_code_share"] is not None:
+            print(f"limit   Claude Code {at['claude_code_share'] * 100:.0f}%  "
+                  f"elsewhere {100 - at['claude_code_share'] * 100:.0f}% (chat, Desktop, mobile, other machines)")
         for pr in s["projects"][:8]:
             print(f"  {pr['project'][:32]:<32} ${pr['cost']:>8.2f}  {pr['sessions']:>3} sessions")
+        note = desktop_quota_note()
+        if note:
+            print("\nnote: " + note)
         return 0
     if a.cmd == "report":
         from . import report

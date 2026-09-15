@@ -107,9 +107,13 @@ CREATE TABLE IF NOT EXISTS ingest_files (
   size   INTEGER NOT NULL DEFAULT 0
 );
 
+-- Limit percentages. Two sources: our statusLine hook (fine-grained, carries
+-- reset times, Claude Code only) and Claude Desktop's own plan-usage history
+-- (coarser, no reset times, but covers the whole shared pool including chat).
 CREATE TABLE IF NOT EXISTS quota_snapshots (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   ts              INTEGER NOT NULL,
+  source          TEXT NOT NULL DEFAULT 'statusline',
   five_hour_pct   REAL,
   five_hour_reset INTEGER,
   seven_day_pct   REAL,
@@ -123,6 +127,23 @@ CREATE INDEX IF NOT EXISTS quota_ts ON quota_snapshots(ts);
 """
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive migrations. CREATE TABLE IF NOT EXISTS won't add a column to a
+    table that already exists, so do it here."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(quota_snapshots)")}
+    if "source" not in cols:
+        conn.execute("ALTER TABLE quota_snapshots ADD COLUMN source TEXT NOT NULL DEFAULT 'statusline'")
+    # One row per (source, ts) so re-ingesting Desktop history is a no-op.
+    try:
+        conn.execute(
+            "DELETE FROM quota_snapshots WHERE id NOT IN "
+            "(SELECT MIN(id) FROM quota_snapshots GROUP BY source, ts)"
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS quota_unique ON quota_snapshots(source, ts)")
+    except sqlite3.OperationalError:
+        pass
+
+
 def now() -> int:
     return int(time.time())
 
@@ -134,6 +155,7 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), isolation_level=None, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
+    _migrate(conn)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),

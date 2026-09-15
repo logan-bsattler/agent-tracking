@@ -57,7 +57,7 @@ def test_ingest_dedupes_streamed_blocks(conn, projects):
     _write(f, [_rec("r1", "s1", "2026-09-14T10:00:00Z", block=0), _rec("r1", "s1", "2026-09-14T10:00:00Z", block=1),
                _rec("r2", "s1", "2026-09-14T10:01:00Z")])
     out = usage.ingest(conn)
-    assert out == {"files_read": 1, "requests_added": 2}
+    assert (out["files_read"], out["requests_added"]) == (1, 2)
     assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 2
     row = conn.execute("SELECT * FROM requests WHERE request_id='r1'").fetchone()
     assert row["cache_write_1h"] == 400 and row["cache_write_5m"] == 100 and row["thinking"] == 30
@@ -78,7 +78,8 @@ def test_ingest_is_incremental_and_skips_partial_line(conn, projects):
     out = usage.ingest(conn)
     assert out["requests_added"] == 1
     assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 3
-    assert usage.ingest(conn) == {"files_read": 0, "requests_added": 0}
+    again = usage.ingest(conn)
+    assert (again["files_read"], again["requests_added"]) == (0, 0)
 
 
 def test_subagent_files_are_attributed(conn, projects):

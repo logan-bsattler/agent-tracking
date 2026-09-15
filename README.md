@@ -114,6 +114,25 @@ and working directory. Ingestion reads those incrementally by byte offset, so
 it covers history you already have and costs about a second per run. Subagent
 transcripts are attributed to their parent session and flagged.
 
+**What is and isn't covered.** Spend, sessions and projects are Claude Code on
+this machine only, because only Claude Code writes those transcripts. The
+limit percentages are the *shared* subscription pool, so they also move for
+claude.ai chat, the Claude Desktop app and mobile. Two sources feed them: our
+statusLine hook, and Claude Desktop's own `plan-usage-history.json`, which
+backfills history from before the hook existed and covers the whole pool.
+
+The report closes that gap rather than hiding it. "Where the limit went"
+credits each rise in the 5-hour window to Claude Code when a local request
+falls in the same interval and to "elsewhere" when none does, and the
+"Limit used by Claude Code" tile gives the split as one number.
+
+> **Use a normal Python on Windows.** Python installed from the Microsoft
+> Store runs in an AppContainer that redirects `%APPDATA%`, and processes it
+> spawns inherit the redirection, so it cannot read Claude Desktop's file at
+> all. Everything else works, but the shared-pool history is silently missing.
+> `python -m coord_mcp.usage status` says so if it detects this. Install under
+> a python.org build (check `py -0p`) and re-run `setup --force`.
+
 **Spend** is API-equivalent dollars at published rates, the same figure Claude
 Code's `/cost` shows. Subscription limits are not billed in dollars, but this
 is the best proxy for how heavily a request weighs. Cross-checked against

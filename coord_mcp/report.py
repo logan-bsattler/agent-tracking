@@ -121,14 +121,15 @@ def kpis(s: dict[str, Any]) -> str:
     qv = s["quota"]
     t = s["totals"]
     out = []
-    if qv and qv["five_hour_pct"] is not None:
+    if qv and (qv["five_hour_pct"] is not None or qv["seven_day_pct"] is not None):
         age = (s["generated"] - qv["ts"]) // 60
-        out.append(_tile("5-hour limit used", f"{qv['five_hour_pct']:.0f}%",
-                         f"resets {when(qv['five_hour_reset'])}" if qv["five_hour_reset"] else f"{age}m ago",
-                         (qv["five_hour_pct"], band(qv["five_hour_pct"], 75, 90))))
-        out.append(_tile("Weekly limit used", f"{qv['seven_day_pct']:.0f}%",
-                         f"resets {when(qv['seven_day_reset'])}" if qv["seven_day_reset"] else f"{age}m ago",
-                         (qv["seven_day_pct"], band(qv["seven_day_pct"], 85, 95))))
+        for label, pk, rk, warn, hard in (("5-hour limit used", "five_hour_pct", "five_hour_reset", 75, 90),
+                                          ("Weekly limit used", "seven_day_pct", "seven_day_reset", 85, 95)):
+            if qv[pk] is None:
+                continue
+            out.append(_tile(label, f"{qv[pk]:.0f}%",
+                             f"resets {when(qv[rk])}" if qv.get(rk) else f"read {age}m ago",
+                             (qv[pk], band(qv[pk], warn, hard))))
     elif usage.hook_wired():
         out.append(_tile("Limits", "pending", "hook is wired; a session started since then will report on its next prompt"))
     else:
@@ -142,6 +143,12 @@ def kpis(s: dict[str, Any]) -> str:
     out.append(_tile("Cache hit rate", f"{hit:.0f}%", f"{tokens(t['cache_write'])} tokens written to cache"))
     sub = (t["subagent_cost"] / t["cost"] * 100) if t["cost"] else 0
     out.append(_tile("Output tokens", tokens(t["output_tokens"]), f"{sub:.0f}% of spend in subagents"))
+    a = s["attribution"]
+    if a["claude_code_share"] is not None:
+        share = a["claude_code_share"] * 100
+        out.append(_tile("Limit used by Claude Code", f"{share:.0f}%",
+                         f"{100 - share:.0f}% went to chat, Desktop or another machine",
+                         (share, "band-ok")))
     return '<div class="row">' + "".join(out) + "</div>"
 
 
@@ -178,14 +185,27 @@ def quota_chart(s: dict[str, Any]) -> str:
     x = lambda ts: PL + (W - PL - PR) * (ts - t0) / max(t1 - t0, 1)  # noqa: E731
     y = lambda p: PT + (H - PT - PB) * (1 - p / 100)  # noqa: E731
     lines = []
+    gap_s = 90 * 60  # don't draw a line across a period with no readings
     for key, slot in (("five_hour_pct", 1), ("seven_day_pct", 2)):
-        pts = [(x(r["ts"]), y(r[key])) for r in snaps if r[key] is not None]
-        if not pts:
+        segs: list[list[tuple[float, float]]] = []
+        prev_ts = None
+        for r in snaps:
+            if r[key] is None:
+                continue
+            if prev_ts is None or r["ts"] - prev_ts > gap_s:
+                segs.append([])
+            segs[-1].append((x(r["ts"]), y(r[key])))
+            prev_ts = r["ts"]
+        if not segs:
             continue
-        d = "M" + " L".join(f"{px:.1f},{py:.1f}" for px, py in pts)
-        lines.append(f'<path d="{d}" fill="none" stroke="var(--s{slot})" stroke-width="2" '
-                     f'stroke-linejoin="round" stroke-linecap="round"/>')
-        px, py = pts[-1]
+        for seg in segs:
+            if len(seg) == 1:
+                lines.append(f'<circle cx="{seg[0][0]:.1f}" cy="{seg[0][1]:.1f}" r="2" fill="var(--s{slot})"/>')
+                continue
+            d = "M" + " L".join(f"{px:.1f},{py:.1f}" for px, py in seg)
+            lines.append(f'<path d="{d}" fill="none" stroke="var(--s{slot})" stroke-width="2" '
+                         f'stroke-linejoin="round" stroke-linecap="round"/>')
+        px, py = segs[-1][-1]
         lines.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="4" fill="var(--s{slot})" stroke="var(--surface)" stroke-width="2"/>')
     hits = "".join(
         f'<rect class="hit" x="{x(r["ts"]) - 6:.1f}" y="{PT}" width="12" height="{H - PT - PB}" '
@@ -194,8 +214,62 @@ def quota_chart(s: dict[str, Any]) -> str:
     labels = "".join(
         f'<text x="{x(int(datetime.strptime(d, "%Y-%m-%d").timestamp())):.0f}" y="{H - 8}" text-anchor="middle">'
         f'{datetime.strptime(d, "%Y-%m-%d").strftime("%a %d")}</text>' for d in s["days_list"])
+    src = s.get("quota_sources") or []
+    note = ""
+    if "desktop" in src:
+        note = ('<p class="sub" style="margin:6px 0 0">Includes Claude Desktop\'s own plan-usage history, which '
+                'covers the whole shared pool. Lines break where there were no readings.</p>')
     legend = '<div class="legend"><span style="--c:var(--s1)">5-hour window</span><span style="--c:var(--s2)">Weekly window</span></div>'
-    return legend + f'<svg viewBox="0 0 {W} {H}">{grid}{"".join(lines)}{hits}{labels}</svg>'
+    return legend + f'<svg viewBox="0 0 {W} {H}">{grid}{"".join(lines)}{hits}{labels}</svg>' + note
+
+
+def attribution_chart(s: dict[str, Any]) -> str:
+    """Limit consumed per day, split into what Claude Code explains and what it doesn't."""
+    a = s["attribution"]
+    if not a["points"]:
+        note = usage.desktop_quota_note()
+        return ('<div class="empty">Not enough limit readings in this period to attribute consumption.'
+                + (f'<br><br>{esc(note)}' if note else "") + "</div>")
+    days = s["days_list"]
+    per_day = a["per_day"]
+    tot = {d: sum(per_day.get(d, {}).values()) for d in days}
+    grid, vmax = _yaxis(max(max(tot.values()), 1) * 1.1, lambda v: f"{v:.0f}")
+    n = len(days)
+    band_w = (W - PL - PR) / n
+    bw = min(24, band_w * 0.6)
+    ph = H - PT - PB
+    bars, labels = [], []
+    for i, d in enumerate(days):
+        cx = PL + band_w * (i + 0.5)
+        x0 = cx - bw / 2
+        segs = [(k, v) for k, v in (("claude_code", per_day.get(d, {}).get("claude_code", 0)),
+                                    ("elsewhere", per_day.get(d, {}).get("elsewhere", 0))) if v > 0]
+        y_cursor = PT + ph
+        for j, (key, v) in enumerate(segs):
+            slot = 1 if key == "claude_code" else 2
+            h = ph * v / vmax
+            y0 = y_cursor - h
+            gap = 2 if j < len(segs) - 1 else 0
+            top = j == len(segs) - 1
+            shape = (f'<path d="{_top_rounded(x0, y0, bw, max(h - gap, 0))}" fill="var(--s{slot})"/>' if top
+                     else f'<rect x="{x0:.1f}" y="{y0:.1f}" width="{bw:.1f}" height="{max(h - gap, 0):.1f}" fill="var(--s{slot})"/>')
+            bars.append(shape)
+            y_cursor = y0
+        tip = (f"{datetime.strptime(d, '%Y-%m-%d').strftime('%a %d %b')}  {tot[d]:.0f} pts\n"
+               + "\n".join(f"{'Claude Code' if k == 'claude_code' else 'Elsewhere'} {v:.0f}" for k, v in segs))
+        bars.append(f'<rect class="hit" x="{PL + band_w * i:.1f}" y="{PT}" width="{band_w:.1f}" height="{ph}" data-tip="{esc(tip)}"/>')
+        if tot[d] >= 0.6 * vmax / 1.1:
+            labels.append(f'<text x="{cx:.1f}" y="{y_cursor - 5:.1f}" text-anchor="middle" style="fill:var(--ink2)">{tot[d]:.0f}</text>')
+        labels.append(f'<text x="{cx:.1f}" y="{H - 8}" text-anchor="middle">{datetime.strptime(d, "%Y-%m-%d").strftime("%a %d")}</text>')
+    legend = ('<div class="legend"><span style="--c:var(--s1)">Claude Code</span>'
+              '<span style="--c:var(--s2)">Elsewhere (chat, Desktop, mobile, other machines)</span></div>')
+    extra = ""
+    if a["unattributed"]:
+        extra = (f'<p class="sub" style="margin:8px 0 0">{a["unattributed"]:.0f} further points rose across gaps longer '
+                 f'than six hours between readings, too coarse to attribute either way.</p>')
+    return (legend + f'<svg viewBox="0 0 {W} {H}">{grid}{"".join(bars)}{"".join(labels)}</svg>'
+            + '<p class="sub" style="margin:10px 0 0">Percentage points of the 5-hour window consumed per day. A rise '
+            'counts as Claude Code when a local request falls in the same interval, and as elsewhere when none does.</p>' + extra)
 
 
 def _top_rounded(x: float, y: float, w: float, h: float, r: float = 4) -> str:
@@ -388,12 +462,13 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
 {kpis(s)}
 {now_card}
 <div class="card"><h2>Limits over time</h2>{quota_chart(s)}</div>
+<div class="card"><h2>Where the limit went</h2>{attribution_chart(s)}</div>
 <div class="card"><h2>Spend per day, by model</h2>{daily_chart(s)}</div>
 <div class="card"><h2>Spend by hour of day</h2>{hour_chart(s)}</div>
 <div class="card"><h2>By model</h2>{model_table(s)}</div>
 <div class="card"><h2>By project</h2>{project_table(s)}</div>
 <div class="card"><h2>Sessions, most expensive first</h2>{session_table(s)}</div>
-<p class="sub">Source: Claude Code transcripts under ~/.claude/projects. Cache reads are priced at the cached rate; 1-hour cache writes at 2x input.</p>
+<p class="sub">Spend and sessions come from Claude Code transcripts under ~/.claude/projects, so they cover Claude Code only. Limit percentages are the shared subscription pool, read from the statusLine hook and from Claude Desktop's plan-usage history, so they also move for claude.ai chat, the Desktop app and mobile. Cache reads are priced at the cached rate; 1-hour cache writes at 2x input.</p>
 </main><div id="tip"></div><script>{JS}</script></body></html>"""
 
 
