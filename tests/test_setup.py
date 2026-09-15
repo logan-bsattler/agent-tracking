@@ -29,11 +29,12 @@ def test_setup_preserves_other_keys_and_backs_up(tmp_path):
 
 def test_setup_is_idempotent(tmp_path):
     p = tmp_path / "settings.json"
+    p.write_text(json.dumps({"theme": "auto"}))
     usage.setup(p)
     before = p.read_text()
     out = usage.setup(p)
     assert out["changed"] is False and p.read_text() == before
-    assert len(list(tmp_path.glob("settings.json.bak-*"))) == 1
+    assert len(list(tmp_path.glob("settings.json.bak-*"))) == 1  # only the first run backs up
 
 
 def test_setup_refuses_to_replace_foreign_statusline_unless_forced(tmp_path):
