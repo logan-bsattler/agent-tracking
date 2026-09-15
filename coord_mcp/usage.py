@@ -504,8 +504,12 @@ def current_window(conn: sqlite3.Connection, lookback_h: float = 6) -> dict[str,
         end = start + 5 * 3600
     else:
         start = end = None
+    # An estimated end that has already passed without a reset is disproved by
+    # its own evidence: the window is still open, so it started later than the
+    # first reading we have.
+    stale = bool(end and not reset and end < t)
     return {"rows": [{"ts": r["ts"], "pct": r["five_hour_pct"]} for r in rows],
-            "start": start, "end": end, "reset_known": bool(reset)}
+            "start": start, "end": end, "reset_known": bool(reset), "stale_estimate": stale}
 
 
 def burn(conn: sqlite3.Connection, window_min: int = 45) -> dict[str, Any]:

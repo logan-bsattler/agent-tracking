@@ -148,3 +148,27 @@ def test_now_section_embeds_the_runway(conn):
         _snap(conn, t - mins * 60, pct, reset, "statusline")
     html = report.now_section(usage.live(conn))
     assert "<svg" in html and "Spend last 15 min" in html
+
+
+def test_falsified_estimate_drops_the_reset_marker(conn):
+    """Five hours past the first reading with no reset disproves the guess."""
+    t = now()
+    _snap(conn, t - 5 * 3600 - 1800, 5)          # guessed end is half an hour ago
+    for secs, pct in ((1800, 20), (600, 30), (0, 40)):
+        _snap(conn, t - secs, pct)
+    w = usage.current_window(conn)
+    assert w["stale_estimate"] is True
+    html = _chart(conn)
+    assert "reset?" not in html
+    assert "cannot even be guessed" in html
+    assert "var(--warn)" in html
+
+
+def test_known_reset_is_never_stale(conn):
+    t = now()
+    reset = t + 1800
+    _snap(conn, t - 600, 20, reset, "statusline")
+    _snap(conn, t, 30, reset, "statusline")
+    w = usage.current_window(conn)
+    assert w["stale_estimate"] is False
+    assert "resets" in _chart(conn)

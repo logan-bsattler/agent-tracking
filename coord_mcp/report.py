@@ -412,7 +412,8 @@ def runway_chart(v: dict[str, Any]) -> str:
         parts.append(f'<text x="{ex + (-8 if anchor == "end" else 8):.1f}" y="{ey - 9:.1f}" text-anchor="{anchor}" '
                      f'style="fill:{colour};font-weight:600">{esc(lbl)}</text>')
 
-    if not certain:  # the estimated reset is a marker inside the plot, not the edge
+    stale = bool(w.get("stale_estimate"))
+    if not certain and not stale:  # the estimated reset is a marker inside the plot, not the edge
         exr = x(end)
         parts.append(f'<line x1="{exr:.1f}" x2="{exr:.1f}" y1="{rt}" y2="{y(0):.1f}" stroke="var(--axis)" stroke-width="1"/>')
         parts.append(f'<text x="{exr:.1f}" y="{RH - 8}" text-anchor="middle">~{hhmm(end)} reset?</text>')
@@ -433,10 +434,12 @@ def runway_chart(v: dict[str, Any]) -> str:
         verdict = (f'{dot}<b>On track.</b> At {b_slope:.0f}% per hour the window reaches about {end_pct:.0f}% by the '
                    f'time it resets, in {(end - t) / 3600:.1f} hours.')
     elif state == "unclear":
+        guess = ('Five hours after the first reading has already passed with no reset, so the window started later '
+                 'than that reading and its end cannot even be guessed.' if stale else
+                 'The marked reset is a guess at five hours after the first reading.')
         verdict = (f'{dot}<b>Pace is {b_slope:.0f}% per hour</b>, reaching 100% at {hhmm(hit)}. No reset time is known '
-                   f'yet, so whether that lands before the window resets cannot be said. The marked reset is a guess '
-                   f'at five hours from the first reading. Start a new session and the status line will report the '
-                   f'real one.')
+                   f'yet, so whether that lands before the window resets cannot be said. {guess} Open a new Claude '
+                   f'Code session and its status line reports the real reset time from then on.')
     else:
         verdict = f'{dot}Not enough readings in this window yet to project a pace.'
     return (f'<p class="sub" style="margin:0 0 8px">{verdict}</p>'
