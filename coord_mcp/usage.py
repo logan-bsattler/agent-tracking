@@ -479,6 +479,35 @@ def quota_series(conn: sqlite3.Connection, start: int, end: int, bucket: int = 3
     return [out[k] for k in sorted(out)]
 
 
+def current_window(conn: sqlite3.Connection, lookback_h: float = 6) -> dict[str, Any]:
+    """The 5-hour window in progress: its start, its end, and every reading in it.
+
+    The window is five hours by definition, so when a reset time is known the
+    start is exactly five hours before it. Without one (Claude Desktop samples
+    carry no resets) the start is the first reading after the last reset drop,
+    and the end is five hours after that, which is an estimate.
+    """
+    t = now()
+    rows = [r for r in quota_series(conn, t - int(lookback_h * 3600), t) if r["five_hour_pct"] is not None]
+    cut = 0
+    for i in range(1, len(rows)):
+        if rows[i]["five_hour_pct"] < rows[i - 1]["five_hour_pct"] - 5:
+            cut = i
+    rows = rows[cut:]
+    latest = latest_quota(conn)
+    reset = latest.get("five_hour_reset") if latest else None
+    if reset:
+        start, end = reset - 5 * 3600, reset
+        rows = [r for r in rows if r["ts"] >= start]
+    elif rows:
+        start = rows[0]["ts"]
+        end = start + 5 * 3600
+    else:
+        start = end = None
+    return {"rows": [{"ts": r["ts"], "pct": r["five_hour_pct"]} for r in rows],
+            "start": start, "end": end, "reset_known": bool(reset)}
+
+
 def burn(conn: sqlite3.Connection, window_min: int = 45) -> dict[str, Any]:
     """Burn rate of the 5-hour window from recent snapshots, and a projection.
 
@@ -499,6 +528,7 @@ def burn(conn: sqlite3.Connection, window_min: int = 45) -> dict[str, Any]:
     out["reset_at"] = latest.get("five_hour_reset")
     out["reset_text"] = when(latest["five_hour_reset"]) if latest.get("five_hour_reset") else "unknown"
     out["age_seconds"] = t - latest["ts"]
+    out["window"] = current_window(conn)
 
     rows = [r for r in quota_series(conn, t - window_min * 60, t) if r["five_hour_pct"] is not None]
     cut = 0

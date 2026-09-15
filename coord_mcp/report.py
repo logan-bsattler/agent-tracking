@@ -347,22 +347,116 @@ def hour_chart(s: dict[str, Any]) -> str:
     return f'<svg viewBox="0 0 {W} {h_}">{"".join(parts)}</svg>'
 
 
+def runway_chart(v: dict[str, Any]) -> str:
+    """The 5-hour window as a runway: where the limit is now, where the pace
+    lands it, and whether that happens before the window resets.
+
+    The whole question is whether the projected line crosses the ceiling
+    before the right-hand edge, so the chart is drawn to make exactly that
+    crossing visible.
+    """
+    b = v.get("burn") or {}
+    w = b.get("window") or {}
+    rows, start, end = w.get("rows") or [], w.get("start"), w.get("end")
+    if not rows or not start or not end:
+        return ""
+    t = v["as_of"]
+    b_slope, hit = b.get("pct_per_hour"), b.get("hit_at")
+    certain = bool(w.get("reset_known"))
+    # Without a reset time the window end is only an estimate, so don't let it
+    # set the right-hand edge: the crossing and "now" both have to stay visible.
+    domain_end = end if certain else max([end, t + 900] + ([hit + 600] if hit else []))
+    RW, RH, rl, rr, rt, rb = 1000, 170, 46, 78, 22, 28
+    plot_w, plot_h = RW - rl - rr, RH - rt - rb
+    span = max(domain_end - start, 1)
+    x = lambda ts: rl + plot_w * min(max(ts - start, 0), span) / span  # noqa: E731
+    y = lambda p: rt + plot_h * (1 - min(max(p, 0), 100) / 100)  # noqa: E731
+
+    parts = [f'<rect x="{rl}" y="{rt}" width="{plot_w}" height="{plot_h}" fill="var(--grid)" opacity="0.35" rx="3"/>']
+    for p, label in ((100, "limit"), (0, "")):
+        yy = y(p)
+        parts.append(f'<line class="{"axis" if p == 0 else "grid"}" x1="{rl}" x2="{rl + plot_w}" y1="{yy:.1f}" y2="{yy:.1f}"/>')
+        parts.append(f'<text x="{rl - 6}" y="{yy + 4:.1f}" text-anchor="end">{p}%</text>')
+        if label:
+            parts.append(f'<text x="{rl + plot_w + 6}" y="{yy + 4:.1f}">{label}</text>')
+
+    cur = rows[-1]["pct"]
+    pts = [(x(r["ts"]), y(r["pct"])) for r in rows]
+    area = (f'M{pts[0][0]:.1f},{y(0):.1f} L' + " L".join(f"{px:.1f},{py:.1f}" for px, py in pts)
+            + f' L{pts[-1][0]:.1f},{y(0):.1f} Z')
+    parts.append(f'<path d="{area}" fill="var(--s1)" opacity="0.14"/>')
+    if len(pts) > 1:
+        parts.append('<path d="M' + " L".join(f"{px:.1f},{py:.1f}" for px, py in pts)
+                     + '" fill="none" stroke="var(--s1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>')
+
+    hhmm = lambda ts: datetime.fromtimestamp(ts).strftime("%H:%M")  # noqa: E731
+    bad = bool(b.get("hits_limit_before_reset"))
+    # Three states, not two: a green verdict needs a known reset time, because
+    # without one the comparison it rests on cannot be made.
+    state = "unknown" if not b_slope else "over" if bad else "ok" if certain else "unclear"
+    colour = {"over": "var(--critical)", "ok": "var(--good)",
+              "unclear": "var(--warn)", "unknown": "var(--muted)"}[state]
+
+    end_pct = None
+    if b_slope:
+        if hit and (bad or not certain) and hit <= domain_end:
+            ex, ey, lbl = x(hit), y(100), f"100% at {hhmm(hit)}"
+        else:
+            end_pct = min(cur + b_slope * (domain_end - t) / 3600, 100)
+            ex, ey = x(domain_end), y(end_pct)
+            lbl = f"{end_pct:.0f}% by reset" if certain else f"{end_pct:.0f}% in {(domain_end - t) / 3600:.1f}h"
+        parts.append(f'<path d="M{pts[-1][0]:.1f},{pts[-1][1]:.1f} L{ex:.1f},{ey:.1f}" fill="none" '
+                     f'stroke="{colour}" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round"/>')
+        parts.append(f'<circle cx="{ex:.1f}" cy="{ey:.1f}" r="4.5" fill="{colour}" stroke="var(--surface)" stroke-width="2"/>')
+        anchor = "end" if ex > rl + plot_w * 0.72 else "start"
+        parts.append(f'<text x="{ex + (-8 if anchor == "end" else 8):.1f}" y="{ey - 9:.1f}" text-anchor="{anchor}" '
+                     f'style="fill:{colour};font-weight:600">{esc(lbl)}</text>')
+
+    if not certain:  # the estimated reset is a marker inside the plot, not the edge
+        exr = x(end)
+        parts.append(f'<line x1="{exr:.1f}" x2="{exr:.1f}" y1="{rt}" y2="{y(0):.1f}" stroke="var(--axis)" stroke-width="1"/>')
+        parts.append(f'<text x="{exr:.1f}" y="{RH - 8}" text-anchor="middle">~{hhmm(end)} reset?</text>')
+
+    nx = x(t)
+    parts.append(f'<line x1="{nx:.1f}" x2="{nx:.1f}" y1="{rt - 4}" y2="{y(0):.1f}" stroke="var(--muted)" stroke-width="1"/>')
+    parts.append(f'<circle cx="{nx:.1f}" cy="{y(cur):.1f}" r="4" fill="var(--s1)" stroke="var(--surface)" stroke-width="2"/>')
+    parts.append(f'<text x="{nx:.1f}" y="{rt - 8:.1f}" text-anchor="middle" style="fill:var(--ink2)">now · {cur:.0f}%</text>')
+    parts.append(f'<text x="{rl}" y="{RH - 8}" text-anchor="start">{hhmm(start)} window opened</text>')
+    if certain:
+        parts.append(f'<text x="{rl + plot_w}" y="{RH - 8}" text-anchor="end">{hhmm(end)} resets</text>')
+
+    dot = f'<span class="dot" style="background:{colour}"></span>'
+    if state == "over":
+        verdict = (f'{dot}<b>Will hit the limit</b> at {hhmm(hit)}, {(hit - t) // 60:.0f} minutes from now and '
+                   f'{(end - hit) // 60:.0f} minutes before the window resets, at the current {b_slope:.0f}% per hour.')
+    elif state == "ok":
+        verdict = (f'{dot}<b>On track.</b> At {b_slope:.0f}% per hour the window reaches about {end_pct:.0f}% by the '
+                   f'time it resets, in {(end - t) / 3600:.1f} hours.')
+    elif state == "unclear":
+        verdict = (f'{dot}<b>Pace is {b_slope:.0f}% per hour</b>, reaching 100% at {hhmm(hit)}. No reset time is known '
+                   f'yet, so whether that lands before the window resets cannot be said. The marked reset is a guess '
+                   f'at five hours from the first reading. Start a new session and the status line will report the '
+                   f'real one.')
+    else:
+        verdict = f'{dot}Not enough readings in this window yet to project a pace.'
+    return (f'<p class="sub" style="margin:0 0 8px">{verdict}</p>'
+            f'<svg viewBox="0 0 {RW} {RH}">{"".join(parts)}</svg>')
+
+
 def now_section(v: dict[str, Any]) -> str:
     """The current 5-hour window: burn per 15 minutes and who is spending it."""
     q, b = v["quota"], v["burn"]
     head = []
-    if b.get("pct_per_hour"):
-        line = f"Burning {b['pct_per_hour']:.1f}% of the 5-hour window per hour"
-        if b.get("hit_at_text"):
-            line += f", reaching 100% around {b['hit_at_text']}"
-            line += " which is <b>before the reset</b>." if b["hits_limit_before_reset"] else ", after the reset."
-        if b.get("headroom_usd") is not None:
-            line += f" Headroom about {money(b['headroom_usd'])} at the recent exchange rate."
-        head.append(f'<p class="sub" style="margin:0 0 10px">{line}</p>')
+    runway = runway_chart(v)
+    if runway:
+        head.append(runway)
     elif q and q.get("five_hour_pct") is not None:
         head.append('<p class="sub" style="margin:0 0 10px">Not enough recent snapshots to project a burn rate.</p>')
-    head.append(f'<p class="sub" style="margin:0 0 10px">Spend last 15 min {money(b["spend_last_15m"])} · '
-                f'last hour {money(b["spend_last_hour"])} · this window {money(v["total"])}</p>')
+    extra = ""
+    if b.get("headroom_usd") is not None:
+        extra = f' · headroom about {money(b["headroom_usd"])} at the recent rate'
+    head.append(f'<p class="sub" style="margin:14px 0 10px">Spend last 15 min {money(b["spend_last_15m"])} · '
+                f'last hour {money(b["spend_last_hour"])} · this window {money(v["total"])}{extra}</p>')
 
     buckets = v["buckets"]
     h_ = 140
