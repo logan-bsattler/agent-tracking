@@ -50,6 +50,31 @@ def test_setup_refuses_to_replace_foreign_statusline_unless_forced(tmp_path):
     assert "coord_mcp" in json.loads(p.read_text())["statusLine"]["command"]
 
 
+def test_hook_wired_detection(tmp_path, monkeypatch):
+    p = tmp_path / "settings.json"
+    assert usage.hook_wired(p) is False          # missing file
+    p.write_text("{}")
+    assert usage.hook_wired(p) is False
+    p.write_text(json.dumps({"statusLine": {"type": "command", "command": "something-else"}}))
+    assert usage.hook_wired(p) is False
+    usage.setup(p)            # refuses to replace a foreign statusLine
+    assert usage.hook_wired(p) is False
+    usage.setup(p, force=True)
+    assert usage.hook_wired(p) is True
+
+
+def test_report_distinguishes_pending_from_unwired(tmp_path, monkeypatch):
+    from coord_mcp import report
+    from coord_mcp.db import connect
+    conn = connect(tmp_path / "t.db")
+    monkeypatch.setattr(usage, "hook_wired", lambda *a: False)
+    assert "usage setup" in report.write(conn, tmp_path / "a.html").read_text(encoding="utf-8")
+    monkeypatch.setattr(usage, "hook_wired", lambda *a: True)
+    html = report.write(conn, tmp_path / "b.html").read_text(encoding="utf-8")
+    assert "hook is wired" in html and "not reported yet" in html
+    conn.close()
+
+
 def test_setup_upgrades_our_own_older_command(tmp_path):
     p = tmp_path / "settings.json"
     p.write_text(json.dumps({"statusLine": {"type": "command", "command": "python -m coord_mcp.usage statusline"}}))

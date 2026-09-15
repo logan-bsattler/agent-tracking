@@ -498,6 +498,16 @@ def _py() -> str:
     return f'"{exe}"' if " " in exe else exe
 
 
+def hook_wired(settings_path: Path = SETTINGS_PATH) -> bool:
+    """True if our statusLine hook is in settings.json. Distinguishes 'not set
+    up' from 'set up, but no session has sent a prompt since'."""
+    try:
+        s = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+    except (OSError, json.JSONDecodeError):
+        return False
+    return "coord_mcp.usage statusline" in json.dumps(s.get("statusLine") or {})
+
+
 def guard_hooks() -> dict[str, list[dict[str, Any]]]:
     py = _py()
     return {

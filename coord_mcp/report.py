@@ -129,8 +129,10 @@ def kpis(s: dict[str, Any]) -> str:
         out.append(_tile("Weekly limit used", f"{qv['seven_day_pct']:.0f}%",
                          f"resets {when(qv['seven_day_reset'])}" if qv["seven_day_reset"] else f"{age}m ago",
                          (qv["seven_day_pct"], band(qv["seven_day_pct"], 85, 95))))
+    elif usage.hook_wired():
+        out.append(_tile("Limits", "pending", "hook is wired; a session started since then will report on its next prompt"))
     else:
-        out.append(_tile("Limits", "n/a", "statusLine hook not wired yet"))
+        out.append(_tile("Limits", "n/a", "run: python -m coord_mcp.usage setup"))
     prev = s["prev_cost"]
     delta = f"vs {money(prev)} previous {s['days']}d" if prev else "no previous period"
     out.append(_tile(f"Spend, last {s['days']} days", money(t["cost"]), delta))
@@ -164,6 +166,10 @@ def _yaxis(vmax: float, fmt, steps: int = 4) -> tuple[str, float]:
 def quota_chart(s: dict[str, Any]) -> str:
     snaps = s["snapshots"]
     if len(snaps) < 2:
+        if usage.hook_wired():
+            return ('<div class="empty">The statusLine hook is wired but has not reported yet. Sessions started '
+                    'before it was wired do not run it; the chart fills in from the next new session\'s first '
+                    'prompt onward.</div>')
         return ('<div class="empty">No limit history yet. Run '
                 '<code>python -m coord_mcp.usage setup</code> once; every prompt then records the 5-hour and '
                 'weekly percentages here.</div>')
