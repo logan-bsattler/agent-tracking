@@ -134,6 +134,55 @@ limits-over-time chart. The hook never raises and prints nothing on a bad
 payload. If `rate_limits` is absent from your Claude Code version, the tile
 says so and everything else still works.
 
+### Right now: the live window, alerts, and the guard
+
+```bash
+python -m coord_mcp.usage live          # burn rate, projection, who is spending
+python -m coord_mcp.usage serve --open  # live dashboard, refreshes every 60s
+```
+
+The status line itself shows the burn rate (`12%/h`) and, when the pace would
+hit 100% before the window resets, `!! 100% by 14:20`.
+
+**Alerts** are desktop notifications (Windows toast, macOS notification
+centre, notify-send) fired from the statusLine hook when the 5-hour or weekly
+limit crosses into the warn or hard band, and once when the projection first
+says you will hit the wall before the reset. One alert per band per reset
+window, so a long session doesn't nag.
+
+**The guard** is the part that acts. `setup` wires two hooks into
+`~/.claude/settings.json`, `PreToolUse` and `UserPromptSubmit`, which run in
+every session on the machine: the lead, teammates, subagents, anything. On
+each tool call and each prompt they read the session's own transcript tail
+(the last request's token count is the session's context size) and the latest
+limit snapshot, then:
+
+| Condition | Default | Action |
+| --- | --- | --- |
+| context ≥ `COORD_CTX_WARN` | 150k tokens | inject a warning: keep the turn short, /compact soon |
+| context ≥ `COORD_CTX_HARD` | 300k tokens | **block** the tool call or prompt until /compact, /clear, or hand-off |
+| 5h ≥ `COORD_WARN_5H` / `COORD_HARD_5H` | 75% / 92% | warn / **block** |
+| 7d ≥ `COORD_WARN_7D` / `COORD_HARD_7D` | 85% / 97% | warn / **block** |
+| projected 100% before reset | | warn, with the time it hits |
+
+Why context size: every tool call re-reads the whole context, so cost per
+turn is context times tool calls. A 300k-token session on Opus pays about
+15 cents of cache reads per tool call; one busy turn is $6. That is the
+runaway case, and it is invisible in the percentage until it has already
+happened. The block message tells the model exactly why and what to do, so a
+teammate that hits it hands back cleanly instead of failing.
+
+A block is exit code 2 from the hook: for a tool call the reason goes to the
+model and the turn ends; for a prompt the reason goes to you and nothing is
+spent. To get past it deliberately:
+
+```bash
+python -m coord_mcp.guard pause 30      # minutes; `resume` to end early
+```
+
+or `COORD_GUARD=off` in the environment. `python -m coord_mcp.guard check
+<transcript.jsonl>` shows what the guard would decide for a session.
+
 ### Installing on another machine or account
 
 Nothing here is tied to this machine. On the second machine:

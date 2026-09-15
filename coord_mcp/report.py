@@ -40,8 +40,7 @@ def tokens(n: float) -> str:
     return f"{int(n)}"
 
 
-def when(ts: int | None) -> str:
-    return datetime.fromtimestamp(ts).strftime("%a %d %b %H:%M") if ts else ""
+when = usage.when
 
 
 def esc(s: Any) -> str:
@@ -268,6 +267,61 @@ def hour_chart(s: dict[str, Any]) -> str:
     return f'<svg viewBox="0 0 {W} {h_}">{"".join(parts)}</svg>'
 
 
+def now_section(v: dict[str, Any]) -> str:
+    """The current 5-hour window: burn per 15 minutes and who is spending it."""
+    q, b = v["quota"], v["burn"]
+    head = []
+    if b.get("pct_per_hour"):
+        line = f"Burning {b['pct_per_hour']:.1f}% of the 5-hour window per hour"
+        if b.get("hit_at_text"):
+            line += f", reaching 100% around {b['hit_at_text']}"
+            line += " which is <b>before the reset</b>." if b["hits_limit_before_reset"] else ", after the reset."
+        if b.get("headroom_usd") is not None:
+            line += f" Headroom about {money(b['headroom_usd'])} at the recent exchange rate."
+        head.append(f'<p class="sub" style="margin:0 0 10px">{line}</p>')
+    elif q and q.get("five_hour_pct") is not None:
+        head.append('<p class="sub" style="margin:0 0 10px">Not enough recent snapshots to project a burn rate.</p>')
+    head.append(f'<p class="sub" style="margin:0 0 10px">Spend last 15 min {money(b["spend_last_15m"])} · '
+                f'last hour {money(b["spend_last_hour"])} · this window {money(v["total"])}</p>')
+
+    buckets = v["buckets"]
+    h_ = 140
+    ph = h_ - PT - PB
+    vmax = max(max(buckets), 0.01) * 1.1
+    band_w = (W - PL - PR) / len(buckets)
+    bw = min(24, band_w * 0.6)
+    parts = []
+    for i in range(3):
+        y = PT + ph * (1 - i / 2)
+        parts.append(f'<line class="{"axis" if i == 0 else "grid"}" x1="{PL}" x2="{W - PR}" y1="{y:.1f}" y2="{y:.1f}"/>')
+        parts.append(f'<text x="{PL - 6}" y="{y + 4:.1f}" text-anchor="end">{money(vmax * i / 2)}</text>')
+    for i, c in enumerate(buckets):
+        x0 = PL + band_w * (i + 0.5) - bw / 2
+        hgt = ph * c / vmax
+        t0 = v["window_start"] + i * 900
+        parts.append(f'<path d="{_top_rounded(x0, PT + ph - hgt, bw, hgt)}" fill="var(--s1)"/>')
+        parts.append(f'<rect class="hit" x="{PL + band_w * i:.1f}" y="{PT}" width="{band_w:.1f}" height="{ph}" '
+                     f'data-tip="{datetime.fromtimestamp(t0).strftime("%H:%M")} to {datetime.fromtimestamp(t0 + 900).strftime("%H:%M")}  {money(c)}"/>')
+        if i % 4 == 0:
+            parts.append(f'<text x="{PL + band_w * (i + 0.5):.1f}" y="{h_ - 8}" text-anchor="middle">{datetime.fromtimestamp(t0).strftime("%H:%M")}</text>')
+    chart = f'<svg viewBox="0 0 {W} {h_}">{"".join(parts)}</svg>'
+
+    rows = []
+    for s in v["sessions"][:12]:
+        title = s["title"] or s["session_id"][:8]
+        live = '<span class="dot" style="background:var(--good)"></span>' if s["active"] else ""
+        ctx = s["last_ctx"]
+        ctx_style = ' style="color:var(--critical)"' if ctx >= 300000 else ' style="color:var(--serious)"' if ctx >= 150000 else ""
+        rows.append(f'<tr><td>{live}{esc(title)[:60]}<br><span class="muted">{esc(s["project"])} · {esc(s["session_id"][:8])}</span></td>'
+                    f'<td class="n">{money(s["cost"])}</td><td class="n">{money(s["cost_15m"])}</td>'
+                    f'<td class="n">{s["requests"]:,}</td><td class="n"{ctx_style}>{tokens(ctx)}</td>'
+                    f'<td class="n">{tokens(s["peak_ctx"])}</td><td class="n">{when(s["last_ts"])}</td></tr>')
+    table = ('<div class="wrap"><table><tr><th>Session</th><th class="n">This window</th><th class="n">Last 15m</th>'
+             '<th class="n">Requests</th><th class="n">Context now</th><th class="n">Peak</th><th class="n">Last request</th></tr>'
+             + "".join(rows) + "</table></div>") if rows else '<div class="empty">No requests in this window.</div>'
+    return "".join(head) + chart + '<p class="sub" style="margin:12px 0 6px">Spend per 15 minutes across the window. Context in red is past the guard\'s hard limit; orange is past its warning.</p>' + table
+
+
 # ------------------------------------------------------------------ tables
 
 
@@ -316,14 +370,17 @@ def session_table(s: dict[str, Any]) -> str:
 # ------------------------------------------------------------------ page
 
 
-def render(s: dict[str, Any]) -> str:
+def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | None = None) -> str:
     period = f"{datetime.fromtimestamp(s['start']).strftime('%d %b')} to {datetime.fromtimestamp(s['end']).strftime('%d %b %Y')}"
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+    meta_refresh = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    now_card = f'<div class="card"><h2>Right now: the current 5-hour window</h2>{now_section(v)}</div>' if v else ""
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude usage</title>
 <style>{CSS}</style></head><body><main>
 <h1>Claude usage</h1>
-<p class="sub">{esc(period)} · generated {when(s['generated'])} · spend is API-equivalent, the same figure as <code>/cost</code></p>
+<p class="sub">{esc(period)} · generated {when(s['generated'])}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · spend is API-equivalent, the same figure as <code>/cost</code></p>
 {kpis(s)}
+{now_card}
 <div class="card"><h2>Limits over time</h2>{quota_chart(s)}</div>
 <div class="card"><h2>Spend per day, by model</h2>{daily_chart(s)}</div>
 <div class="card"><h2>Spend by hour of day</h2>{hour_chart(s)}</div>
@@ -336,5 +393,40 @@ def render(s: dict[str, Any]) -> str:
 
 def write(conn: sqlite3.Connection, out: Path, days: int = 7) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render(usage.summary(conn, days)), encoding="utf-8")
+    out.write_text(render(usage.summary(conn, days), usage.live(conn)), encoding="utf-8")
     return out
+
+
+def serve(conn: sqlite3.Connection, port: int = 8765, days: int = 7, open_browser: bool = False) -> int:
+    """Localhost server that re-ingests and re-renders on every request.
+
+    The page carries a 60-second meta refresh, so a browser tab left open is
+    a live dashboard. Bound to 127.0.0.1 only.
+    """
+    import webbrowser
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            usage.ingest(conn)
+            body = render(usage.summary(conn, days), usage.live(conn), refresh=60).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", port), H)
+    url = f"http://127.0.0.1:{port}/"
+    print(f"serving {url}  (Ctrl+C to stop)")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0

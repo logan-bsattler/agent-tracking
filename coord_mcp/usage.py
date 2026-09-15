@@ -75,6 +75,10 @@ def _project_name(cwd: str | None, dirname: str) -> str:
     return dirname
 
 
+def when(ts: int | None) -> str:
+    return datetime.fromtimestamp(ts).strftime("%a %d %b %H:%M") if ts else ""
+
+
 def _iso_to_ts(s: str | None) -> int:
     if not s:
         return now()
@@ -303,6 +307,11 @@ def statusline_text(snap: dict[str, Any], payload: dict[str, Any]) -> str:
         parts.append(f"7d {snap['seven_day_pct']:.0f}%" + _until(snap.get("seven_day_reset")))
     if snap.get("five_hour_pct") is None and snap.get("seven_day_pct") is None:
         parts.append("limits: n/a")
+    b = snap.get("burn") or {}
+    if b.get("hits_limit_before_reset"):
+        parts.append(f"!! 100% by {datetime.fromtimestamp(b['hit_at']).strftime('%H:%M')}")
+    elif b.get("pct_per_hour"):
+        parts.append(f"{b['pct_per_hour']:.0f}%/h")
     return " | ".join(parts)
 
 
@@ -325,6 +334,79 @@ def _until(reset: int | None) -> str:
 def latest_quota(conn: sqlite3.Connection) -> dict[str, Any] | None:
     r = conn.execute("SELECT * FROM quota_snapshots ORDER BY ts DESC LIMIT 1").fetchone()
     return dict(r) if r else None
+
+
+def burn(conn: sqlite3.Connection, window_min: int = 45) -> dict[str, Any]:
+    """Burn rate of the 5-hour window from recent snapshots, and a projection.
+
+    Slope is taken over the last `window_min` minutes within the same reset
+    window (a reset would show as a drop; we don't fit across it). Also
+    reports spend per hour from the requests table, which exists even when
+    no snapshots do.
+    """
+    t = now()
+    out: dict[str, Any] = {"pct_per_hour": None, "hits_limit_before_reset": False}
+    latest = latest_quota(conn)
+    spend_60 = conn.execute("SELECT COALESCE(SUM(cost_usd),0) c FROM requests WHERE ts >= ?", (t - 3600,)).fetchone()["c"]
+    spend_15 = conn.execute("SELECT COALESCE(SUM(cost_usd),0) c FROM requests WHERE ts >= ?", (t - 900,)).fetchone()["c"]
+    out["spend_last_hour"] = spend_60
+    out["spend_last_15m"] = spend_15
+    if not latest or latest["five_hour_pct"] is None:
+        return out
+    rows = conn.execute(
+        """SELECT ts, five_hour_pct FROM quota_snapshots
+           WHERE ts >= ? AND five_hour_pct IS NOT NULL AND five_hour_reset IS ? ORDER BY ts""",
+        (t - window_min * 60, latest["five_hour_reset"]),
+    ).fetchall()
+    out["current_pct"] = latest["five_hour_pct"]
+    out["reset_at"] = latest["five_hour_reset"]
+    out["reset_text"] = when(latest["five_hour_reset"]) if latest["five_hour_reset"] else "unknown"
+    if len(rows) >= 2 and rows[-1]["ts"] > rows[0]["ts"]:
+        dp = rows[-1]["five_hour_pct"] - rows[0]["five_hour_pct"]
+        dt_h = (rows[-1]["ts"] - rows[0]["ts"]) / 3600
+        if dp > 0 and dt_h >= 5 / 60:
+            slope = dp / dt_h
+            out["pct_per_hour"] = slope
+            hours_left = (100 - latest["five_hour_pct"]) / slope
+            hit_at = latest["ts"] + int(hours_left * 3600)
+            out["hit_at"] = hit_at
+            out["hit_at_text"] = when(hit_at)
+            if latest["five_hour_reset"] and hit_at < latest["five_hour_reset"]:
+                out["hits_limit_before_reset"] = True
+            # Empirical exchange rate: dollars of API-equivalent spend per percent of the window.
+            spend = conn.execute("SELECT COALESCE(SUM(cost_usd),0) c FROM requests WHERE ts BETWEEN ? AND ?",
+                                 (rows[0]["ts"], rows[-1]["ts"])).fetchone()["c"]
+            if spend > 0:
+                out["usd_per_pct"] = spend / dp
+                out["headroom_usd"] = (100 - latest["five_hour_pct"]) * out["usd_per_pct"]
+    return out
+
+
+def live(conn: sqlite3.Connection) -> dict[str, Any]:
+    """The current 5-hour window: who is spending it, right now."""
+    t = now()
+    q = latest_quota(conn)
+    since = (q["five_hour_reset"] - 5 * 3600) if q and q.get("five_hour_reset") else t - 5 * 3600
+    since = max(since, t - 5 * 3600)
+    sessions = [dict(r) for r in conn.execute(
+        """SELECT r.session_id, s.title, s.project, SUM(r.cost_usd) cost, COUNT(*) requests,
+                  MAX(r.ts) last_ts, MAX(r.input_tokens + r.cache_read + r.cache_write_5m + r.cache_write_1h) peak_ctx,
+                  SUM(CASE WHEN r.ts >= ? THEN r.cost_usd ELSE 0 END) cost_15m,
+                  GROUP_CONCAT(DISTINCT r.model) models
+           FROM requests r LEFT JOIN cc_sessions s ON s.session_id = r.session_id
+           WHERE r.ts >= ? GROUP BY r.session_id ORDER BY cost DESC""", (t - 900, since))]
+    for s in sessions:
+        last = conn.execute(
+            "SELECT input_tokens + cache_read + cache_write_5m + cache_write_1h ctx FROM requests "
+            "WHERE session_id=? ORDER BY ts DESC LIMIT 1", (s["session_id"],)).fetchone()
+        s["last_ctx"] = last["ctx"] if last else 0
+        s["active"] = (t - s["last_ts"]) < 600
+    buckets = [0.0] * 20  # 15-minute buckets over the window
+    for r in conn.execute("SELECT ts, cost_usd FROM requests WHERE ts >= ?", (since,)):
+        i = min(19, (r["ts"] - since) // 900)
+        buckets[i] += r["cost_usd"]
+    return {"as_of": t, "window_start": since, "quota": q, "burn": burn(conn), "sessions": sessions,
+            "buckets": buckets, "total": sum(s["cost"] for s in sessions)}
 
 
 def _range(days: int) -> tuple[int, int]:
@@ -411,30 +493,96 @@ def statusline_command() -> str:
     return f'"{exe}" -m coord_mcp.usage statusline' if " " in exe else f"{exe} -m coord_mcp.usage statusline"
 
 
-def setup(settings_path: Path = SETTINGS_PATH, force: bool = False) -> dict[str, Any]:
-    """Merge the statusLine hook into Claude Code's settings.json. Idempotent.
+def _py() -> str:
+    exe = sys.executable
+    return f'"{exe}"' if " " in exe else exe
 
-    Backs up the file first. Refuses to replace a statusLine that isn't ours
-    unless force=True, and says so.
+
+def guard_hooks() -> dict[str, list[dict[str, Any]]]:
+    py = _py()
+    return {
+        "PreToolUse": [{"hooks": [{"type": "command", "command": f"{py} -m coord_mcp.guard pretooluse", "timeout": 10}]}],
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{py} -m coord_mcp.guard userpromptsubmit", "timeout": 10}]}],
+    }
+
+
+def _merge_hooks(existing: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+    """Add our hook entries, replacing any earlier coord_mcp ones, keeping everything else."""
+    hooks = dict(existing or {})
+    changed = False
+    for event, ours in guard_hooks().items():
+        kept = [g for g in hooks.get(event, []) if "coord_mcp.guard" not in json.dumps(g)]
+        new = kept + ours
+        if new != hooks.get(event):
+            changed = True
+        hooks[event] = new
+    return hooks, changed
+
+
+def setup(settings_path: Path = SETTINGS_PATH, force: bool = False, guard: bool = True) -> dict[str, Any]:
+    """Merge the statusLine hook (and the guard hooks) into Claude Code's
+    settings.json. Idempotent. Backs up the file first. Refuses to replace a
+    statusLine that isn't ours unless force=True, and says so.
     """
     settings: dict[str, Any] = {}
     if settings_path.exists():
         settings = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
     current = settings.get("statusLine")
     want = {"type": "command", "command": statusline_command()}
-    if current == want:
-        return {"changed": False, "settings": str(settings_path), "command": want["command"]}
-    if current and "coord_mcp" not in json.dumps(current) and not force:
-        return {"changed": False, "settings": str(settings_path), "command": want["command"],
-                "kept_existing": current,
-                "note": "an unrelated statusLine is configured; rerun with --force to replace it"}
+    out: dict[str, Any] = {"changed": False, "settings": str(settings_path), "command": want["command"]}
+    changed = False
+    if current != want:
+        if current and "coord_mcp" not in json.dumps(current) and not force:
+            out["kept_existing"] = current
+            out["note"] = "an unrelated statusLine is configured; rerun with --force to replace it"
+        else:
+            settings["statusLine"] = want
+            changed = True
+    if guard:
+        hooks, hchanged = _merge_hooks(settings.get("hooks"))
+        if hchanged:
+            settings["hooks"] = hooks
+            changed = True
+        out["guard"] = "wired"
+    if not changed:
+        return out
     if settings_path.exists():
         backup = settings_path.with_suffix(f".json.bak-{int(time.time())}")
         backup.write_text(settings_path.read_text(encoding="utf-8"), encoding="utf-8")
-    settings["statusLine"] = want
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-    return {"changed": True, "settings": str(settings_path), "command": want["command"]}
+    out["changed"] = True
+    return out
+
+
+def live_text(v: dict[str, Any]) -> str:
+    q, b = v["quota"], v["burn"]
+    lines = []
+    if q and q.get("five_hour_pct") is not None:
+        age = (v["as_of"] - q["ts"]) // 60
+        lines.append(f"5h {q['five_hour_pct']:.0f}%  7d {q['seven_day_pct']:.0f}%  (as of {age}m ago, "
+                     f"5h resets {when(q.get('five_hour_reset')) or 'unknown'})")
+    else:
+        lines.append("limits: no snapshot yet (statusLine hook records one on each prompt)")
+    if b.get("pct_per_hour"):
+        line = f"burn {b['pct_per_hour']:.1f}%/h"
+        if b.get("hit_at_text"):
+            line += f", 100% around {b['hit_at_text']}"
+            line += "  << BEFORE RESET" if b["hits_limit_before_reset"] else " (after reset, fine)"
+        if b.get("headroom_usd") is not None:
+            line += f"; headroom about ${b['headroom_usd']:.0f} at recent rate"
+        lines.append(line)
+    lines.append(f"spend  last 15m ${b['spend_last_15m']:.2f}   last hour ${b['spend_last_hour']:.2f}   "
+                 f"this window ${v['total']:.2f}")
+    if v["sessions"]:
+        lines.append("sessions in this window:")
+        for s in v["sessions"][:10]:
+            flag = "*" if s["active"] else " "
+            title = (s["title"] or s["session_id"][:8])[:44]
+            lines.append(f" {flag} ${s['cost']:>7.2f}  {s['requests']:>4} req  ctx {s['last_ctx'] / 1000:>4.0f}k  "
+                         f"{title:<44} {s['project'] or ''}")
+        lines.append(" * = active in the last 10 minutes; ctx = tokens sent per request right now")
+    return "\n".join(lines)
 
 
 # -------------------------------------------------------------------- cli
@@ -462,15 +610,21 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-ingest", action="store_true")
     sub.add_parser("status", help="current limits and spend this week, as text")
     sub.add_parser("statusline", help="stdin hook for Claude Code statusLine")
-    st = sub.add_parser("setup", help="wire the statusLine hook into ~/.claude/settings.json")
+    st = sub.add_parser("setup", help="wire the statusLine and guard hooks into ~/.claude/settings.json")
     st.add_argument("--force", action="store_true", help="replace an unrelated statusLine")
+    st.add_argument("--no-guard", action="store_true", help="statusLine only, no PreToolUse/UserPromptSubmit hooks")
+    sub.add_parser("live", help="the current 5-hour window: burn rate, projection, who is spending")
+    sv = sub.add_parser("serve", help="serve the report on localhost, regenerated on every load")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--days", type=int, default=7)
+    sv.add_argument("--open", action="store_true")
     a = p.parse_args(argv)
 
     if a.cmd == "setup":
-        out = setup(force=a.force)
+        out = setup(force=a.force, guard=not a.no_guard)
         print(json.dumps(out, indent=2))
         if out["changed"]:
-            print("done: restart any open Claude Code session to see the status line")
+            print("done: restart any open Claude Code session to pick it up")
         return 0
 
     if a.cmd == "statusline":
@@ -479,10 +633,24 @@ def main(argv: list[str] | None = None) -> int:
             payload = json.loads(sys.stdin.read() or "{}")
             conn = connect()
             snap = record_statusline(conn, payload)
+            snap["burn"] = burn(conn)
+            from . import alerts
+            alerts.check_and_alert(conn, snap, snap["burn"])
             print(statusline_text(snap, payload))
         except Exception:
             print("")
         return 0
+
+    if a.cmd == "live":
+        conn = connect()
+        ingest(conn)
+        print(live_text(live(conn)))
+        return 0
+
+    if a.cmd == "serve":
+        from . import report
+        conn = connect()
+        return report.serve(conn, a.port, a.days, a.open)
 
     conn = connect()
     if a.cmd == "ingest":

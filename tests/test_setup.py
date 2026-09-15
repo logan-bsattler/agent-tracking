@@ -19,11 +19,13 @@ def test_setup_creates_settings_when_missing(tmp_path):
 
 def test_setup_preserves_other_keys_and_backs_up(tmp_path):
     p = tmp_path / "settings.json"
-    p.write_text(json.dumps({"theme": "auto", "hooks": {"x": 1}}))
+    p.write_text(json.dumps({"theme": "auto", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]}}))
     out = usage.setup(p)
     assert out["changed"] is True
     s = json.loads(p.read_text())
-    assert s["theme"] == "auto" and s["hooks"] == {"x": 1} and "statusLine" in s
+    assert s["theme"] == "auto" and "statusLine" in s
+    assert s["hooks"]["Stop"][0]["hooks"][0]["command"] == "x"  # untouched
+    assert "PreToolUse" in s["hooks"]
     assert list(tmp_path.glob("settings.json.bak-*"))
 
 
@@ -40,10 +42,10 @@ def test_setup_is_idempotent(tmp_path):
 def test_setup_refuses_to_replace_foreign_statusline_unless_forced(tmp_path):
     p = tmp_path / "settings.json"
     p.write_text(json.dumps({"statusLine": {"type": "command", "command": "my-other-thing"}}))
-    out = usage.setup(p)
+    out = usage.setup(p, guard=False)
     assert out["changed"] is False and "kept_existing" in out
     assert json.loads(p.read_text())["statusLine"]["command"] == "my-other-thing"
-    out = usage.setup(p, force=True)
+    out = usage.setup(p, force=True, guard=False)
     assert out["changed"] is True
     assert "coord_mcp" in json.loads(p.read_text())["statusLine"]["command"]
 
