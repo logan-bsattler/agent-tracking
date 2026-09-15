@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "coord": {
+      "command": "python",
+      "args": ["-m", "coord_mcp"],
+      "env": {
+        "COORD_ROLE": "team",
+        "COORD_DB": "C:\\Users\\<you>\\.coord\\coord.db"
+      }
+    }
+  }
+}
