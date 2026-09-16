@@ -147,11 +147,22 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
 
     fh = q["five_hour_pct"] if q else None
     sd = q["seven_day_pct"] if q else None
+    # Age each percentage on its own reading, not on the row it arrived on. A
+    # partial sample makes latest_quota back-fill the missing field from up to
+    # a day earlier, and the row is stamped with the newest reading of either.
+    fh_age = _reading_age(q, "five_hour_pct")
+    sd_age = _reading_age(q, "seven_day_pct")
 
     # A 5-hour percentage whose window has already reset describes a window that
     # no longer exists. Enforcing on it blocks a session that in fact has a full
     # window in front of it, so drop the reading rather than trust it.
     if fh is not None and q and q.get("five_hour_reset") and q["five_hour_reset"] <= now():
+        fh = None
+    # Same conclusion reached without a reset time: a reading older than the
+    # five-hour window it describes is necessarily from a window that has since
+    # ended. Desktop samples carry no resets, so this is the only check that
+    # catches them.
+    if fh is not None and fh_age is not None and fh_age >= 5 * 3600:
         fh = None
     reasons: list[str] = []
     level = "ok"
@@ -189,8 +200,10 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
         elif sd >= WARN_7D:
             bump("warn", f"Weekly limit at {sd:.0f}%, resets {_reset_text(q, 'seven_day_reset')}.")
 
-    if age is not None and age > QUOTA_STALE_S and (fh is not None or sd is not None):
-        bump("warn", f"These limit percentages are {age // 60} minutes old and nothing has refreshed them "
+    in_play = [a for a, v in ((fh_age, fh), (sd_age, sd)) if v is not None and a is not None]
+    oldest = max(in_play) if in_play else None
+    if oldest is not None and oldest > QUOTA_STALE_S:
+        bump("warn", f"These limit percentages are {oldest // 60} minutes old and nothing has refreshed them "
                      f"since. Within a window usage only rises, so treat them as a floor, not the number.")
 
     b = burn(conn)
@@ -203,10 +216,22 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
 
 
 def _quota_age(q: dict[str, Any] | None) -> int | None:
-    """Seconds since this reading was taken, or None if there is no reading."""
+    """Seconds since the newest reading of anything, or None if there is none.
+
+    This dates the row, so it answers 'is it worth going back to disk'. It does
+    not date any one percentage on it: use _reading_age for that.
+    """
     if not q or not q.get("ts"):
         return None
     return max(0, now() - int(q["ts"]))
+
+
+def _reading_age(q: dict[str, Any] | None, key: str) -> int | None:
+    """Seconds since this particular percentage was read, or None if absent."""
+    if not q or q.get(key) is None:
+        return None
+    ts = q.get(f"{key}_ts") or q.get("ts")
+    return max(0, now() - int(ts)) if ts else None
 
 
 def _reset_text(q: dict[str, Any] | None, key: str) -> str:

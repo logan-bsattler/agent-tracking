@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -280,3 +281,29 @@ def test_team_role_has_all_tools():
     names = _surface("team")
     assert len(names) == 11
     assert {"coord_create_task", "coord_complete_task", "coord_get_decisions"} <= set(names)
+
+
+# ------------------------------------------------ referential integrity
+
+
+def test_foreign_keys_are_enforced(conn):
+    """The REFERENCES clauses in the DDL are inert unless connect() turns
+    enforcement on, which SQLite does not do by default."""
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create_task(conn, "review", "t", {}, parent_id="nope")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.record_decision(conn, "s", task_id="nope")
+    real = store.create_task(conn, "review", "t", {})["task_id"]
+    child = store.create_task(conn, "review", "c", {}, parent_id=real)["task_id"]
+    store.record_decision(conn, "s", task_id=child)
+
+
+def test_unknown_result_field_is_reported_not_dropped(conn):
+    tid = store.create_task(conn, "investigation", "look", {})["task_id"]
+    store.complete_task(conn, tid, {"done": True, "verdict": "v", "confidence": "high",
+                                    "evidence": ["e"]})
+    out = store.get_task_result(conn, tid, ["verdict", "summary"])
+    assert out["result"] == {"verdict": "v"}
+    assert out["unknown_fields"] == ["summary"]
+    assert "confidence" in out["available_fields"]

@@ -11,13 +11,17 @@ import sqlite3
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+# Bump this whenever DDL or _migrate changes. connect() skips both entirely
+# when the file already reports this version, so a new table or column that
+# ships without a bump will not be created.
+SCHEMA_VERSION = 2
 
 DEFAULT_DB_PATH = Path(os.environ.get("COORD_DB", Path.home() / ".coord" / "coord.db")).expanduser()
 
+# journal_mode is a property of the file, so it is set once at init rather than
+# on every connection. busy_timeout is per-connection and is set in connect().
 DDL = """
 PRAGMA journal_mode=WAL;
-PRAGMA busy_timeout=5000;
 
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
@@ -148,16 +152,40 @@ def now() -> int:
     return int(time.time())
 
 
+def _schema_version(conn: sqlite3.Connection) -> int:
+    """The version this file was last initialised at, or 0 if it is new.
+
+    Reading it is one indexed lookup; running the DDL and _migrate is a write
+    transaction plus a full scan of quota_snapshots. The guard hooks open this
+    database on every tool call in every session, so the difference is the
+    difference between a few milliseconds and a hundred.
+    """
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    except sqlite3.OperationalError:
+        return 0  # no meta table: the file is new
+    try:
+        return int(row["value"]) if row else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Open (and initialise, if needed) the board database."""
     path = Path(db_path) if db_path else DEFAULT_DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), isolation_level=None, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.executescript(DDL)
-    _migrate(conn)
-    conn.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
-        (str(SCHEMA_VERSION),),
-    )
+    # Per-connection, so both of these are set every time.
+    conn.execute("PRAGMA busy_timeout=5000")
+    # The REFERENCES clauses in the DDL are inert without this; SQLite defaults
+    # foreign key enforcement to off.
+    conn.execute("PRAGMA foreign_keys=ON")
+    if _schema_version(conn) != SCHEMA_VERSION:
+        conn.executescript(DDL)
+        _migrate(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
     return conn

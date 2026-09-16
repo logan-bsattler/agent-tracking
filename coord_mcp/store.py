@@ -74,10 +74,16 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
     return {"ok": True, "task_id": task_id, "state": state}
 
 
-def _project(result: dict[str, Any], fields: list[str] | None) -> dict[str, Any]:
+def _project(result: dict[str, Any], fields: list[str] | None) -> tuple[dict[str, Any], list[str]]:
+    """The named fields, plus any names that aren't in the result.
+
+    Silently dropping a misspelled field name reads as 'the teammate left it
+    empty', which is the wrong conclusion and an expensive one to chase.
+    """
     if not fields:
-        return result
-    return {k: result[k] for k in fields if k in result}
+        return result, []
+    return ({k: result[k] for k in fields if k in result},
+            [k for k in fields if k not in result])
 
 
 def get_task_result(
@@ -88,7 +94,11 @@ def get_task_result(
         raise KeyError(f"unknown task '{task_id}'")
     out: dict[str, Any] = {"task_id": row["id"], "kind": row["kind"], "state": row["state"]}
     if row["result"]:
-        out["result"] = _project(json.loads(row["result"]), fields)
+        result = json.loads(row["result"])
+        out["result"], unknown = _project(result, fields)
+        if unknown:
+            out["unknown_fields"] = unknown
+            out["available_fields"] = sorted(result)
     else:
         out["result"] = None
         out["note"] = "still open; no result yet"

@@ -191,7 +191,10 @@ def ingest(conn: sqlite3.Connection) -> dict[str, int]:
     files = requests = 0
     for path, dirname, agent_id in _transcripts():
         key = str(path)
-        size = path.stat().st_size
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue  # rotated or deleted between listing and reading; next run gets it
         row = conn.execute("SELECT offset, size FROM ingest_files WHERE path=?", (key,)).fetchone()
         offset = row["offset"] if row else 0
         if row and size < row["size"]:
@@ -222,6 +225,10 @@ def ingest(conn: sqlite3.Connection) -> dict[str, int]:
                 (key, offset, size),
             )
             conn.execute("COMMIT")
+        except OSError:
+            conn.execute("ROLLBACK")
+            files -= 1
+            continue  # same as a vanished file above: skip it, keep the rest
         except Exception:
             conn.execute("ROLLBACK")
             raise
@@ -432,7 +439,13 @@ def _until(reset: int | None) -> str:
 def latest_quota(conn: sqlite3.Connection) -> dict[str, Any] | None:
     """Most recent percentages from either source, with reset times borrowed
     from the last statusLine row if the newest sample is a Desktop one (which
-    carries percentages but no resets)."""
+    carries percentages but no resets).
+
+    Each percentage carries its own timestamp in `<field>_ts`, because a
+    back-filled one can be much older than the row it is returned on. The
+    row's `ts` dates the newest reading of anything, not every field in it, so
+    anything enforcing on a single percentage must age that percentage.
+    """
     r = conn.execute("SELECT * FROM quota_snapshots ORDER BY ts DESC LIMIT 1").fetchone()
     if r is None:
         return None
@@ -441,12 +454,15 @@ def latest_quota(conn: sqlite3.Connection) -> dict[str, Any] | None:
     # recent reading of whichever is missing, so a tile is never blank because
     # of one partial sample.
     for k in ("five_hour_pct", "seven_day_pct"):
+        d[f"{k}_ts"] = d["ts"] if d.get(k) is not None else None
         if d.get(k) is None:
             back = conn.execute(
-                f"SELECT {k} FROM quota_snapshots WHERE {k} IS NOT NULL AND ts >= ? ORDER BY ts DESC LIMIT 1",
+                f"SELECT ts, {k} FROM quota_snapshots WHERE {k} IS NOT NULL AND ts >= ? "
+                "ORDER BY ts DESC LIMIT 1",
                 (d["ts"] - 86400,)).fetchone()
             if back:
                 d[k] = back[k]
+                d[f"{k}_ts"] = back["ts"]
     if d.get("five_hour_reset") is None:
         r2 = conn.execute(
             "SELECT five_hour_reset, seven_day_reset FROM quota_snapshots "
@@ -531,7 +547,8 @@ def burn(conn: sqlite3.Connection, window_min: int = 45) -> dict[str, Any]:
     out["current_pct"] = latest["five_hour_pct"]
     out["reset_at"] = latest.get("five_hour_reset")
     out["reset_text"] = when(latest["five_hour_reset"]) if latest.get("five_hour_reset") else "unknown"
-    out["age_seconds"] = t - latest["ts"]
+    # Age the percentage being reported, not the row it came back on.
+    out["age_seconds"] = t - (latest.get("five_hour_pct_ts") or latest["ts"])
     out["window"] = current_window(conn)
 
     rows = [r for r in quota_series(conn, t - window_min * 60, t) if r["five_hour_pct"] is not None]

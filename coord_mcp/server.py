@@ -66,6 +66,9 @@ def _err(e: Exception) -> str:
         return e.render()
     if isinstance(e, KeyError):
         return f"Error: {e.args[0] if e.args else e}"
+    if isinstance(e, sqlite3.IntegrityError):
+        return (f"Error: {e}. A task_id, parent_id or supersedes id you gave does not exist on "
+                "the board. Check it with coord_board and retry.")
     if isinstance(e, ValueError):
         return f"Error: {e}"
     if isinstance(e, sqlite3.OperationalError):
@@ -186,7 +189,8 @@ async def coord_get_task_result(params: ResultInput) -> str:
     Naming fields is the difference between a 40-token read and a 400-token
     one. The full result stays on disk either way.
 
-    Returns JSON: {task_id, kind, state, result}
+    Returns JSON: {task_id, kind, state, result}, plus {unknown_fields,
+    available_fields} if you named a field the result does not have.
     """
     try:
         return _ok(store.get_task_result(db(), params.task_id, params.fields))

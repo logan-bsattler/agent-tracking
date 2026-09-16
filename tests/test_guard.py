@@ -324,3 +324,41 @@ def test_setup_no_guard(tmp_path):
     p = tmp_path / "settings.json"
     usage.setup(p, guard=False)
     assert "hooks" not in json.loads(p.read_text())
+
+
+# ------------------------------------- back-filled percentages age on their own
+
+
+def test_backfilled_five_hour_reading_is_dropped_not_enforced(conn):
+    """A partial sample makes latest_quota back-fill five_hour_pct from up to a
+    day earlier. That reading describes a window that has since ended several
+    times over, so it must not block; the row's own ts says 30 seconds old."""
+    t = now()
+    conn.execute("INSERT INTO quota_snapshots(ts, source, five_hour_pct, seven_day_pct) VALUES (?,?,?,?)",
+                 (t - 20 * 3600, "statusline", 95.0, 40.0))
+    conn.execute("INSERT INTO quota_snapshots(ts, source, five_hour_pct, seven_day_pct) VALUES (?,?,?,?)",
+                 (t - 30, "desktop", None, 41.0))
+
+    q = usage.latest_quota(conn)
+    assert q["five_hour_pct"] == 95.0
+    assert q["five_hour_pct_ts"] == t - 20 * 3600     # its own age, not the row's
+    assert q["seven_day_pct_ts"] == t - 30
+
+    a = guard.assess(conn, None)
+    assert a["five_hour"] is None
+    assert a["level"] == "ok"
+
+
+def test_fresh_five_hour_reading_still_blocks(conn):
+    _snap(conn, 95.0)
+    a = guard.assess(conn, None)
+    assert a["level"] == "block"
+    assert a["five_hour"] == 95.0
+
+
+def test_staleness_warning_ages_the_reading_in_play(conn):
+    conn.execute("INSERT INTO quota_snapshots(ts, source, five_hour_pct, seven_day_pct) VALUES (?,?,?,?)",
+                 (now() - 1800, "statusline", 40.0, 30.0))
+    a = guard.assess(conn, None)
+    assert a["level"] == "warn"
+    assert "30 minutes old" in " ".join(a["reasons"])

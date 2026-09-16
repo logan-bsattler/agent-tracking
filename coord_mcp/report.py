@@ -489,7 +489,7 @@ def now_section(v: dict[str, Any]) -> str:
         live = '<span class="dot" style="background:var(--good)"></span>' if s["active"] else ""
         ctx = s["last_ctx"]
         ctx_style = ' style="color:var(--critical)"' if ctx >= 300000 else ' style="color:var(--serious)"' if ctx >= 150000 else ""
-        rows.append(f'<tr><td>{live}{esc(title)[:60]}<br><span class="muted">{esc(s["project"])} · {esc(s["session_id"][:8])}</span></td>'
+        rows.append(f'<tr><td>{live}{esc(title[:60])}<br><span class="muted">{esc(s["project"])} · {esc(s["session_id"][:8])}</span></td>'
                     f'<td class="n">{money(s["cost"])}</td><td class="n">{money(s["cost_15m"])}</td>'
                     f'<td class="n">{s["requests"]:,}</td><td class="n"{ctx_style}>{tokens(ctx)}</td>'
                     f'<td class="n">{tokens(s["peak_ctx"])}</td><td class="n">{when(s["last_ts"])}</td></tr>')
@@ -535,7 +535,7 @@ def session_table(s: dict[str, Any]) -> str:
         dur = (r["last_ts"] - r["first_ts"]) // 60
         title = r["title"] or r["session_id"][:8]
         body.append(
-            f'<tr><td>{esc(title)[:70]}<br><span class="muted">{esc(r["project"])} · {esc(r["session_id"][:8])}</span></td>'
+            f'<tr><td>{esc(title[:70])}<br><span class="muted">{esc(r["project"])} · {esc(r["session_id"][:8])}</span></td>'
             f'<td>{dots}</td><td class="n">{money(r["cost"])}</td><td class="n">{sub}</td><td class="n">{r["requests"]:,}</td>'
             f'<td class="n">{tokens(r["output_tokens"])}</td><td class="n">{hit}</td>'
             f'<td class="n">{when(r["first_ts"])}<br><span class="muted">{dur // 60}h{dur % 60:02d}m</span></td></tr>')

@@ -20,7 +20,7 @@ lifecycle. This adds the three things they don't:
 
 ```bash
 pip install -e ".[test]"
-python -m pytest -q             # 30 tests
+python -m pytest -q             # 107 tests
 python tests/smoke_stdio.py     # end-to-end over real stdio, both roles
 ```
 
