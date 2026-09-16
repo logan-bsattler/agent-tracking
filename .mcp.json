@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "coord": {
+      "command": "C:\\development\\agents\\agent-tracking\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "coord_mcp"],
+      "env": {
+        "COORD_ROLE": "team",
+        "COORD_DB": "C:\\Users\\bsattler\\.coord\\coord.db"
+      }
+    }
+  }
+}
