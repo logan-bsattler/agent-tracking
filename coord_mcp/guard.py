@@ -88,6 +88,15 @@ def session_context(transcript_path: str | None) -> tuple[int, str | None, int]:
     cutoff = now() - 600
     seen: set[str] = set()
     for line in reversed(chunk.splitlines()):
+        # A compaction resets the context. Scanning past it would price the
+        # pre-compact turns, which is how the guard used to block a session
+        # that had just been compacted down to nothing -- and block the /clear
+        # it was asking for. Nothing newer than the boundary means we have no
+        # post-compact measurement yet: report unknown, not stale.
+        if b'"compact_boundary"' in line:
+            if model is None:
+                return 0, None, recent
+            break
         if b'"usage"' not in line:
             continue
         try:

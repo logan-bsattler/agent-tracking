@@ -362,3 +362,53 @@ def test_staleness_warning_ages_the_reading_in_play(conn):
     a = guard.assess(conn, None)
     assert a["level"] == "warn"
     assert "30 minutes old" in " ".join(a["reasons"])
+
+
+# ------------------------------------------------------------------ compaction
+
+
+def _compact_boundary(path, pre_tokens=773211):
+    """Append the system entry Claude Code writes when a session is compacted."""
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "system", "subtype": "compact_boundary",
+                             "content": "Conversation compacted",
+                             "compactMetadata": {"trigger": "manual", "preTokens": pre_tokens}}) + "\n")
+
+
+def test_compaction_clears_a_blocking_context(conn, tmp_path, monkeypatch):
+    # 420k would be well over the 300k hard limit -- but it was compacted away.
+    t = _transcript(tmp_path, 420_000)
+    _compact_boundary(t)
+    _snap(conn, 10)
+    out = guard.assess(conn, t)
+    assert out["level"] == "ok", out["reasons"]
+    assert not any("context" in r.lower() for r in out["reasons"])
+
+
+def test_context_after_a_compaction_is_measured_from_the_new_turns(conn, tmp_path, monkeypatch):
+    t = _transcript(tmp_path, 420_000)
+    _compact_boundary(t)
+    # One small post-compact turn: that, not the 420k, is the live context.
+    with open(t, "a", encoding="utf-8") as fh:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        fh.write(json.dumps({"type": "assistant", "requestId": "post", "timestamp": ts,
+                             "message": {"model": "claude-opus-5",
+                                         "usage": {"input_tokens": 5, "cache_read_input_tokens": 13_695,
+                                                   "cache_creation_input_tokens": 0, "output_tokens": 1}}}) + "\n")
+    _snap(conn, 10)
+    out = guard.assess(conn, t)
+    assert out["level"] == "ok", out["reasons"]
+
+
+def test_a_block_still_fires_when_the_context_grew_after_compaction(conn, tmp_path, monkeypatch):
+    t = _transcript(tmp_path, 50_000)
+    _compact_boundary(t)
+    with open(t, "a", encoding="utf-8") as fh:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        fh.write(json.dumps({"type": "assistant", "requestId": "post", "timestamp": ts,
+                             "message": {"model": "claude-opus-5",
+                                         "usage": {"input_tokens": 5, "cache_read_input_tokens": 310_000,
+                                                   "cache_creation_input_tokens": 0, "output_tokens": 1}}}) + "\n")
+    _snap(conn, 10)
+    out = guard.assess(conn, t)
+    assert out["level"] == "block", out["reasons"]
