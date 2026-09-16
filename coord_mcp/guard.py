@@ -22,6 +22,10 @@ Thresholds (env, defaults):
   COORD_CTX_WARN=150000   COORD_CTX_HARD=300000      tokens of context
   COORD_WARN_5H=75        COORD_HARD_5H=92           percent
   COORD_WARN_7D=85        COORD_HARD_7D=97
+  COORD_QUOTA_STALE=600                              seconds
+
+Two board writes stay callable through a hard block, so a session can always
+check its work back in before it stops: see BLOCK_EXEMPT_TOOLS.
 
 Pause it:   python -m coord_mcp.guard pause 30      (minutes)
 Disable:    COORD_GUARD=off
@@ -44,6 +48,19 @@ WARN_5H = float(os.environ.get("COORD_WARN_5H", "75"))
 HARD_5H = float(os.environ.get("COORD_HARD_5H", "92"))
 WARN_7D = float(os.environ.get("COORD_WARN_7D", "85"))
 HARD_7D = float(os.environ.get("COORD_HARD_7D", "97"))
+# How old a limit reading may be before we go and refresh it. The percentages
+# are the SHARED pool, so they move for claude.ai chat, the Desktop app and
+# mobile too -- none of which run hooks. Between Claude Code sessions nothing
+# writes a statusLine snapshot, so the newest row can be hours old while the
+# real number climbs. Acting on that is the one way this guard under-protects.
+QUOTA_STALE_S = int(os.environ.get("COORD_QUOTA_STALE", "600"))
+
+# Tools that survive a hard block. Blocking every tool also blocks the only ways a
+# session has to say what happened: a teammate's typed failure and the lead's
+# decision record. Both are one cheap write, and both end with the session
+# stopping, which is what the block wanted anyway. Matched on the bare name, so
+# the MCP prefix (mcp__coord__coord_complete_task) does not matter.
+BLOCK_EXEMPT_TOOLS = frozenset({"coord_complete_task", "coord_record_decision"})
 
 PAUSE_FILE = Path(os.environ.get("COORD_DB", Path.home() / ".coord" / "coord.db")).expanduser().parent / "guard-pause"
 
@@ -113,9 +130,29 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
     from .usage import burn, latest_quota
 
     ctx, model, recent = session_context(transcript_path)
+
     q = latest_quota(conn)
+    age = _quota_age(q)
+    if age is None or age > QUOTA_STALE_S:
+        # Claude Desktop keeps its own plan-usage history on disk, and it covers
+        # the whole pool. Reading it is a local file read, so it is cheap enough
+        # to do on a tool call -- but only when the row we have is actually old.
+        try:
+            from .usage import ingest_desktop_quota
+            if ingest_desktop_quota(conn):
+                q = latest_quota(conn)
+                age = _quota_age(q)
+        except Exception:
+            pass
+
     fh = q["five_hour_pct"] if q else None
     sd = q["seven_day_pct"] if q else None
+
+    # A 5-hour percentage whose window has already reset describes a window that
+    # no longer exists. Enforcing on it blocks a session that in fact has a full
+    # window in front of it, so drop the reading rather than trust it.
+    if fh is not None and q and q.get("five_hour_reset") and q["five_hour_reset"] <= now():
+        fh = None
     reasons: list[str] = []
     level = "ok"
 
@@ -152,6 +189,10 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
         elif sd >= WARN_7D:
             bump("warn", f"Weekly limit at {sd:.0f}%, resets {_reset_text(q, 'seven_day_reset')}.")
 
+    if age is not None and age > QUOTA_STALE_S and (fh is not None or sd is not None):
+        bump("warn", f"These limit percentages are {age // 60} minutes old and nothing has refreshed them "
+                     f"since. Within a window usage only rises, so treat them as a floor, not the number.")
+
     b = burn(conn)
     if b.get("hits_limit_before_reset") and level != "block":
         bump("warn", f"At the current pace the 5-hour window hits 100% around {b['hit_at_text']}, "
@@ -159,6 +200,13 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
 
     return {"level": level, "reasons": reasons, "context": ctx, "model": model, "recent_requests": recent,
             "five_hour": fh, "seven_day": sd}
+
+
+def _quota_age(q: dict[str, Any] | None) -> int | None:
+    """Seconds since this reading was taken, or None if there is no reading."""
+    if not q or not q.get("ts"):
+        return None
+    return max(0, now() - int(q["ts"]))
 
 
 def _reset_text(q: dict[str, Any] | None, key: str) -> str:
@@ -187,6 +235,12 @@ def hook(event: str) -> int:
     except Exception:
         return 0  # the guard must never break a session by itself
     if a["level"] == "block":
+        tool = (payload.get("tool_name") or "").rsplit("__", 1)[-1]
+        if event == "PreToolUse" and tool in BLOCK_EXEMPT_TOOLS:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext":
+                "Usage guard: " + " ".join(a["reasons"]) + " This write is let through so you can check your "
+                "work back in. Make it your last action this turn."}}))
+            return 0
         return _emit_block("Blocked by the usage guard. " + " ".join(a["reasons"]))
     if a["level"] == "warn":
         text = "Usage guard: " + " ".join(a["reasons"])

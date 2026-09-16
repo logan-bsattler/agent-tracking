@@ -13,6 +13,24 @@ from coord_mcp import alerts, guard, usage
 from coord_mcp.db import connect, now
 
 
+# The thresholds are module constants read from the environment at import time,
+# and a real machine may well have COORD_* set in its Claude Code settings (this
+# one does). Without this the suite asserts against whatever the developer's
+# limits happen to be, and fails on a machine that is merely configured
+# differently. Pin every constant to its documented default instead.
+@pytest.fixture(autouse=True)
+def _defaults(tmp_path, monkeypatch):
+    for name, value in (("CTX_WARN", 150000), ("CTX_HARD", 300000),
+                        ("WARN_5H", 75.0), ("HARD_5H", 92.0),
+                        ("WARN_7D", 85.0), ("HARD_7D", 97.0),
+                        ("QUOTA_STALE_S", 600)):
+        monkeypatch.setattr(guard, name, value)
+    # assess() re-reads Claude Desktop's plan-usage history when its quota row is
+    # stale. Point that at a path that does not exist, so tests never depend on
+    # -- or ingest -- the real machine's usage data.
+    monkeypatch.setenv("COORD_DESKTOP_USAGE", str(tmp_path / "no-desktop-history.json"))
+
+
 @pytest.fixture()
 def conn(tmp_path, monkeypatch):
     monkeypatch.setenv("COORD_DB", str(tmp_path / "t.db"))
@@ -36,6 +54,74 @@ def _transcript(tmp_path, ctx: int, n: int = 1, model="claude-opus-5", age_s: in
 def _snap(conn, fh, sd=10, reset_in=3600, ts_offset=0):
     conn.execute("INSERT INTO quota_snapshots(ts, five_hour_pct, five_hour_reset, seven_day_pct) VALUES (?,?,?,?)",
                  (now() + ts_offset, fh, now() + reset_in, sd))
+
+
+# ------------------------------------------------------------------- staleness
+
+
+def test_stale_quota_warns_with_age(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(guard, "QUOTA_STALE_S", 600)
+    _snap(conn, fh=10, ts_offset=-3600)          # an hour old, nothing alarming in it
+    a = guard.assess(conn, _transcript(tmp_path, 10_000))
+    assert a["level"] == "warn"
+    assert any("60 minutes old" in r for r in a["reasons"])
+    assert any("floor, not the number" in r for r in a["reasons"])
+
+
+def test_fresh_quota_does_not_warn(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(guard, "QUOTA_STALE_S", 600)
+    _snap(conn, fh=10)
+    a = guard.assess(conn, _transcript(tmp_path, 10_000))
+    assert a["level"] == "ok" and a["reasons"] == []
+
+
+def test_stale_reading_still_enforces_its_block(conn, tmp_path, monkeypatch):
+    """A stale number can only understate usage inside a window, so still block on it."""
+    monkeypatch.setattr(guard, "QUOTA_STALE_S", 600)
+    _snap(conn, fh=95, ts_offset=-3600)
+    a = guard.assess(conn, _transcript(tmp_path, 10_000))
+    assert a["level"] == "block"
+    assert any("5-hour limit is at 95%" in r for r in a["reasons"])
+
+
+def test_five_hour_reading_dropped_once_its_window_reset(conn, tmp_path, monkeypatch):
+    """A 95% reading from a window that has since reset must not block a fresh window."""
+    monkeypatch.setattr(guard, "QUOTA_STALE_S", 600)
+    conn.execute("INSERT INTO quota_snapshots(ts, five_hour_pct, five_hour_reset, seven_day_pct) VALUES (?,?,?,?)",
+                 (now() - 60, 95, now() - 30, 10))
+    a = guard.assess(conn, _transcript(tmp_path, 10_000))
+    assert a["five_hour"] is None
+    assert not any("5-hour limit" in r for r in a["reasons"])
+
+
+def test_stale_quota_triggers_a_desktop_refresh(conn, tmp_path, monkeypatch):
+    """When the row is old, the Desktop history is re-read before deciding."""
+    monkeypatch.setattr(guard, "QUOTA_STALE_S", 600)
+    _snap(conn, fh=10, ts_offset=-3600)
+    calls = []
+
+    def fake_ingest(c):
+        calls.append(1)
+        c.execute("INSERT INTO quota_snapshots(ts, five_hour_pct, seven_day_pct) VALUES (?,?,?)",
+                  (now(), 95, 20))
+        return 1
+
+    monkeypatch.setattr(usage, "ingest_desktop_quota", fake_ingest)
+    a = guard.assess(conn, _transcript(tmp_path, 10_000))
+    assert calls, "stale reading should have triggered a desktop re-ingest"
+    assert a["five_hour"] == 95 and a["level"] == "block"
+
+
+def test_refresh_failure_never_breaks_assess(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(guard, "QUOTA_STALE_S", 600)
+    _snap(conn, fh=10, ts_offset=-3600)
+
+    def boom(c):
+        raise RuntimeError("desktop file unreadable")
+
+    monkeypatch.setattr(usage, "ingest_desktop_quota", boom)
+    a = guard.assess(conn, _transcript(tmp_path, 10_000))
+    assert a["five_hour"] == 10  # fell back to what we had, no crash
 
 
 # ------------------------------------------------------------------ context
@@ -147,6 +233,39 @@ def _run_hook(monkeypatch, capsys, event: str, payload: dict):
 def test_pretooluse_blocks_with_reason(conn, tmp_path, monkeypatch, capsys):
     code, out, err = _run_hook(monkeypatch, capsys, "pretooluse", {"transcript_path": _transcript(tmp_path, 350_000)})
     assert code == 2 and "Blocked by the usage guard" in err and "pause 30" in err
+
+
+def test_block_exempt_tool_passes_with_warning(conn, tmp_path, monkeypatch, capsys):
+    code, out, err = _run_hook(monkeypatch, capsys, "pretooluse",
+                               {"transcript_path": _transcript(tmp_path, 350_000),
+                                "tool_name": "mcp__coord__coord_complete_task"})
+    assert code == 0 and err == ""
+    j = json.loads(out)
+    assert j["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert "350k" in j["hookSpecificOutput"]["additionalContext"]
+    assert "last action" in j["hookSpecificOutput"]["additionalContext"]
+
+
+def test_block_exempt_matches_unprefixed_name(conn, tmp_path, monkeypatch, capsys):
+    code, _, _ = _run_hook(monkeypatch, capsys, "pretooluse",
+                           {"transcript_path": _transcript(tmp_path, 350_000),
+                            "tool_name": "coord_record_decision"})
+    assert code == 0
+
+
+def test_other_coord_tools_still_blocked(conn, tmp_path, monkeypatch, capsys):
+    for name in ("mcp__coord__coord_get_task", "Bash", ""):
+        code, _, err = _run_hook(monkeypatch, capsys, "pretooluse",
+                                 {"transcript_path": _transcript(tmp_path, 350_000), "tool_name": name})
+        assert code == 2, name
+        assert "Blocked by the usage guard" in err
+
+
+def test_exempt_tool_does_not_bypass_prompt_block(conn, tmp_path, monkeypatch, capsys):
+    code, _, err = _run_hook(monkeypatch, capsys, "userpromptsubmit",
+                             {"transcript_path": _transcript(tmp_path, 350_000),
+                              "tool_name": "coord_complete_task"})
+    assert code == 2 and "Blocked by the usage guard" in err
 
 
 def test_userpromptsubmit_injects_context_on_warn(conn, tmp_path, monkeypatch, capsys):
