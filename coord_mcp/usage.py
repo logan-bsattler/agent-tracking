@@ -719,13 +719,20 @@ SETTINGS_PATH = CLAUDE_DIR / "settings.json"
 
 def statusline_command() -> str:
     """Absolute interpreter path, so the hook works whatever PATH the shell has."""
-    exe = sys.executable
-    return f'"{exe}" -m coord_mcp.usage statusline' if " " in exe else f"{exe} -m coord_mcp.usage statusline"
+    return f"{_py()} -m coord_mcp.usage statusline"
 
 
 def _py() -> str:
-    exe = sys.executable
-    return f'"{exe}"' if " " in exe else exe
+    """The interpreter path, always quoted.
+
+    Claude Code hands a hook's command string to a shell. On Windows that shell
+    eats backslashes as escapes, so an unquoted
+    C:\\dev\\agents\\.venv\\Scripts\\python.exe arrives as
+    C:devagents.venvScriptspython.exe and the hook dies with exit 127 on every
+    tool call -- silently, because only exit 2 means anything to Claude Code.
+    Quoting on 'has a space' is not enough; the backslashes are the problem.
+    """
+    return f'"{sys.executable}"'
 
 
 def hook_wired(settings_path: Path = SETTINGS_PATH) -> bool:
