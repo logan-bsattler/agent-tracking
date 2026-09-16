@@ -184,9 +184,9 @@ limit snapshot, then:
 | 7d ≥ `COORD_WARN_7D` / `COORD_HARD_7D` | 85% / 97% | warn / **block** |
 | projected 100% before reset | | warn, with the time it hits |
 
-Why context size: every tool call re-reads the whole context, so cost per
-turn is context times tool calls. A 300k-token session on Opus pays about
-15 cents of cache reads per tool call; one busy turn is $6. That is the
+Why context size: every request re-reads the whole context, so cost per
+turn is context times requests. A 300k-token session on Opus pays about
+15 cents of cache reads per request; one busy turn is $6. That is the
 runaway case, and it is invisible in the percentage until it has already
 happened. The block message tells the model exactly why and what to do, so a
 teammate that hits it hands back cleanly instead of failing.

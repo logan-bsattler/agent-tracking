@@ -176,7 +176,7 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
     per_req = ""
     if model and ctx:
         from .usage import price
-        per_req = f", about ${ctx * price(model)[2] / 1e6:.2f} of cache reads per tool call"
+        per_req = f", about ${ctx * price(model)[2] / 1e6:.2f} of cache reads per request"
     if ctx >= CTX_HARD:
         bump("block", f"This session's context is {_fmt_k(ctx)} tokens{per_req}. "
                       f"Above the {_fmt_k(CTX_HARD)} hard limit: run /compact or /clear, or hand the work to a "
