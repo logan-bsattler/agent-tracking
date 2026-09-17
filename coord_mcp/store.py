@@ -55,7 +55,81 @@ def get_task(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
     out = dict(row)
     out["spec"] = json.loads(out.pop("spec"))
     out["expected_result_shape"] = contracts.expected_shape(row["kind"])
+    p = parks(conn, task_id)
+    if p:
+        out["parked_progress"] = p
+        out["resume"] = (
+            f"This task was parked {len(p)} time(s) by a session that ran out of context. "
+            "Start from the last park's next_step. Do not redo anything under done or "
+            "do_not_redo, and do not re-derive anything under verified."
+        )
     return out
+
+
+# A park is a handover, not a result, so it is capped like one: enough to
+# resume, never enough to be a second copy of the work. Anything longer belongs
+# in a file the park points at.
+PARK_CAPS = {"next_step": 400, "notes": 400}
+PARK_LIST_CAPS = {"done": (20, 200), "do_not_redo": (20, 200), "verified": (20, 300)}
+
+
+def park_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    next_step: str,
+    done: list[str] | None = None,
+    do_not_redo: list[str] | None = None,
+    verified: list[str] | None = None,
+    notes: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Hand a task's progress forward without closing it.
+
+    For the session that cannot finish: it runs out of context, parks, clears
+    itself, and is re-dispatched. get_task replays the parks, so the fresh
+    session resumes instead of redoing. The task never leaves 'open'.
+    """
+    row = conn.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"unknown task '{task_id}'")
+    if row["state"] != "open":
+        raise ValueError(
+            f"task '{task_id}' is {row['state']}, not open. A finished task is handed on "
+            "with its result, not a park."
+        )
+    for name, cap in PARK_CAPS.items():
+        val = {"next_step": next_step, "notes": notes}[name]
+        if val and len(val) > cap:
+            raise ValueError(f"{name} is {len(val)} chars; cap is {cap}")
+    lists = {"done": done, "do_not_redo": do_not_redo, "verified": verified}
+    for name, (max_items, max_len) in PARK_LIST_CAPS.items():
+        items = lists[name] or []
+        if len(items) > max_items:
+            raise ValueError(f"{name} has {len(items)} items; cap is {max_items}")
+        for i in items:
+            if len(i) > max_len:
+                raise ValueError(f"{name} item is {len(i)} chars; cap is {max_len}: {i[:60]}...")
+    progress = {"next_step": next_step, "done": done or [], "do_not_redo": do_not_redo or [],
+                "verified": verified or [], "notes": notes}
+    pid = _id()
+    conn.execute(
+        "INSERT INTO task_parks(id, task_id, progress, session_id, created_at) VALUES (?,?,?,?,?)",
+        (pid, task_id, json.dumps(progress), session_id, now()),
+    )
+    n = conn.execute("SELECT COUNT(*) n FROM task_parks WHERE task_id=?", (task_id,)).fetchone()["n"]
+    return {"ok": True, "task_id": task_id, "park_id": pid, "parks": n, "state": "open",
+            "note": "Progress saved. Tell the master this task is parked and needs re-dispatch, "
+                    "then clear yourself. The task stays open."}
+
+
+def parks(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
+    return [
+        {"park_id": r["id"], "at": r["created_at"], **json.loads(r["progress"])}
+        for r in conn.execute(
+            "SELECT id, progress, created_at FROM task_parks WHERE task_id=? ORDER BY created_at",
+            (task_id,),
+        )
+    ]
 
 
 def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]) -> dict[str, Any]:

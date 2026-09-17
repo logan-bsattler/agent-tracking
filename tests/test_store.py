@@ -279,8 +279,9 @@ def test_desktop_role_has_exactly_two_tools():
 
 def test_team_role_has_all_tools():
     names = _surface("team")
-    assert len(names) == 11
-    assert {"coord_create_task", "coord_complete_task", "coord_get_decisions"} <= set(names)
+    assert len(names) == 12
+    assert {"coord_create_task", "coord_complete_task", "coord_get_decisions",
+            "coord_park_task"} <= set(names)
 
 
 # ------------------------------------------------ referential integrity
@@ -307,3 +308,51 @@ def test_unknown_result_field_is_reported_not_dropped(conn):
     assert out["result"] == {"verdict": "v"}
     assert out["unknown_fields"] == ["summary"]
     assert "confidence" in out["available_fields"]
+
+
+# ---------------------------------------------------------------- parks
+
+
+def test_park_replays_into_get_task(conn):
+    t = store.create_task(conn, "code_change", "Fix three defects", {"file": "a.p"})
+    store.park_task(
+        conn, t["task_id"],
+        next_step="Fix D2 in xxfzitex.p",
+        done=["D1 fixed in xxfzitex.p"],
+        do_not_redo=["xxfzitex.p.predefect.bak already written"],
+        verified=["Item_Type 'M' per spec p.9"],
+    )
+    got = store.get_task(conn, t["task_id"])
+    assert got["state"] == "open"
+    assert got["parked_progress"][0]["next_step"] == "Fix D2 in xxfzitex.p"
+    assert got["parked_progress"][0]["verified"] == ["Item_Type 'M' per spec p.9"]
+    assert "resume" in got
+
+
+def test_parks_accumulate_in_order(conn):
+    t = store.create_task(conn, "code_change", "Long job", {})
+    store.park_task(conn, t["task_id"], next_step="step two")
+    r = store.park_task(conn, t["task_id"], next_step="step three")
+    assert r["parks"] == 2
+    assert [p["next_step"] for p in store.get_task(conn, t["task_id"])["parked_progress"]] == [
+        "step two", "step three"]
+
+
+def test_cannot_park_a_closed_task(conn):
+    t = store.create_task(conn, "code_change", "Done already", {})
+    store.complete_task(conn, t["task_id"], GOOD_CODE_CHANGE)
+    with pytest.raises(ValueError, match="not open"):
+        store.park_task(conn, t["task_id"], next_step="too late")
+
+
+def test_park_rejects_a_transcript(conn):
+    t = store.create_task(conn, "code_change", "Wordy", {})
+    with pytest.raises(ValueError, match="cap is 400"):
+        store.park_task(conn, t["task_id"], next_step="x" * 401)
+    with pytest.raises(ValueError, match="cap is 20"):
+        store.park_task(conn, t["task_id"], next_step="ok", done=["x"] * 21)
+
+
+def test_park_on_unknown_task(conn):
+    with pytest.raises(KeyError):
+        store.park_task(conn, "nope", next_step="x")

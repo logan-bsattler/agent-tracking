@@ -59,8 +59,11 @@ QUOTA_STALE_S = int(os.environ.get("COORD_QUOTA_STALE", "600"))
 # session has to say what happened: a teammate's typed failure and the lead's
 # decision record. Both are one cheap write, and both end with the session
 # stopping, which is what the block wanted anyway. Matched on the bare name, so
-# the MCP prefix (mcp__coord__coord_complete_task) does not matter.
-BLOCK_EXEMPT_TOOLS = frozenset({"coord_complete_task", "coord_record_decision"})
+# the MCP prefix (mcp__coord__coord_complete_task) does not matter
+# coord_park_task is exempt for the same reason and one more: a session at the
+# hard limit is exactly the session that needs to hand its progress forward,
+# and a block that stops it doing so throws the work away.
+BLOCK_EXEMPT_TOOLS = frozenset({"coord_complete_task", "coord_record_decision", "coord_park_task"})
 
 PAUSE_FILE = Path(os.environ.get("COORD_DB", Path.home() / ".coord" / "coord.db")).expanduser().parent / "guard-pause"
 
@@ -199,11 +202,14 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
         per_req = f", about ${ctx * price(model)[2] / 1e6:.2f} of cache reads per request"
     if ctx >= CTX_HARD:
         bump("block", f"This session's context is {_fmt_k(ctx)} tokens{per_req}. "
-                      f"Above the {_fmt_k(CTX_HARD)} hard limit: run /compact or /clear, or hand the work to a "
-                      f"fresh teammate, before continuing.")
+                      f"Above the {_fmt_k(CTX_HARD)} hard limit. If you hold an open board task, "
+                      f"coord_park_task it now, tell the master it needs re-dispatch, then clear "
+                      f"yourself. Otherwise run /compact or /clear before continuing.")
     elif ctx >= CTX_WARN:
-        bump("warn", f"Context is {_fmt_k(ctx)} tokens{per_req}. Keep this turn short, avoid reading large "
-                     f"files, and /compact soon. Hard stop at {_fmt_k(CTX_HARD)}.")
+        bump("warn", f"Context is {_fmt_k(ctx)} tokens{per_req}. Keep this turn short and avoid reading "
+                     f"large files. If you hold an open board task and cannot finish it in the "
+                     f"{_fmt_k(CTX_HARD - ctx)} of headroom left, coord_park_task it now rather than starting "
+                     f"work you will abandon. Hard stop at {_fmt_k(CTX_HARD)}.")
     if recent >= 40 and ctx >= CTX_WARN:
         bump("warn", f"{recent} requests in the last 10 minutes at this context size. That is the pattern that "
                      f"empties the 5-hour window.")

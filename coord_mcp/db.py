@@ -14,7 +14,7 @@ from pathlib import Path
 # Bump this whenever DDL or _migrate changes. connect() skips both entirely
 # when the file already reports this version, so a new table or column that
 # ships without a bump will not be created.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DEFAULT_DB_PATH = Path(os.environ.get("COORD_DB", Path.home() / ".coord" / "coord.db")).expanduser()
 
@@ -54,6 +54,19 @@ CREATE TABLE IF NOT EXISTS decisions (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS decisions_task ON decisions(task_id);
+
+-- Progress handed forward when a session runs out of context mid-task. The
+-- task stays open; the session clears itself and is re-dispatched, and
+-- coord_get_task replays these rows so the fresh session does not start over.
+-- One row per park, so a task parked twice keeps both handovers in order.
+CREATE TABLE IF NOT EXISTS task_parks (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL REFERENCES tasks(id),
+  progress   TEXT NOT NULL,
+  session_id TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS parks_task ON task_parks(task_id, created_at);
 
 CREATE TABLE IF NOT EXISTS intents (
   id          TEXT PRIMARY KEY,

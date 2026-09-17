@@ -173,6 +173,47 @@ async def coord_complete_task(params: CompleteInput) -> str:
         return _err(e)
 
 
+class ParkInput(Strict):
+    task_id: str = Field(..., description="Task id you cannot finish in this session")
+    next_step: str = Field(..., description="The single next action the fresh session should take", max_length=400)
+    done: list[str] | None = Field(default=None, description="What is already finished and must not be repeated", max_length=20)
+    do_not_redo: list[str] | None = Field(
+        default=None,
+        description="Side effects already on disk: files edited, .bak copies made, records written",
+        max_length=20,
+    )
+    verified: list[str] | None = Field(
+        default=None,
+        description="Facts established at cost (a spec page read, a field confirmed) so they are not re-derived",
+        max_length=20,
+    )
+    notes: str | None = Field(default=None, description="Anything else the next session needs", max_length=400)
+    session_id: str | None = Field(default=None, description="Your session id, if you know it", max_length=80)
+
+
+@tool("coord_park_task", title="Park task")
+async def coord_park_task(params: ParkInput) -> str:
+    """Hand your progress forward on a task you cannot finish, without closing it.
+
+    For the session that is running out of context. Park, tell the master the
+    task needs re-dispatch, then clear yourself. The task stays open and
+    coord_get_task replays this to whoever picks it up, so the work is resumed
+    rather than restarted.
+
+    Write it for a session with no history, and keep it a handover: pointers to
+    files, not their contents. Park before you are blocked, not after.
+
+    Returns JSON: {ok, task_id, park_id, parks, state, note}
+    """
+    try:
+        return _ok(store.park_task(
+            db(), params.task_id, params.next_step, params.done, params.do_not_redo,
+            params.verified, params.notes, params.session_id,
+        ))
+    except Exception as e:
+        return _err(e)
+
+
 class ResultInput(Strict):
     task_id: str = Field(..., description="Task id")
     fields: list[str] | None = Field(
