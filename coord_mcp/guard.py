@@ -93,10 +93,21 @@ def session_context(transcript_path: str | None) -> tuple[int, str | None, int]:
         # that had just been compacted down to nothing -- and block the /clear
         # it was asking for. Nothing newer than the boundary means we have no
         # post-compact measurement yet: report unknown, not stale.
+        #
+        # The substring is only a cheap pre-filter, same as the "usage" one
+        # below: a user message that merely quotes compact_boundary (this
+        # docstring, for instance) must not be mistaken for the real system
+        # entry, so confirm it by parsing the line before acting on it.
         if b'"compact_boundary"' in line:
-            if model is None:
-                return 0, None, recent
-            break
+            try:
+                boundary = json.loads(line)
+            except json.JSONDecodeError:
+                boundary = None
+            if boundary is not None and boundary.get("type") == "system" \
+                    and boundary.get("subtype") == "compact_boundary":
+                if model is None:
+                    return 0, None, recent
+                break
         if b'"usage"' not in line:
             continue
         try:

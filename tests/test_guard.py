@@ -412,3 +412,21 @@ def test_a_block_still_fires_when_the_context_grew_after_compaction(conn, tmp_pa
     _snap(conn, 10)
     out = guard.assess(conn, t)
     assert out["level"] == "block", out["reasons"]
+
+
+def test_a_quoted_mention_of_compact_boundary_does_not_fake_one(conn, tmp_path, monkeypatch):
+    """A user asking about this very feature writes the literal string
+    "compact_boundary" into a real (type: user) transcript line. That is not
+    the system entry Claude Code emits on an actual compaction, and must not
+    be read as one -- the substring match is only a pre-filter; the real
+    check is the parsed type/subtype, same as the assistant/usage check right
+    below it."""
+    t = _transcript(tmp_path, 420_000)
+    with open(t, "a", encoding="utf-8") as fh:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        fh.write(json.dumps({"type": "user", "timestamp": ts,
+                             "message": {"role": "user", "content": 'what does "compact_boundary" mean?'}}) + "\n")
+    _snap(conn, 10)
+    out = guard.assess(conn, t)
+    assert out["level"] == "block", out["reasons"]
+    assert out["context"] == 420_000
