@@ -405,7 +405,7 @@ def statusline_text(snap: dict[str, Any], payload: dict[str, Any]) -> str:
     if model:
         parts.append(str(model))
     if snap.get("context_pct") is not None:
-        parts.append(f"ctx {snap['context_pct']:.0f}%")
+        parts.append(_ctx_text(snap["context_pct"]))
     if snap.get("five_hour_pct") is not None:
         parts.append(f"5h {snap['five_hour_pct']:.0f}%" + _until(snap.get("five_hour_reset")))
     if snap.get("seven_day_pct") is not None:
@@ -418,6 +418,27 @@ def statusline_text(snap: dict[str, Any], payload: dict[str, Any]) -> str:
     elif b.get("pct_per_hour"):
         parts.append(f"{b['pct_per_hour']:.0f}%/h")
     return " | ".join(parts)
+
+
+# Percent of the context window, not the guard's absolute token thresholds --
+# the status line only ever gets a percentage from Claude Code's payload. The
+# two are tuned to fire at roughly the same moment on a 200k window.
+CTX_PCT_WARN = float(os.environ.get("COORD_CTX_PCT_WARN", "70"))
+CTX_PCT_HARD = float(os.environ.get("COORD_CTX_PCT_HARD", "85"))
+
+
+def _ctx_text(pct: float) -> str:
+    """The context tile, loud once it matters.
+
+    'ctx 42%' and 'ctx 92%' scan identically, which is how a session sails past
+    the point where it should have parked. Past the thresholds the tile stops
+    being a number and starts being an instruction.
+    """
+    if pct >= CTX_PCT_HARD:
+        return f"!! CTX {pct:.0f}% -- PARK + CLEAR NOW"
+    if pct >= CTX_PCT_WARN:
+        return f"! ctx {pct:.0f}% -- park soon"
+    return f"ctx {pct:.0f}%"
 
 
 def _until(reset: int | None) -> str:

@@ -232,7 +232,7 @@ def _run_hook(monkeypatch, capsys, event: str, payload: dict):
 
 def test_pretooluse_blocks_with_reason(conn, tmp_path, monkeypatch, capsys):
     code, out, err = _run_hook(monkeypatch, capsys, "pretooluse", {"transcript_path": _transcript(tmp_path, 350_000)})
-    assert code == 2 and "Blocked by the usage guard" in err and "pause 30" in err
+    assert code == 2 and "BLOCKED BY THE USAGE GUARD" in err and "pause 30" in err
 
 
 def test_block_exempt_tool_passes_with_warning(conn, tmp_path, monkeypatch, capsys):
@@ -243,7 +243,7 @@ def test_block_exempt_tool_passes_with_warning(conn, tmp_path, monkeypatch, caps
     j = json.loads(out)
     assert j["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
     assert "350k" in j["hookSpecificOutput"]["additionalContext"]
-    assert "last action" in j["hookSpecificOutput"]["additionalContext"]
+    assert "LAST ACTION" in j["hookSpecificOutput"]["additionalContext"]
 
 
 def test_block_exempt_matches_unprefixed_name(conn, tmp_path, monkeypatch, capsys):
@@ -258,14 +258,14 @@ def test_other_coord_tools_still_blocked(conn, tmp_path, monkeypatch, capsys):
         code, _, err = _run_hook(monkeypatch, capsys, "pretooluse",
                                  {"transcript_path": _transcript(tmp_path, 350_000), "tool_name": name})
         assert code == 2, name
-        assert "Blocked by the usage guard" in err
+        assert "BLOCKED BY THE USAGE GUARD" in err
 
 
 def test_exempt_tool_does_not_bypass_prompt_block(conn, tmp_path, monkeypatch, capsys):
     code, _, err = _run_hook(monkeypatch, capsys, "userpromptsubmit",
                              {"transcript_path": _transcript(tmp_path, 350_000),
                               "tool_name": "coord_complete_task"})
-    assert code == 2 and "Blocked by the usage guard" in err
+    assert code == 2 and "BLOCKED BY THE USAGE GUARD" in err
 
 
 def test_userpromptsubmit_injects_context_on_warn(conn, tmp_path, monkeypatch, capsys):
@@ -430,3 +430,32 @@ def test_a_quoted_mention_of_compact_boundary_does_not_fake_one(conn, tmp_path, 
     out = guard.assess(conn, t)
     assert out["level"] == "block", out["reasons"]
     assert out["context"] == 420_000
+
+
+# ------------------------------------------- the warning has to be unmissable
+
+
+def test_context_warning_is_a_banner_that_says_to_lead_with_it(conn, tmp_path, monkeypatch, capsys):
+    """A context warning is an instruction to act, so it must not read as one
+    more sentence of injected context -- that is how it ends up as the last
+    line of a long reply and gets ignored."""
+    code, out, err = _run_hook(monkeypatch, capsys, "userpromptsubmit",
+                               {"transcript_path": _transcript(tmp_path, 200_000)})
+    assert code == 0
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert guard.BANNER_RULE in ctx
+    assert "SAVE AND CLEAR" in ctx
+    assert "SURFACE THIS NOW" in ctx
+    assert "closing aside" in ctx
+
+
+def test_quota_only_warning_stays_quiet(conn, tmp_path, monkeypatch, capsys):
+    """A 5-hour warning at a small context means 'go carefully', not 'stop and
+    hand off'. Bannering it too would train the reader to skim the banner."""
+    _snap(conn, fh=80)
+    code, out, err = _run_hook(monkeypatch, capsys, "userpromptsubmit",
+                               {"transcript_path": _transcript(tmp_path, 20_000)})
+    assert code == 0
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert guard.BANNER_RULE not in ctx
+    assert ctx.startswith("Usage guard:")

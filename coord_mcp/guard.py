@@ -196,16 +196,19 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
         if to == "block" or (to == "warn" and level == "ok"):
             level = to
 
+    ctx_level = "ok"
     per_req = ""
     if model and ctx:
         from .usage import price
         per_req = f", about ${ctx * price(model)[2] / 1e6:.2f} of cache reads per request"
     if ctx >= CTX_HARD:
+        ctx_level = "block"
         bump("block", f"This session's context is {_fmt_k(ctx)} tokens{per_req}. "
                       f"Above the {_fmt_k(CTX_HARD)} hard limit. If you hold an open board task, "
                       f"coord_park_task it now, tell the master it needs re-dispatch, then clear "
                       f"yourself. Otherwise run /compact or /clear before continuing.")
     elif ctx >= CTX_WARN:
+        ctx_level = "warn"
         bump("warn", f"Context is {_fmt_k(ctx)} tokens{per_req}. Keep this turn short and avoid reading "
                      f"large files. If you hold an open board task and cannot finish it in the "
                      f"{_fmt_k(CTX_HARD - ctx)} of headroom left, coord_park_task it now rather than starting "
@@ -237,8 +240,8 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
         bump("warn", f"At the current pace the 5-hour window hits 100% around {b['hit_at_text']}, "
                      f"before it resets at {b['reset_text']}. Slow down now or that is a forced stop.")
 
-    return {"level": level, "reasons": reasons, "context": ctx, "model": model, "recent_requests": recent,
-            "five_hour": fh, "seven_day": sd}
+    return {"level": level, "ctx_level": ctx_level, "reasons": reasons, "context": ctx, "model": model,
+            "recent_requests": recent, "five_hour": fh, "seven_day": sd}
 
 
 def _quota_age(q: dict[str, Any] | None) -> int | None:
@@ -267,6 +270,29 @@ def _reset_text(q: dict[str, Any] | None, key: str) -> str:
     return "at " + when(q[key])
 
 
+BANNER_RULE = "=" * 64
+
+
+def _banner(headline: str, reasons: list[str]) -> str:
+    """A warning the reader cannot skim past.
+
+    The old format was one sentence in a paragraph of injected context, which
+    is how it ended up as the last line of a long reply -- technically stated,
+    in practice ignored. A rule, a headline in caps and an explicit instruction
+    to lead with it make the same fact impossible to bury.
+    """
+    lines = [BANNER_RULE, f"  !!  {headline}", BANNER_RULE]
+    lines += [f"  - {r}" for r in reasons]
+    lines.append(BANNER_RULE)
+    lines.append(
+        "SURFACE THIS NOW. Open your next message with a one-line version of it, before "
+        "any other content. Do not append it as a closing aside -- a note at the bottom "
+        "of a long reply is the same as no note at all. Then act on it in that same turn "
+        "rather than starting new work."
+    )
+    return "\n".join(lines)
+
+
 def _emit_block(reason: str) -> int:
     sys.stderr.write(reason + "\nPause the guard for 30 minutes with: python -m coord_mcp.guard pause 30\n")
     return 2
@@ -289,12 +315,15 @@ def hook(event: str) -> int:
         tool = (payload.get("tool_name") or "").rsplit("__", 1)[-1]
         if event == "PreToolUse" and tool in BLOCK_EXEMPT_TOOLS:
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext":
-                "Usage guard: " + " ".join(a["reasons"]) + " This write is let through so you can check your "
-                "work back in. Make it your last action this turn."}}))
+                _banner("BLOCKED -- THIS WRITE IS YOUR LAST ACTION", a["reasons"]) +
+                " This one write is let through so you can check your work back in."}}))
             return 0
-        return _emit_block("Blocked by the usage guard. " + " ".join(a["reasons"]))
+        return _emit_block(_banner("BLOCKED BY THE USAGE GUARD", a["reasons"]))
     if a["level"] == "warn":
-        text = "Usage guard: " + " ".join(a["reasons"])
+        # Loud only when context is what is wrong: that is the case where the
+        # session has to act (park and clear) rather than merely go carefully.
+        text = (_banner("CONTEXT IS RUNNING OUT -- SAVE AND CLEAR", a["reasons"])
+                if a["ctx_level"] == "warn" else "Usage guard: " + " ".join(a["reasons"]))
         if event == "UserPromptSubmit":
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                                      "additionalContext": text}}))

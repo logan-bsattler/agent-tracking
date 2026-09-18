@@ -150,3 +150,12 @@ def test_report_renders_empty_and_full(conn, projects, tmp_path):
     html = report.write(conn, tmp_path / "r.html", days=7).read_text(encoding="utf-8")
     assert "Sonnet" in html and "Opus" in html and "<svg" in html
     assert "5-hour limit used" in html and "10%" in html
+
+
+def test_context_tile_gets_loud_past_the_thresholds():
+    """'ctx 42%' and 'ctx 92%' scan identically, which is how a session sails
+    past the point where it should have parked."""
+    assert usage._ctx_text(42) == "ctx 42%"
+    assert usage._ctx_text(75).startswith("! ctx") and "park soon" in usage._ctx_text(75)
+    loud = usage._ctx_text(91)
+    assert loud.startswith("!! CTX") and "PARK + CLEAR NOW" in loud
