@@ -356,3 +356,13 @@ def test_park_rejects_a_transcript(conn):
 def test_park_on_unknown_task(conn):
     with pytest.raises(KeyError):
         store.park_task(conn, "nope", next_step="x")
+
+
+def test_board_flags_a_parked_task_as_awaiting_redispatch(conn):
+    plain = store.create_task(conn, "code_change", "Never started", {})
+    parked = store.create_task(conn, "code_change", "Handed forward", {})
+    store.park_task(conn, parked["task_id"], next_step="resume here")
+    live = {r["id"]: r for r in store.board(conn)["live"]}
+    assert "awaiting_redispatch" not in live[plain["task_id"]]
+    assert live[parked["task_id"]]["awaiting_redispatch"] is True
+    assert live[parked["task_id"]]["state"] == "open"

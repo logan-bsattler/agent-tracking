@@ -187,13 +187,22 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
     counts: dict[str, dict[str, int]] = {}
     for r in conn.execute("SELECT kind, state, COUNT(*) n FROM tasks GROUP BY kind, state"):
         counts.setdefault(r["kind"], {})[r["state"]] = r["n"]
-    live = [
-        dict(r)
-        for r in conn.execute(
-            """SELECT id, kind, title, state, assigned_to FROM tasks
-               WHERE state IN ('open','failed') ORDER BY created_at LIMIT 50"""
-        )
-    ]
+    # A parked task is open, but it is not waiting to be started -- it is
+    # waiting to be re-dispatched, and the master may have cleared its own
+    # context since the client announced the park. If the board does not carry
+    # that, the announcement was the only record of it and a lost message means
+    # the task sits open forever. Which is the bug parking existed to fix.
+    live = []
+    for r in conn.execute(
+        """SELECT t.id, t.kind, t.title, t.state, t.assigned_to, COUNT(p.id) parks
+           FROM tasks t LEFT JOIN task_parks p ON p.task_id = t.id
+           WHERE t.state IN ('open','failed')
+           GROUP BY t.id ORDER BY t.created_at LIMIT 50"""
+    ):
+        d = dict(r)
+        if d.pop("parks"):
+            d["awaiting_redispatch"] = True
+        live.append(d)
     open_intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
     return {"tasks_by_kind": counts, "live": live, "open_intents": open_intents, "as_of": now()}
 
