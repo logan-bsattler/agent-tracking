@@ -633,7 +633,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
 <div class="card grp {'alert' if n else ''}"><h2>Needs you<span class="count">{n}</span></h2>{needs}</div>
 {grp("Master owes", v["master_owes"], "Nothing: no parked tasks, no open intents.")}
 {grp("Loose ends", v["loose_ends"], "No follow-ups waiting: every next step is a task or a decision.")}
-{grp("Running", v["running"], "No open work.")}
+{grp("Open", v["running"], "No open work.")}
 {grp(f"Done, last {v['recent_h']}h", v["recent"], "Nothing finished recently.")}
 </main></body></html>"""
 
