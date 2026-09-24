@@ -93,7 +93,7 @@ def test_read_bytes_falls_back_to_shell(tmp_path, monkeypatch):
 
 
 def test_series_merges_sources_without_double_counting(conn):
-    t = now() - 3600
+    t = (now() - 3600) // 300 * 300  # bucket-aligned: t+10 must share t's 300s bucket
     conn.execute("INSERT INTO quota_snapshots(ts, source, five_hour_pct) VALUES (?,?,?)", (t, "desktop", 20))
     conn.execute("INSERT INTO quota_snapshots(ts, source, five_hour_pct) VALUES (?,?,?)", (t + 10, "statusline", 21))
     conn.execute("INSERT INTO quota_snapshots(ts, source, five_hour_pct) VALUES (?,?,?)", (t + 900, "desktop", 40))

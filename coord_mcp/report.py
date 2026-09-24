@@ -632,6 +632,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
 <p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
 <div class="card grp {'alert' if n else ''}"><h2>Needs you<span class="count">{n}</span></h2>{needs}</div>
 {grp("Master owes", v["master_owes"], "Nothing: no parked tasks, no open intents.")}
+{grp("Loose ends", v["loose_ends"], "No follow-ups waiting: every next step is a task or a decision.")}
 {grp("Running", v["running"], "No open work.")}
 {grp(f"Done, last {v['recent_h']}h", v["recent"], "Nothing finished recently.")}
 </main></body></html>"""
@@ -681,9 +682,21 @@ def task_page(d: dict[str, Any] | None, task_id: str = "") -> str:
     cards = ['<div class="card"><dl class="kv">' + "".join(
         f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in meta.items()) + "</dl></div>"]
     if d["result"] is not None:
-        cards.append(f'<div class="card"><h2>Result</h2>{_val(d["result"])}</div>')
+        shown = {k: x for k, x in d["result"].items() if k != "follow_ups"}
+        cards.append(f'<div class="card"><h2>Result</h2>{_val(shown)}</div>')
     else:
         cards.append('<div class="card"><h2>Result</h2><p class="empty">Still open; nothing reported yet.</p></div>')
+    if d.get("follow_ups"):
+        items = []
+        for f in d["follow_ups"]:
+            if f["state"] == "tasked":
+                how = f'tasked → <a class="drill" href="/board/task/{esc(f["resolved_by"])}">{esc(f["resolved_by"])}</a>'
+            elif f["state"] == "dropped":
+                how = f'dropped (decision <code>{esc(f["resolved_by"])}</code>)'
+            else:
+                how = '<b class="st-failed">open</b>'
+            items.append(f'<li><b>{esc(f["who"])}</b>: {esc(f["what"])} <span class="muted">— </span>{how}</li>')
+        cards.append(f'<div class="card"><h2>Follow-ups</h2><ul class="vals">{"".join(items)}</ul></div>')
     cards.append(f'<div class="card"><h2>What was asked</h2>{_val(d["spec"])}</div>')
     for i, p in enumerate(d["parks"], 1):
         p = {k: v for k, v in p.items() if k not in ("park_id", "at")}

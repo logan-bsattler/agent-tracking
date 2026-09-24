@@ -279,9 +279,9 @@ def test_desktop_role_has_exactly_two_tools():
 
 def test_team_role_has_all_tools():
     names = _surface("team")
-    assert len(names) == 12
+    assert len(names) == 13
     assert {"coord_create_task", "coord_complete_task", "coord_get_decisions",
-            "coord_park_task"} <= set(names)
+            "coord_park_task", "coord_resolve_follow_up"} <= set(names)
 
 
 # ------------------------------------------------ referential integrity
@@ -366,3 +366,35 @@ def test_board_flags_a_parked_task_as_awaiting_redispatch(conn):
     assert "awaiting_redispatch" not in live[plain["task_id"]]
     assert live[parked["task_id"]]["awaiting_redispatch"] is True
     assert live[parked["task_id"]]["state"] == "open"
+
+
+
+# ------------------------------------------------------------ follow_ups
+
+
+def test_every_contract_accepts_follow_ups():
+    assert all("follow_ups" in c for c in contracts.CONTRACTS.values())
+    assert "follow_ups" not in contracts.FAILURE
+
+
+def test_follow_ups_are_validated(conn):
+    t = store.create_task(conn, "code_change", "x", {"f": 1})["task_id"]
+    for bad in ([{"who": "Ben"}], [{"who": "B" * 41, "what": "x"}], [{"who": "Ben", "what": "x" * 201}],
+                [{"who": "Ben", "what": "x"}] * 11):
+        with pytest.raises(ValueError):
+            store.complete_task(conn, t, {**GOOD_CODE_CHANGE, "follow_ups": bad})
+    assert conn.execute("SELECT COUNT(*) n FROM follow_ups").fetchone()["n"] == 0
+
+
+def test_complete_writes_one_row_per_follow_up(conn):
+    t = store.create_task(conn, "code_change", "x", {"f": 1})["task_id"]
+    fus = [{"who": "MAG", "what": "re-run the map"}, {"who": "Ben", "what": "decide the 6"}]
+    out = store.complete_task(conn, t, {**GOOD_CODE_CHANGE, "follow_ups": fus})
+    assert out["follow_ups"] == 2
+    rows = conn.execute("SELECT idx, who, what, state FROM follow_ups WHERE task_id=? ORDER BY idx", (t,)).fetchall()
+    assert [tuple(r) for r in rows] == [(0, "MAG", "re-run the map", "open"), (1, "Ben", "decide the 6", "open")]
+
+
+def test_result_without_follow_ups_is_unchanged(conn):
+    t = store.create_task(conn, "code_change", "x", {"f": 1})["task_id"]
+    assert "follow_ups" not in store.complete_task(conn, t, GOOD_CODE_CHANGE)

@@ -145,7 +145,15 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
         "UPDATE tasks SET state=?, result=?, result_version=?, completed_at=? WHERE id=?",
         (state, json.dumps(validated), contracts.CONTRACT_VERSION, now(), task_id),
     )
-    return {"ok": True, "task_id": task_id, "state": state}
+    fus = validated.get("follow_ups") or []
+    conn.executemany(
+        "INSERT INTO follow_ups(id, task_id, idx, who, what, state, created_at) VALUES (?,?,?,?,?,'open',?)",
+        [(_id(), task_id, i, f["who"], f["what"], now()) for i, f in enumerate(fus)],
+    )
+    out = {"ok": True, "task_id": task_id, "state": state}
+    if fus:
+        out["follow_ups"] = len(fus)
+    return out
 
 
 def _project(result: dict[str, Any], fields: list[str] | None) -> tuple[dict[str, Any], list[str]]:
@@ -204,7 +212,14 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
             d["awaiting_redispatch"] = True
         live.append(d)
     open_intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
-    return {"tasks_by_kind": counts, "live": live, "open_intents": open_intents, "as_of": now()}
+    # Done is not finished when the result named next steps. Without this the
+    # board reads "nothing open" while work remains.
+    loose = [dict(r) for r in conn.execute(
+        """SELECT f.id, f.task_id, t.assigned_to client, f.who, f.what
+           FROM follow_ups f JOIN tasks t ON t.id = f.task_id
+           WHERE f.state='open' ORDER BY f.created_at, f.idx LIMIT 30""")]
+    return {"tasks_by_kind": counts, "live": live, "loose_ends": loose,
+            "open_intents": open_intents, "as_of": now()}
 
 
 # -------------------------------------------------------------- decisions
@@ -389,12 +404,23 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
                 needs_you.append({**d, "note": f"{MANUAL_DELIVERY[d['client']]} · {d['note']}"})
             recent.append(d)
     running.sort(key=lambda d: d["since"])
+    loose_ends: list[dict[str, Any]] = []
+    for r in conn.execute(
+        """SELECT f.id fid, f.task_id, f.who, f.what, f.created_at, t.assigned_to, t.title
+           FROM follow_ups f JOIN tasks t ON t.id = f.task_id
+           WHERE f.state='open' ORDER BY f.created_at, f.idx"""
+    ):
+        d = {"id": r["task_id"], "kind": "follow_up", "title": r["what"], "client": r["assigned_to"] or "—",
+             "since": r["created_at"], "note": f"{r['who']} · from: {r['title']}"}
+        loose_ends.append(d)
+        if r["who"].strip().lower() == "ben":
+            needs_you.append(d)
     intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
     if intents:
         master_owes.append({"id": "", "kind": "intent", "title": f"{intents} open intent(s) to triage",
                             "client": "—", "since": t, "note": ""})
-    return {"needs_you": needs_you, "master_owes": master_owes, "running": running,
-            "recent": recent, "recent_h": recent_h, "as_of": t}
+    return {"needs_you": needs_you, "master_owes": master_owes, "loose_ends": loose_ends,
+            "running": running, "recent": recent, "recent_h": recent_h, "as_of": t}
 
 
 def task_detail(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
@@ -413,6 +439,35 @@ def task_detail(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None
     d["decisions"] = [dict(x) for x in conn.execute(
         "SELECT id, statement, because, supersedes, created_at FROM decisions WHERE task_id=? ORDER BY created_at",
         (task_id,))]
+    d["follow_ups"] = [dict(x) for x in conn.execute(
+        "SELECT id, who, what, state, resolved_by, resolved_at FROM follow_ups WHERE task_id=? ORDER BY idx",
+        (task_id,))]
     d["children"] = [dict(x) for x in conn.execute(
         "SELECT id, title, state, assigned_to FROM tasks WHERE parent_id=? ORDER BY created_at", (task_id,))]
     return d
+
+
+def resolve_follow_up(
+    conn: sqlite3.Connection,
+    follow_up_id: str,
+    task_id: str | None = None,
+    decision_id: str | None = None,
+) -> dict[str, Any]:
+    """Close a loose end: 'tasked' by a child task, or 'dropped' by a decision."""
+    if bool(task_id) == bool(decision_id):
+        raise ValueError("give exactly one of task_id (it became a task) or decision_id (recorded why not)")
+    row = conn.execute("SELECT state FROM follow_ups WHERE id=?", (follow_up_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"unknown follow-up '{follow_up_id}'")
+    if row["state"] != "open":
+        raise ValueError(f"follow-up '{follow_up_id}' is already {row['state']}")
+    if task_id and not conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
+        raise KeyError(f"unknown task '{task_id}'. Create the child task first.")
+    if decision_id and not conn.execute("SELECT 1 FROM decisions WHERE id=?", (decision_id,)).fetchone():
+        raise KeyError(f"unknown decision '{decision_id}'. Record the decision first.")
+    state = "tasked" if task_id else "dropped"
+    conn.execute("UPDATE follow_ups SET state=?, resolved_by=?, resolved_at=? WHERE id=?",
+                 (state, task_id or decision_id, now(), follow_up_id))
+    left = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='open'").fetchone()["n"]
+    return {"ok": True, "follow_up_id": follow_up_id, "state": state, "resolved_by": task_id or decision_id,
+            "loose_ends_left": left}

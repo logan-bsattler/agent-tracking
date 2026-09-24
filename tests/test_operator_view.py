@@ -135,3 +135,48 @@ def test_server_answers_while_another_connection_hangs(tmp_path):
             assert r.status == 200 and b"Coord board" in r.read()
     finally:
         idle.close()
+
+
+# ---------------------------------------------------------------- loose ends
+
+FU = [{"who": "Shannon", "what": "Answer Q2, Q6, Q9-Q12"}, {"who": "Ben", "what": "Chase Shannon for a date"}]
+
+
+def test_follow_ups_surface_on_board_and_operator_view(conn):
+    t = _task(conn, "LNK", "AMEX state")
+    store.complete_task(conn, t, {**INV, "follow_ups": FU})
+    b = store.board(conn)
+    assert [(x["who"], x["client"], x["task_id"]) for x in b["loose_ends"]] == [("Shannon", "LNK", t), ("Ben", "LNK", t)]
+    v = store.operator_view(conn)
+    assert [d["title"] for d in v["loose_ends"]] == [f["what"] for f in FU]
+    assert [d["title"] for d in v["needs_you"]] == ["Chase Shannon for a date"]
+    html = report.board_page(v)
+    assert "Loose ends" in html and "Answer Q2, Q6, Q9-Q12" in html
+
+
+def test_resolving_clears_the_loose_end(conn):
+    t = _task(conn, "LNK")
+    store.complete_task(conn, t, {**INV, "follow_ups": FU})
+    a, b = [x["id"] for x in store.board(conn)["loose_ends"]]
+    child = store.create_task(conn, "investigation", "Get answers", {"q": "x"}, assigned_to="LNK", parent_id=t)["task_id"]
+    assert store.resolve_follow_up(conn, a, task_id=child)["loose_ends_left"] == 1
+    dec = store.record_decision(conn, "Not chasing; Shannon owns the date", task_id=t)["decision_id"]
+    assert store.resolve_follow_up(conn, b, decision_id=dec)["state"] == "dropped"
+    assert store.board(conn)["loose_ends"] == [] and store.operator_view(conn)["needs_you"] == []
+    page = report.task_page(store.task_detail(conn, t))
+    assert f'href="/board/task/{child}"' in page and "dropped" in page
+
+
+def test_resolve_needs_exactly_one_real_target(conn):
+    t = _task(conn, "LNK")
+    store.complete_task(conn, t, {**INV, "follow_ups": FU[:1]})
+    fid = store.board(conn)["loose_ends"][0]["id"]
+    with pytest.raises(ValueError):
+        store.resolve_follow_up(conn, fid)
+    with pytest.raises(KeyError):
+        store.resolve_follow_up(conn, fid, task_id="nope")
+    with pytest.raises(KeyError):
+        store.resolve_follow_up(conn, fid, decision_id="nope")
+    store.resolve_follow_up(conn, fid, task_id=t)
+    with pytest.raises(ValueError):
+        store.resolve_follow_up(conn, fid, task_id=t)

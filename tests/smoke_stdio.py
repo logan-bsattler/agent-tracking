@@ -51,7 +51,7 @@ async def main() -> int:
     async with stdio_client(params("team", db)) as (tr, tw), ClientSession(tr, tw) as team:
         await team.initialize()
         tools = {t.name for t in (await team.list_tools()).tools}
-        check("team exposes 12 tools", len(tools) == 12, str(sorted(tools)))
+        check("team exposes 13 tools", len(tools) == 13, str(sorted(tools)))
 
         r = await team.call_tool("coord_list_intents", {"params": {}})
         intents = json.loads(text(r))

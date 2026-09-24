@@ -14,7 +14,7 @@ from pathlib import Path
 # Bump this whenever DDL or _migrate changes. connect() skips both entirely
 # when the file already reports this version, so a new table or column that
 # ships without a bump will not be created.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 def default_db_path() -> Path:
     """COORD_DB if set, else ~/.coord/coord.db -- read on every call, not at import.
@@ -73,6 +73,23 @@ CREATE TABLE IF NOT EXISTS task_parks (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS parks_task ON task_parks(task_id, created_at);
+
+-- Next steps a finished task named in its result. Each is owed a resolution:
+-- 'tasked' (resolved_by = the child task) or 'dropped' (resolved_by = the
+-- decision saying why). Open rows are the board's loose ends.
+CREATE TABLE IF NOT EXISTS follow_ups (
+  id          TEXT PRIMARY KEY,
+  task_id     TEXT NOT NULL REFERENCES tasks(id),
+  idx         INTEGER NOT NULL,
+  who         TEXT NOT NULL,
+  what        TEXT NOT NULL,
+  state       TEXT NOT NULL CHECK (state IN ('open','tasked','dropped')),
+  resolved_by TEXT,
+  created_at  INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS follow_ups_state ON follow_ups(state, created_at);
+CREATE INDEX IF NOT EXISTS follow_ups_task ON follow_ups(task_id, idx);
 
 CREATE TABLE IF NOT EXISTS intents (
   id          TEXT PRIMARY KEY,

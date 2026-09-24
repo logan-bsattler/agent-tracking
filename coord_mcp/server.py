@@ -214,6 +214,28 @@ async def coord_park_task(params: ParkInput) -> str:
         return _err(e)
 
 
+class ResolveFollowUpInput(Strict):
+    follow_up_id: str = Field(..., description="Loose end id, from coord_board loose_ends", max_length=40)
+    task_id: str | None = Field(default=None, description="Child task it became (parent_id = source task)",
+                                max_length=40)
+    decision_id: str | None = Field(default=None, description="Decision recording why it is not pursued",
+                                    max_length=40)
+
+
+@tool("coord_resolve_follow_up", title="Resolve follow-up")
+async def coord_resolve_follow_up(params: ResolveFollowUpInput) -> str:
+    """Close a loose end from coord_board. Give exactly one of task_id (it became
+    a child task; create that first) or decision_id (you recorded why it is not
+    pursued; record that first).
+
+    Returns JSON: {ok, follow_up_id, state, resolved_by, loose_ends_left}
+    """
+    try:
+        return _ok(store.resolve_follow_up(db(), params.follow_up_id, params.task_id, params.decision_id))
+    except Exception as e:
+        return _err(e)
+
+
 class ResultInput(Strict):
     task_id: str = Field(..., description="Task id")
     fields: list[str] | None = Field(
@@ -248,7 +270,11 @@ async def coord_board(params: Empty) -> str:
     """Counts by kind and state, one line per open or failed task, and the
     number of open intents. No specs, no results. Call this first each turn.
 
-    Returns JSON: {tasks_by_kind, live: [{id, kind, title, state, assigned_to}], open_intents, as_of}
+    loose_ends are next steps from finished tasks that nobody has resolved yet:
+    each is owed a child task or a decision, then coord_resolve_follow_up.
+
+    Returns JSON: {tasks_by_kind, live: [{id, kind, title, state, assigned_to}],
+    loose_ends: [{id, task_id, client, who, what}], open_intents, as_of}
     """
     try:
         return _ok(store.board(db()))

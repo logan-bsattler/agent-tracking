@@ -34,6 +34,17 @@ _FINDING = {
     "note": {"type": "str", "max": 200, "required": True},
 }
 
+# Next steps and open questions, as data rather than prose. A finished task
+# whose result only *mentions* remaining work leaves nothing on the board to
+# say so; each item here becomes a follow_ups row the master must resolve.
+_FOLLOW_UPS = {
+    "type": "list", "max": 10,
+    "items": {"type": "dict", "fields": {
+        "who": {"type": "str", "max": 40, "required": True},
+        "what": {"type": "str", "max": 200, "required": True},
+    }},
+}
+
 CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
     "code_change": {
         "done": {"type": "bool", "required": True},
@@ -52,6 +63,7 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
         },
         "branch": {"type": "str", "max": 100},
         "notes": {"type": "str", "max": 300},
+        "follow_ups": _FOLLOW_UPS,
     },
     "investigation": {
         "done": {"type": "bool", "required": True},
@@ -62,12 +74,14 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
             "items": {"type": "str", "max": 200},
         },
         "pointers": {"type": "list", "max": 20, "items": {"type": "str", "max": 400}},
+        "follow_ups": _FOLLOW_UPS,
     },
     "review": {
         "done": {"type": "bool", "required": True},
         "verdict": {"type": "enum", "values": ["approve", "request_changes", "block"], "required": True},
         "summary": {"type": "str", "max": 300, "required": True},
         "findings": {"type": "list", "max": 20, "items": {"type": "dict", "fields": _FINDING}},
+        "follow_ups": _FOLLOW_UPS,
     },
     "data_pull": {
         "done": {"type": "bool", "required": True},
@@ -75,6 +89,7 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
         "rows": {"type": "int", "required": True},
         "columns": {"type": "list", "max": 50, "items": {"type": "str", "max": 80}},
         "summary": {"type": "str", "max": 300},
+        "follow_ups": _FOLLOW_UPS,
     },
 }
 
