@@ -44,14 +44,22 @@ def create_task(
     return {"task_id": tid, "kind": kind, "expected_result_shape": contracts.expected_shape(kind)}
 
 
-def get_task(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
-    """What a worker needs to do the task: the spec plus the contract it is held to."""
+def get_task(conn: sqlite3.Connection, task_id: str, reader: str | None = None) -> dict[str, Any]:
+    """What a worker needs to do the task: the spec plus the contract it is held to.
+
+    reader is the calling session's client key. When it is the assignee, the
+    read is the pickup and the board shows the task as running. The master
+    reads tasks too, so an unnamed or other reader leaves it untouched.
+    """
     row = conn.execute(
         "SELECT id, kind, title, spec, state, assigned_to, parent_id FROM tasks WHERE id=?",
         (task_id,),
     ).fetchone()
     if row is None:
         raise KeyError(f"unknown task '{task_id}'")
+    if (reader and row["state"] == "open" and row["assigned_to"]
+            and reader.casefold() == row["assigned_to"].casefold()):
+        conn.execute("UPDATE tasks SET picked_up_at=? WHERE id=?", (now(), task_id))
     out = dict(row)
     out["spec"] = json.loads(out.pop("spec"))
     out["expected_result_shape"] = contracts.expected_shape(row["kind"])
@@ -187,6 +195,17 @@ def get_task_result(
     return out
 
 
+def _open_status(last_park: int | None, picked_up_at: int | None) -> str:
+    """Where an open task stands: 'parked' (owed a re-dispatch), 'running'
+    (the assignee has picked it up since any park) or 'open' (never picked up).
+
+    A park at or after the last pickup means no one has resumed it yet.
+    """
+    if last_park is not None and (picked_up_at is None or last_park >= picked_up_at):
+        return "parked"
+    return "running" if picked_up_at is not None else "open"
+
+
 def board(conn: sqlite3.Connection) -> dict[str, Any]:
     """Counts by kind and state, plus one line per open or failed task.
 
@@ -202,14 +221,18 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
     # the task sits open forever. Which is the bug parking existed to fix.
     live = []
     for r in conn.execute(
-        """SELECT t.id, t.kind, t.title, t.state, t.assigned_to, COUNT(p.id) parks
+        """SELECT t.id, t.kind, t.title, t.state, t.assigned_to,
+                  MAX(p.created_at) last_park, t.picked_up_at
            FROM tasks t LEFT JOIN task_parks p ON p.task_id = t.id
            WHERE t.state IN ('open','failed')
            GROUP BY t.id ORDER BY t.created_at LIMIT 50"""
     ):
         d = dict(r)
-        if d.pop("parks"):
+        status = _open_status(d.pop("last_park"), d.pop("picked_up_at"))
+        if d["state"] == "open" and status == "parked":
             d["awaiting_redispatch"] = True
+        elif d["state"] == "open" and status == "running":
+            d["picked_up"] = True
         live.append(d)
     open_intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
     # Done is not finished when the result named next steps. Without this the
@@ -377,10 +400,12 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
     needs_you: list[dict[str, Any]] = []
     master_owes: list[dict[str, Any]] = []
     running: list[dict[str, Any]] = []
+    waiting: list[dict[str, Any]] = []
     recent: list[dict[str, Any]] = []
     rows = conn.execute(
         """SELECT t.id, t.kind, t.title, t.state, t.assigned_to, t.result,
-                  t.created_at, t.completed_at, COUNT(p.id) parks
+                  t.created_at, t.completed_at, t.picked_up_at,
+                  COUNT(p.id) parks, MAX(p.created_at) last_park
            FROM tasks t LEFT JOIN task_parks p ON p.task_id = t.id
            WHERE t.state IN ('open','failed') OR t.completed_at >= ?
            GROUP BY t.id ORDER BY COALESCE(t.completed_at, t.created_at) DESC""",
@@ -393,17 +418,24 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
             res = json.loads(r["result"] or "{}")
             d["note"] = _gist(r["result"]) + ("" if res.get("retryable") else " (not retryable)")
             needs_you.append(d)
-        elif r["state"] == "open" and r["parks"]:
-            d["note"] = f"parked {r['parks']}x, awaiting re-dispatch"
-            master_owes.append(d)
         elif r["state"] == "open":
-            running.append(d)
+            status = _open_status(r["last_park"], r["picked_up_at"])
+            if status == "parked":
+                d["note"] = f"parked {r['parks']}x, awaiting re-dispatch"
+                master_owes.append(d)
+            elif status == "running":
+                d["since"] = r["picked_up_at"]
+                running.append(d)
+            else:
+                d["note"] = "not picked up"
+                waiting.append(d)
         else:
             d["note"] = _gist(r["result"])
             if d["client"] in MANUAL_DELIVERY:
                 needs_you.append({**d, "note": f"{MANUAL_DELIVERY[d['client']]} · {d['note']}"})
             recent.append(d)
     running.sort(key=lambda d: d["since"])
+    waiting.sort(key=lambda d: d["since"])
     loose_ends: list[dict[str, Any]] = []
     for r in conn.execute(
         """SELECT f.id fid, f.task_id, f.who, f.what, f.created_at, t.assigned_to, t.title
@@ -420,7 +452,7 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
         master_owes.append({"id": "", "kind": "intent", "title": f"{intents} open intent(s) to triage",
                             "client": "—", "since": t, "note": ""})
     return {"needs_you": needs_you, "master_owes": master_owes, "loose_ends": loose_ends,
-            "running": running, "recent": recent, "recent_h": recent_h, "as_of": t}
+            "running": running, "waiting": waiting, "recent": recent, "recent_h": recent_h, "as_of": t}
 
 
 def task_detail(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:

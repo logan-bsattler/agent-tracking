@@ -14,7 +14,7 @@ from pathlib import Path
 # Bump this whenever DDL or _migrate changes. connect() skips both entirely
 # when the file already reports this version, so a new table or column that
 # ships without a bump will not be created.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 def default_db_path() -> Path:
     """COORD_DB if set, else ~/.coord/coord.db -- read on every call, not at import.
@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   result_version INTEGER,
   from_intent    TEXT,
   created_at     INTEGER NOT NULL,
-  completed_at   INTEGER
+  completed_at   INTEGER,
+  -- Last time the assigned client read the task (coord_get_task). Null means
+  -- it was never picked up; a park after it means it is waiting on the master.
+  picked_up_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, created_at);
 CREATE INDEX IF NOT EXISTS tasks_kind ON tasks(kind, state);
@@ -170,6 +173,8 @@ CREATE INDEX IF NOT EXISTS quota_ts ON quota_snapshots(ts);
 def _migrate(conn: sqlite3.Connection) -> None:
     """Additive migrations. CREATE TABLE IF NOT EXISTS won't add a column to a
     table that already exists, so do it here."""
+    if "picked_up_at" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+        conn.execute("ALTER TABLE tasks ADD COLUMN picked_up_at INTEGER")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(quota_snapshots)")}
     if "source" not in cols:
         conn.execute("ALTER TABLE quota_snapshots ADD COLUMN source TEXT NOT NULL DEFAULT 'statusline'")

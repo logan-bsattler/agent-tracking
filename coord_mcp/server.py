@@ -28,6 +28,9 @@ from . import contracts, store
 from .db import connect
 
 ROLE = os.environ.get("COORD_ROLE", "team")
+# The calling session's client key. Each client's server starts in that
+# client's folder, which is named for its key; the master's never matches one.
+READER = os.environ.get("COORD_CLIENT") or os.path.basename(os.getcwd())
 
 DESKTOP_TOOLS = {"coord_propose_intent", "coord_board_summary"}
 
@@ -139,7 +142,7 @@ async def coord_get_task(params: TaskIdInput) -> str:
     Returns JSON: {id, kind, title, spec, state, assigned_to, parent_id, expected_result_shape}
     """
     try:
-        return _ok(store.get_task(db(), params.task_id))
+        return _ok(store.get_task(db(), params.task_id, reader=READER))
     except Exception as e:
         return _err(e)
 
