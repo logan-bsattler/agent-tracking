@@ -395,3 +395,24 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
                             "client": "—", "since": t, "note": ""})
     return {"needs_you": needs_you, "master_owes": master_owes, "running": running,
             "recent": recent, "recent_h": recent_h, "as_of": t}
+
+
+def task_detail(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
+    """Everything the board holds on one task, for the operator's drill-down.
+
+    Deliberately not an MCP tool: the master reads results by named field and
+    must not be handed a whole one. This is for a person reading a page.
+    """
+    r = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if r is None:
+        return None
+    d = dict(r)
+    d["spec"] = json.loads(d["spec"] or "null")
+    d["result"] = json.loads(d["result"]) if d["result"] else None
+    d["parks"] = parks(conn, task_id)
+    d["decisions"] = [dict(x) for x in conn.execute(
+        "SELECT id, statement, because, supersedes, created_at FROM decisions WHERE task_id=? ORDER BY created_at",
+        (task_id,))]
+    d["children"] = [dict(x) for x in conn.execute(
+        "SELECT id, title, state, assigned_to FROM tasks WHERE parent_id=? ORDER BY created_at", (task_id,))]
+    return d

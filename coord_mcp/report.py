@@ -583,6 +583,15 @@ BOARD_CSS = """
 .item code { color:var(--muted); font-size:12px; }
 .clear { color:var(--good); font-weight:600; }
 nav { margin:0 0 16px; font-size:13px; } nav a { color:var(--s1); }
+a.drill { color:var(--ink); text-decoration:none; border-bottom:1px dotted var(--axis); }
+a.drill:hover { color:var(--s1); border-bottom-color:var(--s1); }
+dl.kv { display:grid; grid-template-columns:minmax(110px,max-content) 1fr; gap:6px 16px; margin:0; }
+dl.kv dt { color:var(--ink2); font-size:13px; } dl.kv dd { margin:0; min-width:0; overflow-wrap:anywhere; }
+dl.kv dl.kv { padding:6px 0 6px 10px; border-left:2px solid var(--grid); }
+ul.vals { margin:0; padding-left:18px; } ul.vals li { margin:2px 0; overflow-wrap:anywhere; }
+.state { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600;
+  border:1px solid currentColor; margin-left:8px; vertical-align:3px; }
+.st-done { color:var(--good); } .st-failed { color:var(--critical); } .st-open { color:var(--s1); }
 """
 
 
@@ -597,9 +606,11 @@ def _items(rows: list[dict[str, Any]], t: int, empty: str) -> str:
     out = []
     for d in rows:
         tid = f" <code>{esc(d['id'][:8])}</code>" if d["id"] else ""
+        title = (f'<a class="drill" href="/board/task/{esc(d["id"])}">{esc(d["title"])}</a>' if d["id"]
+                 else esc(d["title"]))
         note = f'<div class="note">{esc(d["note"][:220])}</div>' if d.get("note") else ""
         out.append(f'<div class="item"><div class="client">{esc(d["client"])}</div>'
-                   f'<div>{esc(d["title"])}{tid}</div><div class="age">{_age(d["since"], t)}</div>{note}</div>')
+                   f'<div>{title}{tid}</div><div class="age">{_age(d["since"], t)}</div>{note}</div>')
     return "".join(out)
 
 
@@ -626,6 +637,74 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
 </main></body></html>"""
 
 
+def _val(v: Any) -> str:
+    """Any JSON value as readable HTML: dicts as key/value, lists as bullets."""
+    if isinstance(v, dict):
+        if not v:
+            return '<span class="muted">none</span>'
+        return '<dl class="kv">' + "".join(
+            f"<dt>{esc(str(k).replace('_', ' '))}</dt><dd>{_val(x)}</dd>" for k, x in v.items()) + "</dl>"
+    if isinstance(v, list):
+        if not v:
+            return '<span class="muted">none</span>'
+        return '<ul class="vals">' + "".join(f"<li>{_val(x)}</li>" for x in v) + "</ul>"
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if v is None:
+        return '<span class="muted">—</span>'
+    return esc(v)
+
+
+def _shell(title: str, body: str) -> str:
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title>'
+            f"<style>{CSS}{BOARD_CSS}</style></head><body><main>{body}</main></body></html>")
+
+
+def task_page(d: dict[str, Any] | None, task_id: str = "") -> str:
+    """One task in full: what was asked, what came back, and how it got there."""
+    nav = '<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Task</b></nav>'
+    if d is None:
+        return _shell("Coord task", f'{nav}<h1>No such task</h1>'
+                      f'<p class="sub">Nothing on the board has id <code>{esc(task_id)}</code>.</p>')
+    took = ""
+    if d["completed_at"]:
+        m = (d["completed_at"] - d["created_at"]) // 60
+        took = (" · took under a minute" if m < 1 else f" · took {m}m" if m < 120
+                else f" · took {m // 60}h{m % 60:02d}m")
+    meta = {"client": d["assigned_to"] or "—", "kind": d["kind"], "id": d["id"],
+            "created": when(d["created_at"]), "finished": when(d["completed_at"]) if d["completed_at"] else "—"}
+    if d["parent_id"]:
+        meta["parent"] = d["parent_id"]
+    if d["from_intent"]:
+        meta["from intent"] = d["from_intent"]
+    cards = ['<div class="card"><dl class="kv">' + "".join(
+        f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in meta.items()) + "</dl></div>"]
+    if d["result"] is not None:
+        cards.append(f'<div class="card"><h2>Result</h2>{_val(d["result"])}</div>')
+    else:
+        cards.append('<div class="card"><h2>Result</h2><p class="empty">Still open; nothing reported yet.</p></div>')
+    cards.append(f'<div class="card"><h2>What was asked</h2>{_val(d["spec"])}</div>')
+    for i, p in enumerate(d["parks"], 1):
+        p = {k: v for k, v in p.items() if k not in ("park_id", "at")}
+        cards.append(f'<div class="card"><h2>Park {i} of {len(d["parks"])}</h2>{_val(p)}</div>')
+    if d["decisions"]:
+        items = "".join(
+            f'<li>{esc(x["statement"])}'
+            + (f' <span class="muted">— {esc(x["because"])}</span>' if x["because"] else "")
+            + f' <span class="muted">({when(x["created_at"])})</span></li>' for x in d["decisions"])
+        cards.append(f'<div class="card"><h2>Decisions</h2><ul class="vals">{items}</ul></div>')
+    if d["children"]:
+        items = "".join(
+            f'<li><a class="drill" href="/board/task/{esc(c["id"])}">{esc(c["title"])}</a> '
+            f'<span class="muted">{esc(c["assigned_to"] or "")} · {esc(c["state"])}</span></li>'
+            for c in d["children"])
+        cards.append(f'<div class="card"><h2>Follow-up tasks</h2><ul class="vals">{items}</ul></div>')
+    head = (f'{nav}<h1>{esc(d["title"])}<span class="state st-{esc(d["state"])}">{esc(d["state"])}</span></h1>'
+            f'<p class="sub">{esc(d["assigned_to"] or "")} · {esc(d["kind"])}{took}</p>')
+    return _shell(f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', head + "".join(cards))
+
+
 def write(conn: sqlite3.Connection, out: Path, days: int = 7) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render(usage.summary(conn, days), usage.live(conn)), encoding="utf-8")
@@ -646,6 +725,9 @@ def serve(conn: sqlite3.Connection, port: int = 8765, days: int = 7, open_browse
             path = self.path.split("?", 1)[0].rstrip("/")
             if path == "/board":
                 body = board_page(store.operator_view(conn)).encode("utf-8")
+            elif path.startswith("/board/task/"):
+                tid = path.rsplit("/", 1)[1]
+                body = task_page(store.task_detail(conn, tid), tid).encode("utf-8")
             elif path == "":
                 usage.ingest(conn)
                 body = render(usage.summary(conn, days), usage.live(conn), refresh=60).encode("utf-8")

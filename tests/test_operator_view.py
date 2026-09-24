@@ -79,3 +79,28 @@ def test_page_counts_needs_in_title_and_escapes(conn):
     html = report.board_page(store.operator_view(conn))
     assert "<title>(1) Coord board</title>" in html
     assert "<script>x</script>" not in html and "&lt;script&gt;" in html
+
+
+def test_board_rows_link_to_detail(conn):
+    t = _task(conn, "LNK")
+    assert f'href="/board/task/{t}"' in report.board_page(store.operator_view(conn))
+
+
+def test_detail_shows_spec_result_parks_and_decisions(conn):
+    t = store.create_task(conn, "investigation", "Check AMEX", {"question": "Is FDD-025 current?"},
+                          assigned_to="LNK")["task_id"]
+    store.park_task(conn, t, next_step="read the tracker", done=["read the spec"])
+    store.complete_task(conn, t, {**INV, "evidence": ["approved 8/14", "no code exists"]})
+    store.record_decision(conn, "Re-baseline LNK AMEX at 10%", because="scope moved to FDD-037", task_id=t)
+    d = store.task_detail(conn, t)
+    assert d["spec"] == {"question": "Is FDD-025 current?"} and d["result"]["confidence"] == "high"
+    html = report.task_page(d)
+    for s in ("Is FDD-025 current?", "no code exists", "read the tracker", "Park 1 of 1",
+              "Re-baseline LNK AMEX at 10%", "st-done"):
+        assert s in html
+
+
+def test_detail_for_unknown_task_is_not_an_error(conn):
+    assert store.task_detail(conn, "nope") is None
+    page = report.task_page(None, "<x>")
+    assert "No such task" in page and "<x>" not in page
