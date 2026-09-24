@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import usage
+from . import store, usage
 
 # Fixed slot per model family. Color follows the entity, never its rank.
 MODEL_SLOTS = [("sonnet", 1), ("opus", 2), ("fable", 3), ("haiku", 4)]
@@ -554,6 +554,7 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude usage</title>
 <style>{CSS}</style></head><body><main>
+<nav><b>Usage</b> · <a href="/board">Board</a></nav>
 <h1>Claude usage</h1>
 <p class="sub">{esc(period)} · generated {when(s['generated'])}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · spend is API-equivalent, the same figure as <code>/cost</code></p>
 {kpis(s)}
@@ -567,6 +568,62 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
 <div class="card"><h2>Sessions, most expensive first</h2>{session_table(s)}</div>
 <p class="sub">Spend and sessions come from Claude Code transcripts under ~/.claude/projects, so they cover Claude Code only. Limit percentages are the shared subscription pool, read from the statusLine hook and from Claude Desktop's plan-usage history, so they also move for claude.ai chat, the Desktop app and mobile. Cache reads are priced at the cached rate; 1-hour cache writes at 2x input.</p>
 </main><div id="tip"></div><script>{JS}</script></body></html>"""
+
+
+BOARD_CSS = """
+.grp { margin-bottom:20px; }
+.grp h2 .count { color:var(--muted); font-weight:400; margin-left:6px; }
+.grp.alert { border-color:var(--critical); border-width:2px; }
+.grp.alert h2 { color:var(--critical); }
+.item { display:grid; grid-template-columns:90px 1fr auto; gap:4px 12px; padding:8px 0; border-bottom:1px solid var(--grid); }
+.item:last-child { border-bottom:0; }
+.client { font-weight:600; }
+.item .note { grid-column:2 / 4; color:var(--ink2); font-size:13px; }
+.item .age { color:var(--muted); font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.item code { color:var(--muted); font-size:12px; }
+.clear { color:var(--good); font-weight:600; }
+nav { margin:0 0 16px; font-size:13px; } nav a { color:var(--s1); }
+"""
+
+
+def _age(ts: int, t: int) -> str:
+    m = max(t - ts, 0) // 60
+    return f"{m}m ago" if m < 60 else f"{m // 60}h ago" if m < 48 * 60 else f"{m // 1440}d ago"
+
+
+def _items(rows: list[dict[str, Any]], t: int, empty: str) -> str:
+    if not rows:
+        return f'<p class="empty">{esc(empty)}</p>'
+    out = []
+    for d in rows:
+        tid = f" <code>{esc(d['id'][:8])}</code>" if d["id"] else ""
+        note = f'<div class="note">{esc(d["note"][:220])}</div>' if d.get("note") else ""
+        out.append(f'<div class="item"><div class="client">{esc(d["client"])}</div>'
+                   f'<div>{esc(d["title"])}{tid}</div><div class="age">{_age(d["since"], t)}</div>{note}</div>')
+    return "".join(out)
+
+
+def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
+    """Operator view of the coord board: what needs you first, then the rest."""
+    t = v["as_of"]
+    n = len(v["needs_you"])
+    needs = (_items(v["needs_you"], t, "") if n
+             else '<p class="clear">Nothing needs you.</p>')
+    meta_refresh = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    def grp(title: str, rows: list, empty: str, cls: str = "") -> str:
+        return (f'<div class="card grp {cls}"><h2>{esc(title)}<span class="count">{len(rows)}</span></h2>'
+                f"{_items(rows, t, empty)}</div>")
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{'(' + str(n) + ') ' if n else ''}Coord board</title>
+<style>{CSS}{BOARD_CSS}</style></head><body><main>
+<nav><a href="/">Usage</a> · <b>Board</b></nav>
+<h1>Coord board</h1>
+<p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
+<div class="card grp {'alert' if n else ''}"><h2>Needs you<span class="count">{n}</span></h2>{needs}</div>
+{grp("Master owes", v["master_owes"], "Nothing: no parked tasks, no open intents.")}
+{grp("Running", v["running"], "No open work.")}
+{grp(f"Done, last {v['recent_h']}h", v["recent"], "Nothing finished recently.")}
+</main></body></html>"""
 
 
 def write(conn: sqlite3.Connection, out: Path, days: int = 7) -> Path:
@@ -586,8 +643,15 @@ def serve(conn: sqlite3.Connection, port: int = 8765, days: int = 7, open_browse
 
     class H(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            usage.ingest(conn)
-            body = render(usage.summary(conn, days), usage.live(conn), refresh=60).encode("utf-8")
+            path = self.path.split("?", 1)[0].rstrip("/")
+            if path == "/board":
+                body = board_page(store.operator_view(conn)).encode("utf-8")
+            elif path == "":
+                usage.ingest(conn)
+                body = render(usage.summary(conn, days), usage.live(conn), refresh=60).encode("utf-8")
+            else:
+                self.send_error(404)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))

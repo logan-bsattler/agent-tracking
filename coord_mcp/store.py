@@ -333,3 +333,65 @@ def board_summary(conn: sqlite3.Connection) -> dict[str, Any]:
         counts.setdefault(r["kind"], {})[r["state"]] = r["n"]
     open_intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
     return {"tasks_by_kind": counts, "open_intents": open_intents, "as_of": now()}
+
+
+# ------------------------------------------------------------ operator view
+
+# Clients whose `done` is a built artifact, not a delivered change: a human
+# carries it the rest of the way, so a fresh done is the operator's to act on.
+MANUAL_DELIVERY = {"PBE": "built zip: OneDrive → VM → WinSCP is yours"}
+
+
+def _gist(result: str | None) -> str:
+    """One line from a result, for a human skimming. Never the whole result."""
+    try:
+        r = json.loads(result or "{}")
+    except ValueError:
+        return ""
+    return str(r.get("reason") or r.get("verdict") or r.get("summary") or r.get("output_path") or "")
+
+
+def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any]:
+    """The board grouped for the operator, not the master.
+
+    The operator cannot follow the master's stream with several clients
+    running, so this answers one question first: is anything waiting on me?
+    Everything the master can do itself goes below that line.
+    """
+    t = now()
+    needs_you: list[dict[str, Any]] = []
+    master_owes: list[dict[str, Any]] = []
+    running: list[dict[str, Any]] = []
+    recent: list[dict[str, Any]] = []
+    rows = conn.execute(
+        """SELECT t.id, t.kind, t.title, t.state, t.assigned_to, t.result,
+                  t.created_at, t.completed_at, COUNT(p.id) parks
+           FROM tasks t LEFT JOIN task_parks p ON p.task_id = t.id
+           WHERE t.state IN ('open','failed') OR t.completed_at >= ?
+           GROUP BY t.id ORDER BY COALESCE(t.completed_at, t.created_at) DESC""",
+        (t - recent_h * 3600,),
+    )
+    for r in rows:
+        d = {"id": r["id"], "kind": r["kind"], "title": r["title"], "client": r["assigned_to"] or "—",
+             "since": r["completed_at"] or r["created_at"]}
+        if r["state"] == "failed":
+            res = json.loads(r["result"] or "{}")
+            d["note"] = _gist(r["result"]) + ("" if res.get("retryable") else " (not retryable)")
+            needs_you.append(d)
+        elif r["state"] == "open" and r["parks"]:
+            d["note"] = f"parked {r['parks']}x, awaiting re-dispatch"
+            master_owes.append(d)
+        elif r["state"] == "open":
+            running.append(d)
+        else:
+            d["note"] = _gist(r["result"])
+            if d["client"] in MANUAL_DELIVERY:
+                needs_you.append({**d, "note": f"{MANUAL_DELIVERY[d['client']]} · {d['note']}"})
+            recent.append(d)
+    running.sort(key=lambda d: d["since"])
+    intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
+    if intents:
+        master_owes.append({"id": "", "kind": "intent", "title": f"{intents} open intent(s) to triage",
+                            "client": "—", "since": t, "note": ""})
+    return {"needs_you": needs_you, "master_owes": master_owes, "running": running,
+            "recent": recent, "recent_h": recent_h, "as_of": t}
