@@ -41,10 +41,13 @@ def test_ingests_desktop_samples(conn, tmp_path, monkeypatch):
 
 
 def test_ingest_is_idempotent(conn, tmp_path, monkeypatch):
-    _file(tmp_path, [_s(60, 10), _s(30, 40)], monkeypatch)
+    # Build the samples once: rebuilt, they are re-stamped from now(), and a
+    # second ticking over in between turns two old samples into two new ones.
+    old = [_s(60, 10), _s(30, 40)]
+    _file(tmp_path, old, monkeypatch)
     assert usage.ingest_desktop_quota(conn) == 2
     assert usage.ingest_desktop_quota(conn) == 0
-    _file(tmp_path, [_s(60, 10), _s(30, 40), _s(0, 70)], monkeypatch)
+    _file(tmp_path, old + [_s(0, 70)], monkeypatch)
     assert usage.ingest_desktop_quota(conn) == 1
 
 
