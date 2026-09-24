@@ -16,7 +16,13 @@ from pathlib import Path
 # ships without a bump will not be created.
 SCHEMA_VERSION = 3
 
-DEFAULT_DB_PATH = Path(os.environ.get("COORD_DB", Path.home() / ".coord" / "coord.db")).expanduser()
+def default_db_path() -> Path:
+    """COORD_DB if set, else ~/.coord/coord.db -- read on every call, not at import.
+
+    Frozen at import, a COORD_DB set afterwards (as every test fixture does) was
+    silently ignored and connect() opened the real board instead.
+    """
+    return Path(os.environ.get("COORD_DB", Path.home() / ".coord" / "coord.db")).expanduser()
 
 # journal_mode is a property of the file, so it is set once at init rather than
 # on every connection. busy_timeout is per-connection and is set in connect().
@@ -185,7 +191,7 @@ def _schema_version(conn: sqlite3.Connection) -> int:
 
 def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Open (and initialise, if needed) the board database."""
-    path = Path(db_path) if db_path else DEFAULT_DB_PATH
+    path = Path(db_path) if db_path else default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), isolation_level=None, timeout=5.0)
     conn.row_factory = sqlite3.Row

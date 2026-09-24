@@ -459,3 +459,10 @@ def test_quota_only_warning_stays_quiet(conn, tmp_path, monkeypatch, capsys):
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     assert guard.BANNER_RULE not in ctx
     assert ctx.startswith("Usage guard:")
+
+
+def test_hook_opens_the_db_named_by_coord_db(conn, tmp_path):
+    """The fixture sets COORD_DB after import; connect() must honour it, or every
+    hook test silently runs against the real board."""
+    from coord_mcp.db import default_db_path
+    assert default_db_path() == tmp_path / "t.db"
