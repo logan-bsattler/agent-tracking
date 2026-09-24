@@ -711,27 +711,32 @@ def write(conn: sqlite3.Connection, out: Path, days: int = 7) -> Path:
     return out
 
 
-def serve(conn: sqlite3.Connection, port: int = 8765, days: int = 7, open_browser: bool = False) -> int:
+def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) -> int:
     """Localhost server that re-ingests and re-renders on every request.
 
     The page carries a 60-second meta refresh, so a browser tab left open is
     a live dashboard. Bound to 127.0.0.1 only.
+
+    Threaded, because a browser that holds a connection open would otherwise
+    stall every other request. `connect` makes one sqlite connection per
+    request, since a connection cannot cross threads; ingest takes a lock so
+    two page loads do not race on the same transcript offsets.
     """
     import webbrowser
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    ingest_lock = threading.Lock()
 
     class H(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             path = self.path.split("?", 1)[0].rstrip("/")
-            if path == "/board":
-                body = board_page(store.operator_view(conn)).encode("utf-8")
-            elif path.startswith("/board/task/"):
-                tid = path.rsplit("/", 1)[1]
-                body = task_page(store.task_detail(conn, tid), tid).encode("utf-8")
-            elif path == "":
-                usage.ingest(conn)
-                body = render(usage.summary(conn, days), usage.live(conn), refresh=60).encode("utf-8")
-            else:
+            conn = connect()
+            try:
+                body = self._body(conn, path)
+            finally:
+                conn.close()
+            if body is None:
                 self.send_error(404)
                 return
             self.send_response(200)
@@ -741,10 +746,23 @@ def serve(conn: sqlite3.Connection, port: int = 8765, days: int = 7, open_browse
             self.end_headers()
             self.wfile.write(body)
 
+        def _body(self, conn, path):
+            if path == "/board":
+                return board_page(store.operator_view(conn)).encode("utf-8")
+            if path.startswith("/board/task/"):
+                tid = path.rsplit("/", 1)[1]
+                return task_page(store.task_detail(conn, tid), tid).encode("utf-8")
+            if path == "":
+                with ingest_lock:
+                    usage.ingest(conn)
+                return render(usage.summary(conn, days), usage.live(conn), refresh=60).encode("utf-8")
+            return None
+
         def log_message(self, *a):
             pass
 
-    srv = HTTPServer(("127.0.0.1", port), H)
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    srv.daemon_threads = True
     url = f"http://127.0.0.1:{port}/"
     print(f"serving {url}  (Ctrl+C to stop)")
     if open_browser:

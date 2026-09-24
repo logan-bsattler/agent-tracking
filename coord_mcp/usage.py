@@ -922,8 +922,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "serve":
         from . import report
-        conn = connect()
-        return report.serve(conn, a.port, a.days, a.open)
+        connect().close()  # create or migrate the db once, before any thread races to
+        return report.serve(connect, a.port, a.days, a.open)
 
     conn = connect()
     if a.cmd == "ingest":

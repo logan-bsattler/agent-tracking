@@ -104,3 +104,34 @@ def test_detail_for_unknown_task_is_not_an_error(conn):
     assert store.task_detail(conn, "nope") is None
     page = report.task_page(None, "<x>")
     assert "No such task" in page and "<x>" not in page
+
+
+def test_server_answers_while_another_connection_hangs(tmp_path):
+    """A browser holding a socket open must not stall the next page load."""
+    import functools
+    import socket
+    import threading
+    import urllib.request
+
+    from coord_mcp.db import connect as db_connect
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    make = functools.partial(db_connect, tmp_path / "srv.db")
+    make().close()
+    threading.Thread(target=report.serve, args=(make, port), daemon=True).start()
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(50):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            import time
+            time.sleep(0.05)
+    idle = socket.create_connection(("127.0.0.1", port))  # sends nothing, ever
+    try:
+        with urllib.request.urlopen(base + "/board", timeout=5) as r:
+            assert r.status == 200 and b"Coord board" in r.read()
+    finally:
+        idle.close()
