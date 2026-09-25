@@ -347,15 +347,16 @@ def hour_chart(s: dict[str, Any]) -> str:
     return f'<svg viewBox="0 0 {W} {h_}">{"".join(parts)}</svg>'
 
 
-def runway_chart(v: dict[str, Any]) -> str:
-    """The 5-hour window as a runway: where the limit is now, where the pace
-    lands it, and whether that happens before the window resets.
+def runway_chart(v: dict[str, Any], key: str = "burn", hours: float = 5) -> str:
+    """A limit window as a runway: where the limit is now, where the pace
+    lands it, and whether that happens before the window resets. key picks
+    the pace in v: "burn" for the 5-hour window, "weekly" for the week.
 
     The whole question is whether the projected line crosses the ceiling
     before the right-hand edge, so the chart is drawn to make exactly that
     crossing visible.
     """
-    b = v.get("burn") or {}
+    b = v.get(key) or {}
     w = b.get("window") or {}
     rows, start, end = w.get("rows") or [], w.get("start"), w.get("end")
     if not rows or not start or not end:
@@ -389,7 +390,12 @@ def runway_chart(v: dict[str, Any]) -> str:
         parts.append('<path d="M' + " L".join(f"{px:.1f},{py:.1f}" for px, py in pts)
                      + '" fill="none" stroke="var(--s1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>')
 
-    hhmm = lambda ts: datetime.fromtimestamp(ts).strftime("%H:%M")  # noqa: E731
+    short = hours <= 5
+    hhmm = lambda ts: datetime.fromtimestamp(ts).strftime("%H:%M" if short else "%a %d %b %H:%M")  # noqa: E731
+    # The 5-hour window counts in minutes; a week in hours and days.
+    mins = (lambda sec: f"{sec // 60:.0f} minutes") if short else _span  # noqa: E731
+    in_h = (lambda sec: f"{sec / 3600:.1f} hours") if short else _span  # noqa: E731
+    length = "Five hours" if short else "A week"
     bad = bool(b.get("hits_limit_before_reset"))
     # Three states, not two: a green verdict needs a known reset time, because
     # without one the comparison it rests on cannot be made.
@@ -404,7 +410,7 @@ def runway_chart(v: dict[str, Any]) -> str:
         else:
             end_pct = min(cur + b_slope * (domain_end - t) / 3600, 100)
             ex, ey = x(domain_end), y(end_pct)
-            lbl = f"{end_pct:.0f}% by reset" if certain else f"{end_pct:.0f}% in {(domain_end - t) / 3600:.1f}h"
+            lbl = f"{end_pct:.0f}% by reset" if certain else f"{end_pct:.0f}% in {in_h(domain_end - t)}"
         parts.append(f'<path d="M{pts[-1][0]:.1f},{pts[-1][1]:.1f} L{ex:.1f},{ey:.1f}" fill="none" '
                      f'stroke="{colour}" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round"/>')
         parts.append(f'<circle cx="{ex:.1f}" cy="{ey:.1f}" r="4.5" fill="{colour}" stroke="var(--surface)" stroke-width="2"/>')
@@ -428,22 +434,26 @@ def runway_chart(v: dict[str, Any]) -> str:
 
     dot = f'<span class="dot" style="background:{colour}"></span>'
     if state == "over":
-        verdict = (f'{dot}<b>Will hit the limit</b> at {hhmm(hit)}, {(hit - t) // 60:.0f} minutes from now and '
-                   f'{(end - hit) // 60:.0f} minutes before the window resets, at the current {b_slope:.0f}% per hour.')
+        verdict = (f'{dot}<b>Will hit the limit</b> at {hhmm(hit)}, {mins(hit - t)} from now and '
+                   f'{mins(end - hit)} before the window resets, at the current {b_slope:.{0 if short else 1}f}% per hour.')
     elif state == "ok":
-        verdict = (f'{dot}<b>On track.</b> At {b_slope:.0f}% per hour the window reaches about {end_pct:.0f}% by the '
-                   f'time it resets, in {(end - t) / 3600:.1f} hours.')
+        verdict = (f'{dot}<b>On track.</b> At {b_slope:.{0 if short else 1}f}% per hour the window reaches about '
+                   f'{end_pct:.0f}% by the time it resets, in {in_h(end - t)}.')
     elif state == "unclear":
-        guess = ('Five hours after the first reading has already passed with no reset, so the window started later '
+        guess = (f'{length} after the first reading has already passed with no reset, so the window started later '
                  'than that reading and its end cannot even be guessed.' if stale else
-                 'The marked reset is a guess at five hours after the first reading.')
-        verdict = (f'{dot}<b>Pace is {b_slope:.0f}% per hour</b>, reaching 100% at {hhmm(hit)}. No reset time is known '
+                 f'The marked reset is a guess at {length.lower()} after the first reading.')
+        verdict = (f'{dot}<b>Pace is {b_slope:.{0 if short else 1}f}% per hour</b>, reaching 100% at {hhmm(hit)}. No reset time is known '
                    f'yet, so whether that lands before the window resets cannot be said. {guess} Open a new Claude '
                    f'Code session and its status line reports the real reset time from then on.')
     else:
         verdict = f'{dot}Not enough readings in this window yet to project a pace.'
     return (f'<p class="sub" style="margin:0 0 8px">{verdict}</p>'
             f'<svg viewBox="0 0 {RW} {RH}">{"".join(parts)}</svg>')
+
+
+def _span(sec: float) -> str:
+    return f"{sec / 60:.0f} minutes" if sec < 7200 else f"{sec / 3600:.1f} hours" if sec < 172800 else f"{sec / 86400:.1f} days"
 
 
 def now_section(v: dict[str, Any]) -> str:
@@ -551,6 +561,8 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
     period = f"{datetime.fromtimestamp(s['start']).strftime('%d %b')} to {datetime.fromtimestamp(s['end']).strftime('%d %b %Y')}"
     meta_refresh = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     now_card = f'<div class="card"><h2>Right now: the current 5-hour window</h2>{now_section(v)}</div>' if v else ""
+    week = runway_chart(v, "weekly", 7 * 24) if v else ""
+    week_card = f'<div class="card"><h2>This week: the weekly window</h2>{week}</div>' if week else ""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude usage</title>
 <style>{CSS}</style></head><body><main>
@@ -559,6 +571,7 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
 <p class="sub">{esc(period)} · generated {when(s['generated'])}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · spend is API-equivalent, the same figure as <code>/cost</code></p>
 {kpis(s)}
 {now_card}
+{week_card}
 <div class="card"><h2>Limits over time</h2>{quota_chart(s)}</div>
 <div class="card"><h2>Where the limit went</h2>{attribution_chart(s)}</div>
 <div class="card"><h2>Spend per day, by model</h2>{daily_chart(s)}</div>

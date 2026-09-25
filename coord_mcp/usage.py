@@ -516,36 +516,49 @@ def quota_series(conn: sqlite3.Connection, start: int, end: int, bucket: int = 3
     return [out[k] for k in sorted(out)]
 
 
-def current_window(conn: sqlite3.Connection, lookback_h: float = 6) -> dict[str, Any]:
-    """The 5-hour window in progress: its start, its end, and every reading in it.
+def _window_reset(conn: sqlite3.Connection, latest: dict[str, Any] | None, key: str) -> int | None:
+    """The window's reset time, if known. latest_quota only borrows the weekly
+    reset alongside a live 5-hour one, so look the weekly one up directly."""
+    reset = latest.get(f"{key}_reset") if latest else None
+    if reset or key == "five_hour":
+        return reset
+    row = conn.execute(f"SELECT {key}_reset r FROM quota_snapshots WHERE {key}_reset > ? "
+                       "ORDER BY ts DESC LIMIT 1", (now(),)).fetchone()
+    return row["r"] if row else None
 
-    The window is five hours by definition, so when a reset time is known the
-    start is exactly five hours before it. Without one (Claude Desktop samples
-    carry no resets) the start is the first reading after the last reset drop,
-    and the end is five hours after that, which is an estimate.
+
+def current_window(conn: sqlite3.Connection, lookback_h: float = 6,
+                   key: str = "five_hour", hours: float = 5) -> dict[str, Any]:
+    """The window in progress (5-hour by default, weekly with key="seven_day"):
+    its start, its end, and every reading in it.
+
+    The window's length is fixed, so when a reset time is known the start is
+    exactly that long before it. Without one (Claude Desktop samples carry no
+    resets) the start is the first reading after the last reset drop, and the
+    end is one window length after that, which is an estimate.
     """
     t = now()
-    rows = [r for r in quota_series(conn, t - int(lookback_h * 3600), t) if r["five_hour_pct"] is not None]
+    k, span = f"{key}_pct", int(hours * 3600)
+    rows = [r for r in quota_series(conn, t - int(lookback_h * 3600), t) if r[k] is not None]
     cut = 0
     for i in range(1, len(rows)):
-        if rows[i]["five_hour_pct"] < rows[i - 1]["five_hour_pct"] - 5:
+        if rows[i][k] < rows[i - 1][k] - 5:
             cut = i
     rows = rows[cut:]
-    latest = latest_quota(conn)
-    reset = latest.get("five_hour_reset") if latest else None
+    reset = _window_reset(conn, latest_quota(conn), key)
     if reset:
-        start, end = reset - 5 * 3600, reset
+        start, end = reset - span, reset
         rows = [r for r in rows if r["ts"] >= start]
     elif rows:
         start = rows[0]["ts"]
-        end = start + 5 * 3600
+        end = start + span
     else:
         start = end = None
     # An estimated end that has already passed without a reset is disproved by
     # its own evidence: the window is still open, so it started later than the
     # first reading we have.
     stale = bool(end and not reset and end < t)
-    return {"rows": [{"ts": r["ts"], "pct": r["five_hour_pct"]} for r in rows],
+    return {"rows": [{"ts": r["ts"], "pct": r[k]} for r in rows],
             "start": start, "end": end, "reset_known": bool(reset), "stale_estimate": stale}
 
 
@@ -596,6 +609,42 @@ def burn(conn: sqlite3.Connection, window_min: int = 45) -> dict[str, Any]:
     if spend > 0:
         out["usd_per_pct"] = spend / dp
         out["headroom_usd"] = (100 - rows[-1]["five_hour_pct"]) * out["usd_per_pct"]
+    return out
+
+
+def weekly_burn(conn: sqlite3.Connection, window_h: float = 24) -> dict[str, Any]:
+    """The weekly window's pace and projection, in the shape burn() gives the
+    5-hour one, so the same runway chart draws both.
+
+    The weekly figure moves a point every hour or so, so the slope is fitted
+    over the last day rather than the last 45 minutes.
+    """
+    t = now()
+    out: dict[str, Any] = {"pct_per_hour": None, "hits_limit_before_reset": False}
+    latest = latest_quota(conn)
+    if not latest or latest.get("seven_day_pct") is None:
+        return out
+    reset = _window_reset(conn, latest, "seven_day")
+    out["current_pct"] = latest["seven_day_pct"]
+    out["reset_at"] = reset
+    out["window"] = current_window(conn, lookback_h=7 * 24 + 2, key="seven_day", hours=7 * 24)
+    rows = [r for r in quota_series(conn, int(t - window_h * 3600), t) if r["seven_day_pct"] is not None]
+    cut = 0
+    for i in range(1, len(rows)):
+        if rows[i]["seven_day_pct"] < rows[i - 1]["seven_day_pct"] - 5:
+            cut = i
+    rows = rows[cut:]
+    if len(rows) < 2:
+        return out
+    dp = rows[-1]["seven_day_pct"] - rows[0]["seven_day_pct"]
+    dt_h = (rows[-1]["ts"] - rows[0]["ts"]) / 3600
+    if dp <= 0 or dt_h < 1:
+        return out
+    slope = dp / dt_h
+    out["pct_per_hour"] = slope
+    out["hit_at"] = rows[-1]["ts"] + int((100 - rows[-1]["seven_day_pct"]) / slope * 3600)
+    if reset and out["hit_at"] < reset:
+        out["hits_limit_before_reset"] = True
     return out
 
 
@@ -654,7 +703,7 @@ def live(conn: sqlite3.Connection) -> dict[str, Any]:
     for r in conn.execute("SELECT ts, cost_usd FROM requests WHERE ts >= ?", (since,)):
         i = min(19, (r["ts"] - since) // 900)
         buckets[i] += r["cost_usd"]
-    return {"as_of": t, "window_start": since, "quota": q, "burn": burn(conn), "sessions": sessions,
+    return {"as_of": t, "window_start": since, "quota": q, "burn": burn(conn), "weekly": weekly_burn(conn), "sessions": sessions,
             "buckets": buckets, "total": sum(s["cost"] for s in sessions),
             "attribution": attribution(conn, t - 7 * 86400, t)}
 

@@ -172,3 +172,49 @@ def test_known_reset_is_never_stale(conn):
     w = usage.current_window(conn)
     assert w["stale_estimate"] is False
     assert "resets" in _chart(conn)
+
+
+# ------------------------------------------------------------------ weekly
+
+
+def _week(conn, ts, pct, reset=None, source="statusline"):
+    conn.execute(
+        "INSERT OR IGNORE INTO quota_snapshots(ts, source, seven_day_pct, seven_day_reset) VALUES (?,?,?,?)",
+        (ts, source, pct, reset))
+
+
+def test_weekly_window_is_seven_days_before_its_reset(conn):
+    t = now()
+    reset = t + 2 * 86400
+    _week(conn, t - 3 * 86400, 10, reset)
+    _week(conn, t, 30, reset)
+    w = usage.weekly_burn(conn)["window"]
+    assert w["reset_known"] and w["start"] == reset - 7 * 86400 and w["end"] == reset
+    assert [r["pct"] for r in w["rows"]] == [10, 30]
+
+
+def test_weekly_runway_flags_a_crossing_before_reset(conn):
+    t = now()
+    reset = t + 3 * 86400
+    for h, pct in ((20, 50), (10, 60), (0, 70)):
+        _week(conn, t - h * 3600, pct, reset)
+    html = report.runway_chart(usage.live(conn), "weekly", 7 * 24)
+    assert "Will hit the limit" in html and "hours before the window resets" in html
+    assert re.search(r"100% at \w{3} \d\d \w{3} \d\d:\d\d", html)
+
+
+def test_weekly_runway_on_track(conn):
+    t = now()
+    reset = t + 86400
+    for h, pct in ((20, 20), (10, 22), (0, 24)):
+        _week(conn, t - h * 3600, pct, reset)
+    html = report.runway_chart(usage.live(conn), "weekly", 7 * 24)
+    assert "On track" in html and "hours." in html
+
+
+def test_usage_page_has_a_weekly_card(conn):
+    t = now()
+    for h, pct in ((10, 20), (0, 24)):
+        _week(conn, t - h * 3600, pct, t + 86400)
+    v = usage.live(conn)
+    assert "This week: the weekly window" in report.render(usage.summary(conn), v)
