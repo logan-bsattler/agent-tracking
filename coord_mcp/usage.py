@@ -524,7 +524,22 @@ def _window_reset(conn: sqlite3.Connection, latest: dict[str, Any] | None, key: 
         return reset
     row = conn.execute(f"SELECT {key}_reset r FROM quota_snapshots WHERE {key}_reset > ? "
                        "ORDER BY ts DESC LIMIT 1", (now(),)).fetchone()
-    return row["r"] if row else None
+    if row:
+        return row["r"]
+    # Any one past or future weekly reset, since they recur exactly a week apart.
+    anchor = conn.execute("SELECT value FROM meta WHERE key='weekly_reset_anchor'").fetchone()
+    if not anchor:
+        return None
+    t, a = now(), int(anchor["value"])
+    return a + -(-(t - a) // WEEK) * WEEK if a <= t else a - (a - t) // WEEK * WEEK
+
+
+WEEK = 7 * 86400
+
+
+def set_weekly_reset(conn: sqlite3.Connection, reset_ts: int) -> None:
+    """Remember one weekly reset; every other one is a whole number of weeks away."""
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('weekly_reset_anchor', ?)", (str(int(reset_ts)),))
 
 
 def current_window(conn: sqlite3.Connection, lookback_h: float = 6,
@@ -544,8 +559,20 @@ def current_window(conn: sqlite3.Connection, lookback_h: float = 6,
     for i in range(1, len(rows)):
         if rows[i][k] < rows[i - 1][k] - 5:
             cut = i
-    rows = rows[cut:]
     reset = _window_reset(conn, latest_quota(conn), key)
+    # The weekly window resets at the same time every week, on the hour, so
+    # the drop between two Desktop samples pins it down. That matters because
+    # the Desktop app never runs the statusLine hook, the only source that
+    # carries reset times. (The 5-hour window opens at the first request after
+    # a reset, not at the reset, so a drop says nothing about its end.)
+    inferred = False
+    if not reset and key == "seven_day" and cut:
+        a, b = rows[cut - 1]["ts"], rows[cut]["ts"]
+        if b - a <= 3 * 3600:
+            opened = -(-a // 3600) * 3600
+            reset, inferred = (opened if opened <= b else b) + span, True
+            set_weekly_reset(conn, reset)
+    rows = rows[cut:]
     if reset:
         start, end = reset - span, reset
         rows = [r for r in rows if r["ts"] >= start]
@@ -559,7 +586,8 @@ def current_window(conn: sqlite3.Connection, lookback_h: float = 6,
     # first reading we have.
     stale = bool(end and not reset and end < t)
     return {"rows": [{"ts": r["ts"], "pct": r[k]} for r in rows],
-            "start": start, "end": end, "reset_known": bool(reset), "stale_estimate": stale}
+            "start": start, "end": end, "reset_known": bool(reset), "reset_inferred": inferred,
+            "stale_estimate": stale}
 
 
 def burn(conn: sqlite3.Connection, window_min: int = 45) -> dict[str, Any]:
@@ -643,6 +671,7 @@ def weekly_burn(conn: sqlite3.Connection, window_h: float = 24) -> dict[str, Any
     slope = dp / dt_h
     out["pct_per_hour"] = slope
     out["hit_at"] = rows[-1]["ts"] + int((100 - rows[-1]["seven_day_pct"]) / slope * 3600)
+    reset = reset or (out["window"]["end"] if out["window"]["reset_inferred"] else None)
     if reset and out["hit_at"] < reset:
         out["hits_limit_before_reset"] = True
     return out

@@ -218,3 +218,23 @@ def test_usage_page_has_a_weekly_card(conn):
         _week(conn, t - h * 3600, pct, t + 86400)
     v = usage.live(conn)
     assert "This week: the weekly window" in report.render(usage.summary(conn), v)
+
+
+def test_weekly_reset_is_inferred_from_the_drop(conn):
+    """Desktop samples carry no reset; the drop pins the weekly one to the hour."""
+    t = now()
+    opened = (t - 2 * 86400) // 3600 * 3600          # on the hour, two days ago
+    for ts, pct in ((opened - 1200, 80), (opened + 600, 1), (t - 3600, 30), (t, 31)):
+        _week(conn, ts, pct, source="desktop")
+    w = usage.weekly_burn(conn)["window"]
+    assert w["reset_inferred"] and w["reset_known"]
+    assert w["start"] == opened and w["end"] == opened + 7 * 86400
+
+
+def test_weekly_anchor_projects_to_the_next_reset(conn):
+    t = now()
+    usage.set_weekly_reset(conn, t - 3 * 86400)      # a reset three days ago
+    _week(conn, t - 3600, 30, source="desktop")
+    _week(conn, t, 31, source="desktop")
+    w = usage.weekly_burn(conn)["window"]
+    assert w["reset_known"] and w["end"] == t - 3 * 86400 + 7 * 86400
