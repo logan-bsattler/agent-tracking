@@ -220,5 +220,5 @@ def test_needs_you_groups_by_client(conn):
         t = _task(conn, client, f"{client} blocked")
         store.complete_task(conn, t, {"done": False, "reason": "VPN down", "retryable": True})
     html = report.board_page(store.operator_view(conn))
-    assert html.count('<details class="client">') == 2
+    assert html.count('<details class="client"') == 2
     assert html.index("<summary>Moog") < html.index("<summary>LNK")

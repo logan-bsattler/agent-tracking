@@ -637,7 +637,7 @@ def _by_client(rows: list[dict[str, Any]], t: int) -> str:
     for r in rows:
         groups.setdefault(r.get("client") or "—", []).append(r)
     return "".join(
-        f'<details class="client"><summary>{esc(c)}<span class="count">{len(g)}</span></summary>'
+        f'<details class="client" data-client="{esc(c)}"><summary>{esc(c)}<span class="count">{len(g)}</span></summary>'
         f'{_items(g, t, "")}</details>'
         for c, g in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])))
 
@@ -658,6 +658,13 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
 <h1>Coord board</h1>
 <p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
 <div class="card grp {'alert' if n else ''}"><h2>Needs you<span class="count">{n}</span></h2>{needs}</div>
+<script>/* the page auto-refreshes, so keep drilled-in clients open across reloads */
+try {{ const k = "coord-open", o = new Set(JSON.parse(localStorage.getItem(k) || "[]"));
+  document.querySelectorAll("details.client").forEach(d => {{
+    if (o.has(d.dataset.client)) d.open = true;
+    d.addEventListener("toggle", () => {{ d.open ? o.add(d.dataset.client) : o.delete(d.dataset.client);
+      try {{ localStorage.setItem(k, JSON.stringify([...o])); }} catch (e) {{}} }}); }}); }} catch (e) {{}}
+</script>
 {grp("Master owes", v["master_owes"], "Nothing: no parked tasks, no open intents.")}
 {grp("Loose ends", v["loose_ends"], "No follow-ups waiting: every next step is a task or a decision.")}
 {grp("Running", v["running"], "Nothing picked up and in progress.")}
