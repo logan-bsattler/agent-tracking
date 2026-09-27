@@ -213,3 +213,12 @@ def test_resolve_needs_exactly_one_real_target(conn):
     store.resolve_follow_up(conn, fid, task_id=t)
     with pytest.raises(ValueError):
         store.resolve_follow_up(conn, fid, task_id=t)
+
+
+def test_needs_you_groups_by_client(conn):
+    for client in ("Moog", "Moog", "LNK"):
+        t = _task(conn, client, f"{client} blocked")
+        store.complete_task(conn, t, {"done": False, "reason": "VPN down", "retryable": True})
+    html = report.board_page(store.operator_view(conn))
+    assert html.count('<details class="client">') == 2
+    assert html.index("<summary>Moog") < html.index("<summary>LNK")

@@ -584,6 +584,9 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
 
 
 BOARD_CSS = """
+details.client { border-top:1px solid var(--grid); }
+details.client summary { cursor:pointer; padding:8px 0; font-weight:600; list-style-position:inside; }
+details.client summary .count { margin-left:8px; }
 .grp { margin-bottom:20px; }
 .grp h2 .count { color:var(--muted); font-weight:400; margin-left:6px; }
 .grp.alert { border-color:var(--critical); border-width:2px; }
@@ -627,12 +630,23 @@ def _items(rows: list[dict[str, Any]], t: int, empty: str) -> str:
     return "".join(out)
 
 
+def _by_client(rows: list[dict[str, Any]], t: int) -> str:
+    """One collapsible line per client, so a busy Needs-you reads as a short
+    list of names with counts and opens only where you drill in."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        groups.setdefault(r.get("client") or "—", []).append(r)
+    return "".join(
+        f'<details class="client"><summary>{esc(c)}<span class="count">{len(g)}</span></summary>'
+        f'{_items(g, t, "")}</details>'
+        for c, g in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])))
+
+
 def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
     """Operator view of the coord board: what needs you first, then the rest."""
     t = v["as_of"]
     n = len(v["needs_you"])
-    needs = (_items(v["needs_you"], t, "") if n
-             else '<p class="clear">Nothing needs you.</p>')
+    needs = _by_client(v["needs_you"], t) if n else '<p class="clear">Nothing needs you.</p>'
     meta_refresh = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     def grp(title: str, rows: list, empty: str, cls: str = "") -> str:
         return (f'<div class="card grp {cls}"><h2>{esc(title)}<span class="count">{len(rows)}</span></h2>'
