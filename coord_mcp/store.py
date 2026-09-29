@@ -26,6 +26,7 @@ def create_task(
     assigned_to: str | None = None,
     parent_id: str | None = None,
     from_intent: str | None = None,
+    pipeline_task_id: str | None = None,
 ) -> dict[str, Any]:
     if kind not in contracts.CONTRACTS:
         raise ValueError(
@@ -37,11 +38,27 @@ def create_task(
     tid = _id()
     conn.execute(
         """INSERT INTO tasks(id, parent_id, kind, title, spec, state, assigned_to,
-                             from_intent, created_at)
-           VALUES (?,?,?,?,?,'open',?,?,?)""",
-        (tid, parent_id, kind, title, json.dumps(spec), assigned_to, from_intent, now()),
+                             from_intent, created_at, pipeline_task_id)
+           VALUES (?,?,?,?,?,'open',?,?,?,?)""",
+        (tid, parent_id, kind, title, json.dumps(spec), assigned_to, from_intent, now(),
+         pipeline_task_id),
     )
     return {"task_id": tid, "kind": kind, "expected_result_shape": contracts.expected_shape(kind)}
+
+
+def _event(conn: sqlite3.Connection, task_id: str, event: str, client: str | None) -> None:
+    conn.execute("INSERT INTO task_events(id, task_id, client, event, ts) VALUES (?,?,?,?,?)",
+                 (_id(), task_id, client, event, now()))
+
+
+def set_pipeline_task(conn: sqlite3.Connection, task_id: str, pipeline_task_id: str | None) -> dict[str, Any]:
+    """Link a task to the SharePoint pipeline item it bills to. None unlinks it."""
+    if pipeline_task_id and len(pipeline_task_id) > 40:
+        raise ValueError(f"pipeline_task_id is {len(pipeline_task_id)} chars; cap is 40")
+    cur = conn.execute("UPDATE tasks SET pipeline_task_id=? WHERE id=?", (pipeline_task_id or None, task_id))
+    if cur.rowcount == 0:
+        raise KeyError(f"unknown task '{task_id}'")
+    return {"ok": True, "task_id": task_id, "pipeline_task_id": pipeline_task_id or None}
 
 
 def get_task(conn: sqlite3.Connection, task_id: str, reader: str | None = None) -> dict[str, Any]:
@@ -60,6 +77,7 @@ def get_task(conn: sqlite3.Connection, task_id: str, reader: str | None = None) 
     if (reader and row["state"] == "open" and row["assigned_to"]
             and reader.casefold() == row["assigned_to"].casefold()):
         conn.execute("UPDATE tasks SET picked_up_at=? WHERE id=?", (now(), task_id))
+        _event(conn, task_id, "picked_up", row["assigned_to"])
     out = dict(row)
     out["spec"] = json.loads(out.pop("spec"))
     out["expected_result_shape"] = contracts.expected_shape(row["kind"])
@@ -97,7 +115,7 @@ def park_task(
     itself, and is re-dispatched. get_task replays the parks, so the fresh
     session resumes instead of redoing. The task never leaves 'open'.
     """
-    row = conn.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
+    row = conn.execute("SELECT state, assigned_to FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         raise KeyError(f"unknown task '{task_id}'")
     if row["state"] != "open":
@@ -124,6 +142,7 @@ def park_task(
         "INSERT INTO task_parks(id, task_id, progress, session_id, created_at) VALUES (?,?,?,?,?)",
         (pid, task_id, json.dumps(progress), session_id, now()),
     )
+    _event(conn, task_id, "parked", row["assigned_to"])
     n = conn.execute("SELECT COUNT(*) n FROM task_parks WHERE task_id=?", (task_id,)).fetchone()["n"]
     return {"ok": True, "task_id": task_id, "park_id": pid, "parks": n, "state": "open",
             "note": "Progress saved. Tell the master this task is parked and needs re-dispatch, "
@@ -142,7 +161,7 @@ def parks(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
 
 def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]) -> dict[str, Any]:
     """Validate against the kind's contract, then close. Nothing is written on rejection."""
-    row = conn.execute("SELECT kind, state FROM tasks WHERE id=?", (task_id,)).fetchone()
+    row = conn.execute("SELECT kind, state, assigned_to FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         raise KeyError(f"unknown task '{task_id}'")
     if row["state"] == "done":
@@ -153,6 +172,7 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
         "UPDATE tasks SET state=?, result=?, result_version=?, completed_at=? WHERE id=?",
         (state, json.dumps(validated), contracts.CONTRACT_VERSION, now(), task_id),
     )
+    _event(conn, task_id, state if state == "failed" else "completed", row["assigned_to"])
     fus = validated.get("follow_ups") or []
     conn.executemany(
         "INSERT INTO follow_ups(id, task_id, idx, who, what, state, created_at) VALUES (?,?,?,?,?,'open',?)",

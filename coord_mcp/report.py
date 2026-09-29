@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import store, usage
+from . import hours, store, usage
 
 # Fixed slot per model family. Color follows the entity, never its rank.
 MODEL_SLOTS = [("sonnet", 1), ("opus", 2), ("fable", 3), ("haiku", 4)]
@@ -566,7 +566,7 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude usage</title>
 <style>{CSS}</style></head><body><main>
-<nav><b>Usage</b> · <a href="/board">Board</a></nav>
+<nav><b>Usage</b> · <a href="/board">Board</a> · <a href="/hours">Hours</a></nav>
 <h1>Claude usage</h1>
 <p class="sub">{esc(period)} · generated {when(s['generated'])}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · spend is API-equivalent, the same figure as <code>/cost</code></p>
 {kpis(s)}
@@ -654,7 +654,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{'(' + str(n) + ') ' if n else ''}Coord board</title>
 <style>{CSS}{BOARD_CSS}</style></head><body><main>
-<nav><a href="/">Usage</a> · <b>Board</b></nav>
+<nav><a href="/">Usage</a> · <b>Board</b> · <a href="/hours">Hours</a></nav>
 <h1>Coord board</h1>
 <p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
 <div class="card grp {'alert' if n else ''}"><h2>Needs you<span class="count">{n}</span></h2>{needs}</div>
@@ -753,6 +753,100 @@ def task_page(d: dict[str, Any] | None, task_id: str = "") -> str:
     return _shell(f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', head + "".join(cards))
 
 
+def _h(minutes: float) -> str:
+    q = hours.quarter_hours(minutes)
+    return f"{q:.2f}" if q else '<span class="muted">·</span>'
+
+
+def hours_csv(rows: list[dict[str, Any]]) -> str:
+    """Unrounded minutes plus rounded hours, one line per day/client/task."""
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(["day", "client", "task_id", "title", "pipeline_task_id", "agent_min", "operator_min",
+                "total_min", "hours", "estimated"])
+    for r in rows:
+        w.writerow([r["day"], r["client"], r["task_id"], r["title"], r["pipeline_task_id"] or "",
+                    f"{r['agent_min']:.1f}", f"{r['operator_min']:.1f}", f"{r['total_min']:.1f}",
+                    f"{hours.quarter_hours(r['total_min']):.2f}", "yes" if r["estimated"] else ""])
+    return buf.getvalue()
+
+
+def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | None,
+               push: dict[str, Any]) -> str:
+    """Day x client grid, then each client's tasks. A draft for the operator."""
+    from urllib.parse import urlencode
+    nav = '<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Hours</b></nav>'
+    qs = urlencode({k: v for k, v in (("start", start), ("end", end), ("client", client)) if v})
+    days = sorted({r["day"] for r in rows})
+    clients = sorted({r["client"] for r in rows})
+    grid: dict[tuple[str, str], float] = {}
+    for r in rows:
+        grid[(r["day"], r["client"])] = grid.get((r["day"], r["client"]), 0.0) + r["total_min"]
+    form = (f'<form class="card" method="get" action="/hours">'
+            f'<label>From <input type="date" name="start" value="{esc(start)}"></label> '
+            f'<label>to <input type="date" name="end" value="{esc(end)}"></label> '
+            f'<label>client <input name="client" value="{esc(client or "")}" placeholder="all" size="10"></label> '
+            f'<button>Show</button> · <a href="/hours.csv?{esc(qs)}">CSV</a></form>')
+    caveat = ('<p class="sub">Draft, not a bill. Agent time is measured from transcripts (gaps between a '
+              f"client's requests, each capped at {hours.IDLE_GAP // 60} min) and is not Ben's time; "
+              'operator time is what <code>coord_log_time</code> recorded. Sessions outside client folders '
+              '(master, Posey) are excluded. <i>est</i> marks tasks from before pickup events were recorded, '
+              'timed from creation to close. Hours round to 0.25 on this page only.</p>')
+    if not rows:
+        return _shell("Hours", f'{nav}<h1>Hours</h1>{caveat}{form}'
+                      '<p class="empty">No client activity in this range.</p>')
+    head = "".join(f'<th class="n">{esc(c)}</th>' for c in clients)
+    lines = []
+    for d in days:
+        cells = "".join(f'<td class="n">{_h(grid.get((d, c), 0.0))}</td>' for c in clients)
+        tot = sum(grid.get((d, c), 0.0) for c in clients)
+        lines.append(f'<tr><td>{esc(d)}</td>{cells}<td class="n"><b>{_h(tot)}</b></td></tr>')
+    col = "".join(f'<td class="n"><b>{_h(sum(grid.get((d, c), 0.0) for d in days))}</b></td>' for c in clients)
+    lines.append(f'<tr><td><b>Total</b></td>{col}<td class="n"><b>{_h(sum(grid.values()))}</b></td></tr>')
+    table = (f'<div class="card"><h2>Hours by day</h2><div class="wrap"><table><tr><th>Day</th>{head}'
+             f'<th class="n">All</th></tr>{"".join(lines)}</table></div></div>')
+    per = []
+    for c in clients:
+        acc: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            if r["client"] != c:
+                continue
+            a = acc.setdefault(r["task_id"], {**r, "agent_min": 0.0, "operator_min": 0.0, "total_min": 0.0,
+                                              "days": 0})
+            for f in ("agent_min", "operator_min", "total_min"):
+                a[f] += r[f]
+            a["days"] += 1
+            a["estimated"] = a["estimated"] or r["estimated"]
+        trs = []
+        for tid, a in sorted(acc.items(), key=lambda kv: -kv[1]["total_min"]):
+            name = (f'<a class="drill" href="/board/task/{esc(tid)}">{esc(a["title"] or tid)}</a>'
+                    if tid != hours.UNASSIGNED else '<span class="muted">unassigned (no task open)</span>')
+            est = ' <span class="muted">est</span>' if a["estimated"] else ""
+            trs.append(f'<tr><td>{name}{est}</td><td>{esc(a["pipeline_task_id"] or "—")}</td>'
+                       f'<td class="n">{a["days"]}</td><td class="n">{_h(a["agent_min"])}</td>'
+                       f'<td class="n">{_h(a["operator_min"])}</td><td class="n"><b>{_h(a["total_min"])}</b></td></tr>')
+        tot = _h(sum(a["total_min"] for a in acc.values()))
+        per.append(f'<details class="card"><summary><b>{esc(c)}</b> · {tot}h</summary><div class="wrap"><table>'
+                   f'<tr><th>Task</th><th>Pipeline</th><th class="n">Days</th><th class="n">Agent</th>'
+                   f'<th class="n">Operator</th><th class="n">Total</th></tr>{"".join(trs)}</table></div></details>')
+    pushed = (f'<div class="card"><h2>SharePoint push</h2><p class="muted">{esc(push["note"])} · '
+              f'{len(push["payload"])} pipeline item-day(s) would be sent; rows with no pipeline item are left '
+              f'out until linked with <code>coord_set_pipeline_task</code>.</p></div>')
+    return _shell("Hours", f'{nav}<h1>Hours</h1>{caveat}{form}{table}{"".join(per)}{pushed}')
+
+
+def hours_range(q: dict[str, list[str]]) -> tuple[str, str, str | None]:
+    """start/end/client from a query string; default is this week, Monday on."""
+    from datetime import date, timedelta
+    today = date.today()
+    start = (q.get("start") or [""])[0] or (today - timedelta(days=today.weekday())).isoformat()
+    end = (q.get("end") or [""])[0] or today.isoformat()
+    client = (q.get("client") or [""])[0].strip() or None
+    return start, end, client
+
+
 def write(conn: sqlite3.Connection, out: Path, days: int = 7) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render(usage.summary(conn, days), usage.live(conn)), encoding="utf-8")
@@ -778,17 +872,27 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
 
     class H(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            path = self.path.split("?", 1)[0].rstrip("/")
+            from urllib.parse import parse_qs
+            path, _, query = self.path.partition("?")
+            path = path.rstrip("/")
+            self._query = parse_qs(query)
+            self._type, self._disp = "text/html; charset=utf-8", None
             conn = connect()
             try:
-                body = self._body(conn, path)
+                try:
+                    body = self._body(conn, path)
+                except ValueError as e:  # a bad date in the query string
+                    self.send_error(400, str(e))
+                    return
             finally:
                 conn.close()
             if body is None:
                 self.send_error(404)
                 return
             self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", self._type)
+            if self._disp:
+                self.send_header("Content-Disposition", f'attachment; filename="{self._disp}"')
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -800,6 +904,15 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             if path.startswith("/board/task/"):
                 tid = path.rsplit("/", 1)[1]
                 return task_page(store.task_detail(conn, tid), tid).encode("utf-8")
+            if path in ("/hours", "/hours.csv"):
+                start, end, client = hours_range(self._query)
+                with ingest_lock:
+                    usage.ingest(conn)
+                rows = hours.breakdown(conn, start, end, client)
+                if path == "/hours.csv":
+                    self._type, self._disp = "text/csv; charset=utf-8", f"hours-{start}-{end}.csv"
+                    return hours_csv(rows).encode("utf-8")
+                return hours_page(rows, start, end, client, hours.push_to_pipeline(conn, rows)).encode("utf-8")
             if path == "":
                 with ingest_lock:
                     usage.ingest(conn)

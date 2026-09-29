@@ -24,7 +24,7 @@ from typing import Any, Literal
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import contracts, store
+from . import contracts, hours, store
 from .db import connect
 
 ROLE = os.environ.get("COORD_ROLE", "team")
@@ -110,6 +110,8 @@ class CreateTaskInput(Strict):
     assigned_to: str | None = Field(default=None, description="Teammate name, if you already know it", max_length=80)
     parent_id: str | None = Field(default=None, description="Parent task id, for decomposed work")
     from_intent: str | None = Field(default=None, description="Intent id this task came from, if any")
+    pipeline_task_id: str | None = Field(default=None, description="SharePoint pipeline item this task bills to",
+                                         max_length=40)
 
 
 @tool("coord_create_task", title="Create task")
@@ -124,7 +126,7 @@ async def coord_create_task(params: CreateTaskInput) -> str:
     try:
         return _ok(store.create_task(
             db(), params.kind, params.title, params.spec,
-            params.assigned_to, params.parent_id, params.from_intent,
+            params.assigned_to, params.parent_id, params.from_intent, params.pipeline_task_id,
         ))
     except Exception as e:
         return _err(e)
@@ -411,6 +413,91 @@ async def coord_resolve_intent(params: ResolveIntentInput) -> str:
     """
     try:
         return _ok(store.resolve_intent(db(), params.intent_id, params.task_ids, params.note))
+    except Exception as e:
+        return _err(e)
+
+
+# ============================================================== hours
+
+
+class LogTimeInput(Strict):
+    minutes: float = Field(..., gt=0, le=1440, description="Minutes the operator spent")
+    day: str | None = Field(default=None, description="YYYY-MM-DD, local. Default today", max_length=10)
+    task_id: str | None = Field(default=None, description="Board task the time was for, if any", max_length=40)
+    client: str | None = Field(default=None, description="Client key. Defaults to the task's assignee",
+                               max_length=80)
+    note: str | None = Field(default=None, description="What the time was, briefly", max_length=200)
+
+
+@tool("coord_log_time", title="Log operator time")
+async def coord_log_time(params: LogTimeInput) -> str:
+    """Record the operator's own time (review, Kiro runs, calls) so it is billable.
+    Lead only, by convention. Kept apart from measured agent time.
+
+    Returns JSON: {entry_id, client, day, minutes, task_id}
+    """
+    try:
+        return _ok(hours.log_time(db(), params.minutes, params.day, params.task_id, params.client, params.note))
+    except Exception as e:
+        return _err(e)
+
+
+class SetPipelineTaskInput(Strict):
+    task_id: str = Field(..., description="Board task id", max_length=40)
+    pipeline_task_id: str | None = Field(..., description="SharePoint pipeline item id; null to unlink",
+                                         max_length=40)
+
+
+@tool("coord_set_pipeline_task", title="Link pipeline task")
+async def coord_set_pipeline_task(params: SetPipelineTaskInput) -> str:
+    """Link a board task to the SharePoint pipeline item its hours bill to.
+
+    Returns JSON: {ok, task_id, pipeline_task_id}
+    """
+    try:
+        return _ok(store.set_pipeline_task(db(), params.task_id, params.pipeline_task_id))
+    except Exception as e:
+        return _err(e)
+
+
+HOURS_ROW_CAP = 200
+
+
+class HoursInput(Strict):
+    start: str = Field(..., description="First day, YYYY-MM-DD, local", max_length=10)
+    end: str = Field(..., description="Last day, inclusive, YYYY-MM-DD", max_length=10)
+    client: str | None = Field(default=None, description="One client key, or all", max_length=80)
+    by: Literal["task", "pipeline"] = Field(default="task", description="Rows per board task or per pipeline item")
+    fields: list[str] | None = Field(
+        default=None, max_length=12,
+        description=f"Row fields to return. Task rows: {list(hours.ROW_FIELDS)}. Omit for all.")
+
+
+@tool("coord_hours", read_only=True, title="Billable hours")
+async def coord_hours(params: HoursInput) -> str:
+    """Draft billable minutes per day per client per task, for the operator to
+    edit before billing. agent_min is measured from transcripts; operator_min
+    is what coord_log_time recorded. Unrounded; round only when presenting.
+
+    Returns JSON: {rows, totals: {agent_min, operator_min}, truncated}
+    """
+    try:
+        conn = db()
+        try:
+            from . import usage
+            usage.ingest(conn)
+        except Exception:
+            pass  # stale transcripts still give an answer; the page ingests too
+        rows = hours.breakdown(conn, params.start, params.end, params.client)
+        if params.by == "pipeline":
+            rows = hours.rollup(rows)
+        totals = {"agent_min": round(sum(r["agent_min"] for r in rows), 1),
+                  "operator_min": round(sum(r["operator_min"] for r in rows), 1)}
+        shown = []
+        for r in rows[:HOURS_ROW_CAP]:
+            r = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in r.items()}
+            shown.append({k: r[k] for k in params.fields if k in r} if params.fields else r)
+        return _ok({"rows": shown, "totals": totals, "truncated": len(rows) > HOURS_ROW_CAP})
     except Exception as e:
         return _err(e)
 

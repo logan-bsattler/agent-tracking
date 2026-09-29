@@ -14,7 +14,7 @@ from pathlib import Path
 # Bump this whenever DDL or _migrate changes. connect() skips both entirely
 # when the file already reports this version, so a new table or column that
 # ships without a bump will not be created.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 def default_db_path() -> Path:
     """COORD_DB if set, else ~/.coord/coord.db -- read on every call, not at import.
@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   completed_at   INTEGER,
   -- Last time the assigned client read the task (coord_get_task). Null means
   -- it was never picked up; a park after it means it is waiting on the master.
-  picked_up_at   INTEGER
+  picked_up_at   INTEGER,
+  -- SharePoint pipeline item this task bills to. Hours roll up by it.
+  pipeline_task_id TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, created_at);
 CREATE INDEX IF NOT EXISTS tasks_kind ON tasks(kind, state);
@@ -76,6 +78,30 @@ CREATE TABLE IF NOT EXISTS task_parks (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS parks_task ON task_parks(task_id, created_at);
+
+-- Every pickup, park and close, in order. picked_up_at keeps only the last
+-- pickup; billable hours need each interval a client spent on a task.
+CREATE TABLE IF NOT EXISTS task_events (
+  id      TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  client  TEXT,
+  event   TEXT NOT NULL CHECK (event IN ('picked_up','parked','completed','failed')),
+  ts      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS task_events_task ON task_events(task_id, ts);
+
+-- Operator time (review, Kiro runs, calls) that no transcript records.
+-- Kept apart from agent time so the two are never confused.
+CREATE TABLE IF NOT EXISTS time_entries (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT REFERENCES tasks(id),
+  client     TEXT NOT NULL,
+  day        TEXT NOT NULL,
+  minutes    REAL NOT NULL,
+  note       TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS time_entries_day ON time_entries(day, client);
 
 -- Next steps a finished task named in its result. Each is owed a resolution:
 -- 'tasked' (resolved_by = the child task) or 'dropped' (resolved_by = the
@@ -173,8 +199,11 @@ CREATE INDEX IF NOT EXISTS quota_ts ON quota_snapshots(ts);
 def _migrate(conn: sqlite3.Connection) -> None:
     """Additive migrations. CREATE TABLE IF NOT EXISTS won't add a column to a
     table that already exists, so do it here."""
-    if "picked_up_at" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+    task_cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    if "picked_up_at" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN picked_up_at INTEGER")
+    if "pipeline_task_id" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN pipeline_task_id TEXT")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(quota_snapshots)")}
     if "source" not in cols:
         conn.execute("ALTER TABLE quota_snapshots ADD COLUMN source TEXT NOT NULL DEFAULT 'statusline'")

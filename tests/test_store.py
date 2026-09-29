@@ -279,7 +279,7 @@ def test_desktop_role_has_exactly_two_tools():
 
 def test_team_role_has_all_tools():
     names = _surface("team")
-    assert len(names) == 13
+    assert len(names) == 16
     assert {"coord_create_task", "coord_complete_task", "coord_get_decisions",
             "coord_park_task", "coord_resolve_follow_up"} <= set(names)
 

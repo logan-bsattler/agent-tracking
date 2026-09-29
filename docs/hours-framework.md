@@ -1,7 +1,14 @@
 # Billable hours framework
 
-Status: designed, not built. Decision `8f4ed8b96bf9`. Build all of it; ship the
-SharePoint push **disabled**.
+Status: built 2026-09-29 (`coord_mcp/hours.py`, `tests/test_hours.py`). Decision
+`8f4ed8b96bf9`. The SharePoint push is **disabled**: the payload builds, the
+send is not wired, and turning it on is a separate decision.
+
+Built as designed, plus: a client repo under `C:\development\<client key>`
+counts for that client (the LNK repo lives there). New MCP tools:
+`coord_log_time`, `coord_set_pipeline_task`, `coord_hours`; `coord_create_task`
+takes `pipeline_task_id`. Page: `/hours?start=&end=&client=`, CSV at
+`/hours.csv`. Default range is this week, Monday on.
 
 ## Goal
 
