@@ -8,7 +8,7 @@ Built as designed, plus: a client repo under `C:\development\<client key>`
 counts for that client (the LNK repo lives there). New MCP tools:
 `coord_log_time`, `coord_set_pipeline_task`, `coord_hours`; `coord_create_task`
 takes `pipeline_task_id`. Page: `/hours?start=&end=&client=`, CSV at
-`/hours.csv`. Default range is this week, Monday on.
+`/hours.csv`. Default range is the current billing period: 1st-15th or 16th-month end.
 
 ## Goal
 

@@ -183,3 +183,9 @@ def test_page_and_csv_render(conn):
     assert "Lot numbering" in page and "push disabled" in page and "Draft, not a bill" in page
     csv = report.hours_csv(rs).splitlines()
     assert csv[0].startswith("day,client,task_id") and csv[1].startswith(f"{DAY.isoformat()},LNK,{t}")
+
+
+def test_default_range_is_the_half_month_billing_period():
+    assert report.billing_period(date(2026, 9, 15)) == (date(2026, 9, 1), date(2026, 9, 15))
+    assert report.billing_period(date(2026, 9, 16)) == (date(2026, 9, 16), date(2026, 9, 30))
+    assert report.billing_period(date(2028, 2, 20)) == (date(2028, 2, 16), date(2028, 2, 29))

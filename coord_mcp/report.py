@@ -841,12 +841,21 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
     return _shell("Hours", f'{nav}<h1>Hours</h1>{caveat}{form}{table}{"".join(per)}{pushed}')
 
 
+def billing_period(today=None):
+    """Billing runs in half-months: the 1st to the 15th, the 16th to month end."""
+    import calendar
+    from datetime import date
+    today = today or date.today()
+    if today.day <= 15:
+        return today.replace(day=1), today.replace(day=15)
+    return today.replace(day=16), today.replace(day=calendar.monthrange(today.year, today.month)[1])
+
+
 def hours_range(q: dict[str, list[str]]) -> tuple[str, str, str | None]:
-    """start/end/client from a query string; default is this week, Monday on."""
-    from datetime import date, timedelta
-    today = date.today()
-    start = (q.get("start") or [""])[0] or (today - timedelta(days=today.weekday())).isoformat()
-    end = (q.get("end") or [""])[0] or today.isoformat()
+    """start/end/client from a query string; default is the current billing period."""
+    p_start, p_end = billing_period()
+    start = (q.get("start") or [""])[0] or p_start.isoformat()
+    end = (q.get("end") or [""])[0] or p_end.isoformat()
     client = (q.get("client") or [""])[0].strip() or None
     return start, end, client
 
