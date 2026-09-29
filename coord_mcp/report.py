@@ -778,12 +778,17 @@ def hours_csv(rows: list[dict[str, Any]]) -> str:
 
 
 def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | None,
-               push: dict[str, Any]) -> str:
+               push: dict[str, Any], today=None) -> str:
     """Day x client grid, then each client's tasks. A draft for the operator."""
+    from datetime import date, timedelta
     from urllib.parse import urlencode
     nav = '<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Hours</b></nav>'
     qs = urlencode({k: v for k, v in (("start", start), ("end", end), ("client", client)) if v})
-    days = sorted({r["day"] for r in rows})
+    # Every day in range, empty ones too, so a gap reads as a gap. Stops at
+    # today: the rest of the billing period has nothing to show yet.
+    lo, hi = hours.parse_day(start), min(hours.parse_day(end), today or date.today())
+    days = sorted({(lo + timedelta(n)).isoformat() for n in range((hi - lo).days + 1)}
+                  | {r["day"] for r in rows})
     clients = sorted({r["client"] for r in rows})
     grid: dict[tuple[str, str], float] = {}
     for r in rows:
@@ -806,7 +811,8 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
     for d in days:
         cells = "".join(f'<td class="n">{_h(grid.get((d, c), 0.0))}</td>' for c in clients)
         tot = sum(grid.get((d, c), 0.0) for c in clients)
-        lines.append(f'<tr><td>{esc(d)}</td>{cells}<td class="n"><b>{_h(tot)}</b></td></tr>')
+        wd = hours.parse_day(d).strftime("%a")
+        lines.append(f'<tr><td><span class="muted">{wd}</span> {esc(d)}</td>{cells}<td class="n"><b>{_h(tot)}</b></td></tr>')
     col = "".join(f'<td class="n"><b>{_h(sum(grid.get((d, c), 0.0) for d in days))}</b></td>' for c in clients)
     lines.append(f'<tr><td><b>Total</b></td>{col}<td class="n"><b>{_h(sum(grid.values()))}</b></td></tr>')
     table = (f'<div class="card"><h2>Hours by day</h2><div class="wrap"><table><tr><th>Day</th>{head}'

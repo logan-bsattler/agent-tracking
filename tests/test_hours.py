@@ -185,6 +185,19 @@ def test_page_and_csv_render(conn):
     assert csv[0].startswith("day,client,task_id") and csv[1].startswith(f"{DAY.isoformat()},LNK,{t}")
 
 
+def test_page_lists_empty_days_with_weekday_up_to_today(conn):
+    t = task(conn)
+    ev(conn, t, "picked_up", at(9))
+    req(conn, at(9))
+    rs = hours.breakdown(conn, DAY, DAY, t_now=at(10))
+    nxt, end = DAY + timedelta(1), DAY + timedelta(9)
+    page = report.hours_page(rs, (DAY - timedelta(1)).isoformat(), end.isoformat(), None,
+                             hours.push_to_pipeline(conn, rs), today=nxt)
+    assert f"Sun</span> {(DAY - timedelta(1)).isoformat()}" in page
+    assert f"Mon</span> {DAY.isoformat()}" in page and f"Tue</span> {nxt.isoformat()}" in page
+    assert (nxt + timedelta(1)).isoformat() not in page
+
+
 def test_default_range_is_the_half_month_billing_period():
     assert report.billing_period(date(2026, 9, 15)) == (date(2026, 9, 1), date(2026, 9, 15))
     assert report.billing_period(date(2026, 9, 16)) == (date(2026, 9, 16), date(2026, 9, 30))
