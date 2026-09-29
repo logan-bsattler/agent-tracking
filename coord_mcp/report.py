@@ -137,6 +137,10 @@ def kpis(s: dict[str, Any]) -> str:
     prev = s["prev_cost"]
     delta = f"vs {money(prev)} previous {s['days']}d" if prev else "no previous period"
     out.append(_tile(f"Spend, last {s['days']} days", money(t["cost"]), delta))
+    if s["days"] != 30 and "cost_30d" in s:
+        p30 = s["prev_cost_30d"]
+        out.append(_tile("Spend, last 30 days", money(s["cost_30d"]),
+                         f"vs {money(p30)} previous 30d" if p30 else "no previous period"))
     out.append(_tile("Requests", f"{t['requests']:,}", f"{t['sessions']} sessions"))
     total_in = t["cache_read"] + t["input_tokens"] + t["cache_write"]
     hit = (t["cache_read"] / total_in * 100) if total_in else 0

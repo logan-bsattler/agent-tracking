@@ -760,6 +760,12 @@ def summary(conn: sqlite3.Connection, days: int = 7) -> dict[str, Any]:
            FROM requests WHERE ts BETWEEN ? AND ?""", start, end)[0]
     prev = q("SELECT COALESCE(SUM(cost_usd),0) cost FROM requests WHERE ts >= ? AND ts < ?",
              prev_start, start)[0]
+    # A fixed 30-day window beside the page's own, so a month's spend is on
+    # the page whatever --days the server was started with.
+    s30, _ = _range(30)
+    month = q("SELECT COALESCE(SUM(cost_usd),0) cost FROM requests WHERE ts BETWEEN ? AND ?", s30, end)[0]
+    prev_month = q("SELECT COALESCE(SUM(cost_usd),0) cost FROM requests WHERE ts >= ? AND ts < ?",
+                   s30 - (end - s30), s30)[0]
 
     rows = q("SELECT ts, model, cost_usd, output_tokens, input_tokens+cache_read+cache_write_5m+cache_write_1h AS ctx "
              "FROM requests WHERE ts BETWEEN ? AND ?", start, end)
@@ -805,6 +811,7 @@ def summary(conn: sqlite3.Connection, days: int = 7) -> dict[str, Any]:
     return {
         "days": days, "start": start, "end": end, "generated": now(),
         "totals": totals, "prev_cost": prev["cost"],
+        "cost_30d": month["cost"], "prev_cost_30d": prev_month["cost"],
         "days_list": days_list, "by_day": by_day, "by_hour": by_hour, "by_model": by_model,
         "projects": projects, "sessions": sessions, "quota": latest_quota(conn), "snapshots": snaps,
         "attribution": attribution(conn, start, end), "quota_sources": sorted(sources),
