@@ -222,3 +222,11 @@ def test_needs_you_groups_by_client(conn):
     html = report.board_page(store.operator_view(conn))
     assert html.count('<details class="client"') == 2
     assert html.index("<summary>Moog") < html.index("<summary>LNK")
+
+
+def test_board_reports_loose_end_total_past_the_cap(conn, monkeypatch):
+    monkeypatch.setattr(store, "LOOSE_ENDS_CAP", 1)
+    t = _task(conn, "LNK")
+    store.complete_task(conn, t, {**INV, "follow_ups": FU})
+    b = store.board(conn)
+    assert [x["what"] for x in b["loose_ends"]] == [FU[0]["what"]] and b["loose_ends_total"] == 2

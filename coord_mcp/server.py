@@ -279,7 +279,11 @@ async def coord_board(params: Empty) -> str:
     each is owed a child task or a decision, then coord_resolve_follow_up.
 
     Returns JSON: {tasks_by_kind, live: [{id, kind, title, state, assigned_to}],
-    loose_ends: [{id, task_id, client, who, what}], open_intents, as_of}
+    loose_ends: [{id, task_id, client, who, what}], loose_ends_total,
+    open_intents, as_of}
+
+    loose_ends is oldest first and capped; loose_ends_total counts every open
+    one. If the total is larger than the list, some are not shown.
     """
     try:
         return _ok(store.board(db()))

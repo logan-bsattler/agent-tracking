@@ -96,6 +96,9 @@ def get_task(conn: sqlite3.Connection, task_id: str, reader: str | None = None) 
 # resume, never enough to be a second copy of the work. Anything longer belongs
 # in a file the park points at.
 PARK_CAPS = {"next_step": 400, "notes": 400}
+# Enough for the operator's whole backlog plus the master's own; board() also
+# returns the total, so anything past this shows as a count, not a silence.
+LOOSE_ENDS_CAP = 100
 PARK_LIST_CAPS = {"done": (20, 200), "do_not_redo": (20, 200), "verified": (20, 300)}
 
 
@@ -256,13 +259,18 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
         live.append(d)
     open_intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
     # Done is not finished when the result named next steps. Without this the
-    # board reads "nothing open" while work remains.
+    # board reads "nothing open" while work remains. The cap used to be 30,
+    # oldest first, and silent: once the operator's backlog passed it, every
+    # new follow-up was invisible and the master had no id to resolve it by.
+    # The total goes out with the list so a cut is never silent again.
     loose = [dict(r) for r in conn.execute(
         """SELECT f.id, f.task_id, t.assigned_to client, f.who, f.what
            FROM follow_ups f JOIN tasks t ON t.id = f.task_id
-           WHERE f.state='open' ORDER BY f.created_at, f.idx LIMIT 30""")]
+           WHERE f.state='open' ORDER BY f.created_at, f.idx LIMIT ?""",
+        (LOOSE_ENDS_CAP,))]
+    loose_total = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='open'").fetchone()["n"]
     return {"tasks_by_kind": counts, "live": live, "loose_ends": loose,
-            "open_intents": open_intents, "as_of": now()}
+            "loose_ends_total": loose_total, "open_intents": open_intents, "as_of": now()}
 
 
 # -------------------------------------------------------------- decisions
