@@ -13,8 +13,10 @@ Classification, first match wins:
   2. a `skip` rule on the subject, or a `skip_org` rule on the organizer domain
   3. a `subject` rule (case-insensitive word match)
   4. a `domain` rule on the organizer, then on the most attendees
-  5. only Logan addresses  ->  INTERNAL (shown, never pushed)
-  6. otherwise unclassified, listed on the page for `assign`
+  5. a `domain` rule whose pattern is a whole address, on the organizer: how
+     prospect calls land on the salesperson who set them up ("Kwo - Sales")
+  6. only Logan addresses  ->  INTERNAL (shown, never pushed)
+  7. otherwise unclassified, listed on the page for `assign`
 
 Overlapping counted meetings share their overlap evenly, so an hour double
 booked is one hour of the operator's time, not two.
@@ -141,6 +143,9 @@ def classify(ev: dict[str, Any], rules: dict[str, list[sqlite3.Row]]) -> tuple[s
     if votes:
         c, _ = votes.most_common(1)[0]
         return "counted", c, "attendee domains"
+    who = (ev.get("organizer") or "").strip().casefold()
+    if who in doms:
+        return "counted", doms[who], f"organizer {who}"
     if ev.get("attendees", 0) > 1 and ev.get("domains") == [HOME]:
         return "counted", INTERNAL, "Logan attendees only"
     return "unclassified", None, "no rule matched"
