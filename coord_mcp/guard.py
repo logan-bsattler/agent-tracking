@@ -29,6 +29,8 @@ check its work back in before it stops: see BLOCK_EXEMPT_TOOLS.
 
 Pause it:   python -m coord_mcp.guard pause 30      (minutes)
 Disable:    COORD_GUARD=off
+Reset seen: python -m coord_mcp.guard reset5h       (5-hour window reset before
+                                                    Desktop's next sample)
 """
 
 from __future__ import annotations
@@ -353,6 +355,17 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "resume":
         PAUSE_FILE.unlink(missing_ok=True)
         print("guard active")
+        return 0
+    if cmd == "reset5h":
+        # Desktop samples every 15 minutes and carries no reset time, so after a
+        # reset the guard enforces the old window's percentage until the next
+        # sample lands. Record the reset the operator saw. The next real sample
+        # is newer, so it replaces this one either way.
+        conn = connect()
+        conn.execute("INSERT OR IGNORE INTO quota_snapshots(ts, source, five_hour_pct) VALUES (?, 'manual', 0)",
+                     (now(),))
+        conn.commit()
+        print("5-hour window recorded as reset; the next Desktop sample replaces it")
         return 0
     if cmd == "check":
         conn = connect()

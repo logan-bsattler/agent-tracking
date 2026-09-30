@@ -292,6 +292,17 @@ def test_pause_disables_block(conn, tmp_path, monkeypatch, capsys):
     assert code == 2
 
 
+def test_reset5h_clears_old_window_until_next_sample(conn, tmp_path, capsys):
+    _snap(conn, fh=96, sd=17, ts_offset=-300)
+    conn.commit()
+    guard.main(["reset5h"])
+    capsys.readouterr()
+    a = guard.assess(conn, _transcript(tmp_path, 10_000))
+    assert a["five_hour"] == 0 and a["seven_day"] == 17 and a["level"] == "ok"
+    _snap(conn, fh=4, sd=17, ts_offset=60)       # the next real sample wins
+    assert guard.assess(conn, _transcript(tmp_path, 10_000))["five_hour"] == 4
+
+
 def test_env_off_disables(conn, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("COORD_GUARD", "off")
     code, _, _ = _run_hook(monkeypatch, capsys, "pretooluse", {"transcript_path": _transcript(tmp_path, 350_000)})
