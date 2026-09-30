@@ -14,7 +14,7 @@ from pathlib import Path
 # Bump this whenever DDL or _migrate changes. connect() skips both entirely
 # when the file already reports this version, so a new table or column that
 # ships without a bump will not be created.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 def default_db_path() -> Path:
     """COORD_DB if set, else ~/.coord/coord.db -- read on every call, not at import.
@@ -102,6 +102,35 @@ CREATE TABLE IF NOT EXISTS time_entries (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS time_entries_day ON time_entries(day, client);
+
+-- Calendar events, keyed by Outlook id so a re-pull updates rather than adds.
+-- Every event in a pulled range is kept, counted or not, so a new rule can
+-- reclassify without a re-pull. See meetings.py.
+CREATE TABLE IF NOT EXISTS meetings (
+  id         TEXT PRIMARY KEY,
+  start_ts   INTEGER NOT NULL,
+  end_ts     INTEGER NOT NULL,
+  subject    TEXT NOT NULL,
+  organizer  TEXT,
+  domains    TEXT,
+  attendees  INTEGER,
+  show_as    TEXT,
+  cancelled  INTEGER NOT NULL DEFAULT 0,
+  all_day    INTEGER NOT NULL DEFAULT 0,
+  status     TEXT NOT NULL CHECK (status IN ('counted','skipped','unclassified')),
+  client     TEXT,
+  why        TEXT,
+  pulled_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS meetings_start ON meetings(start_ts);
+
+CREATE TABLE IF NOT EXISTS meeting_rules (
+  id         TEXT PRIMARY KEY,
+  kind       TEXT NOT NULL CHECK (kind IN ('subject','domain','skip','skip_org')),
+  pattern    TEXT NOT NULL,
+  client     TEXT,
+  created_at INTEGER NOT NULL
+);
 
 -- Next steps a finished task named in its result. Each is owed a resolution:
 -- 'tasked' (resolved_by = the child task) or 'dropped' (resolved_by = the

@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import hours, store, usage
+from . import hours, meetings, store, usage
 
 # Fixed slot per model family. Color follows the entity, never its rank.
 MODEL_SLOTS = [("sonnet", 1), ("opus", 2), ("fable", 3), ("haiku", 4)]
@@ -769,16 +769,17 @@ def hours_csv(rows: list[dict[str, Any]]) -> str:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(["day", "client", "task_id", "title", "pipeline_task_id", "agent_min", "operator_min",
-                "total_min", "hours", "estimated"])
+                "meeting_min", "total_min", "hours", "estimated"])
     for r in rows:
         w.writerow([r["day"], r["client"], r["task_id"], r["title"], r["pipeline_task_id"] or "",
-                    f"{r['agent_min']:.1f}", f"{r['operator_min']:.1f}", f"{r['total_min']:.1f}",
+                    f"{r['agent_min']:.1f}", f"{r['operator_min']:.1f}", f"{r['meeting_min']:.1f}",
+                    f"{r['total_min']:.1f}",
                     f"{hours.quarter_hours(r['total_min']):.2f}", "yes" if r["estimated"] else ""])
     return buf.getvalue()
 
 
 def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | None,
-               push: dict[str, Any], today=None) -> str:
+               push: dict[str, Any], today=None, unclassified: list[dict[str, Any]] | None = None) -> str:
     """Day x client grid, then each client's tasks. A draft for the operator."""
     from datetime import date, timedelta
     from urllib.parse import urlencode
@@ -800,7 +801,9 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
             f'<button>Show</button> · <a href="/hours.csv?{esc(qs)}">CSV</a></form>')
     caveat = ('<p class="sub">Draft, not a bill. Agent time is measured from transcripts (gaps between a '
               f"client's requests, each capped at {hours.IDLE_GAP // 60} min) and is not Ben's time; "
-              'operator time is what <code>coord_log_time</code> recorded. Sessions outside client folders '
+              'operator time is what <code>coord_log_time</code> recorded; meeting time is your Outlook '
+              'calendar (busy and tentative, overlaps shared), which shows invitations, not attendance. '
+              '<i>Internal</i> is Logan-only meetings and is never pushed. Sessions outside client folders '
               '(master, Posey) are excluded. <i>est</i> marks tasks from before pickup events were recorded, '
               'timed from creation to close. Hours round to 0.25 on this page only.</p>')
     if not rows:
@@ -823,28 +826,38 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
         for r in rows:
             if r["client"] != c:
                 continue
-            a = acc.setdefault(r["task_id"], {**r, "agent_min": 0.0, "operator_min": 0.0, "total_min": 0.0,
-                                              "days": 0})
-            for f in ("agent_min", "operator_min", "total_min"):
+            a = acc.setdefault(r["task_id"], {**r, "agent_min": 0.0, "operator_min": 0.0, "meeting_min": 0.0,
+                                              "total_min": 0.0, "days": 0})
+            for f in ("agent_min", "operator_min", "meeting_min", "total_min"):
                 a[f] += r[f]
             a["days"] += 1
             a["estimated"] = a["estimated"] or r["estimated"]
         trs = []
         for tid, a in sorted(acc.items(), key=lambda kv: -kv[1]["total_min"]):
-            name = (f'<a class="drill" href="/board/task/{esc(tid)}">{esc(a["title"] or tid)}</a>'
+            name = ('<span class="muted">meetings (Outlook)</span>' if tid == meetings.MEETINGS else
+                    f'<a class="drill" href="/board/task/{esc(tid)}">{esc(a["title"] or tid)}</a>'
                     if tid != hours.UNASSIGNED else '<span class="muted">unassigned (no task open)</span>')
             est = ' <span class="muted">est</span>' if a["estimated"] else ""
             trs.append(f'<tr><td>{name}{est}</td><td>{esc(a["pipeline_task_id"] or "—")}</td>'
                        f'<td class="n">{a["days"]}</td><td class="n">{_h(a["agent_min"])}</td>'
-                       f'<td class="n">{_h(a["operator_min"])}</td><td class="n"><b>{_h(a["total_min"])}</b></td></tr>')
+                       f'<td class="n">{_h(a["operator_min"])}</td><td class="n">{_h(a["meeting_min"])}</td>'
+                       f'<td class="n"><b>{_h(a["total_min"])}</b></td></tr>')
         tot = _h(sum(a["total_min"] for a in acc.values()))
         per.append(f'<details class="card"><summary><b>{esc(c)}</b> · {tot}h</summary><div class="wrap"><table>'
                    f'<tr><th>Task</th><th>Pipeline</th><th class="n">Days</th><th class="n">Agent</th>'
-                   f'<th class="n">Operator</th><th class="n">Total</th></tr>{"".join(trs)}</table></div></details>')
+                   f'<th class="n">Operator</th><th class="n">Meetings</th><th class="n">Total</th></tr>{"".join(trs)}</table></div></details>')
     pushed = (f'<div class="card"><h2>SharePoint push</h2><p class="muted">{esc(push["note"])} · '
               f'{len(push["payload"])} pipeline item-day(s) would be sent; rows with no pipeline item are left '
               f'out until linked with <code>coord_set_pipeline_task</code>.</p></div>')
-    return _shell("Hours", f'{nav}<h1>Hours</h1>{caveat}{form}{table}{"".join(per)}{pushed}')
+    loose = ""
+    if unclassified:
+        trs = "".join(f'<tr><td>{esc(u["subject"])}</td><td class="muted">{esc(u["organizer"] or "")}</td>'
+                      f'<td class="n">{u["n"]}</td><td class="n">{_h(u["m"])}</td></tr>' for u in unclassified)
+        loose = (f'<div class="card"><h2>Unclassified meetings</h2><p class="muted">Not counted yet. Tell Master '
+                 f'which client each belongs to (or skip); <code>coord_assign_meeting</code> remembers it.</p>'
+                 f'<div class="wrap"><table><tr><th>Subject</th><th>Organizer</th><th class="n">Times</th>'
+                 f'<th class="n">Hours</th></tr>{trs}</table></div></div>')
+    return _shell("Hours", f'{nav}<h1>Hours</h1>{caveat}{form}{loose}{table}{"".join(per)}{pushed}')
 
 
 def billing_period(today=None):
@@ -931,7 +944,9 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 if path == "/hours.csv":
                     self._type, self._disp = "text/csv; charset=utf-8", f"hours-{start}-{end}.csv"
                     return hours_csv(rows).encode("utf-8")
-                return hours_page(rows, start, end, client, hours.push_to_pipeline(conn, rows)).encode("utf-8")
+                un = meetings.unclassified(conn, hours.parse_day(start), hours.parse_day(end))
+                return hours_page(rows, start, end, client, hours.push_to_pipeline(conn, rows),
+                                  unclassified=un).encode("utf-8")
             if path == "":
                 with ingest_lock:
                     usage.ingest(conn)

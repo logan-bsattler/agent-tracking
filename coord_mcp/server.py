@@ -479,7 +479,9 @@ async def coord_hours(params: HoursInput) -> str:
     edit before billing. agent_min is measured from transcripts; operator_min
     is what coord_log_time recorded. Unrounded; round only when presenting.
 
-    Returns JSON: {rows, totals: {agent_min, operator_min}, truncated}
+    meeting_min comes from coord_import_meetings, on a `meetings` row per client.
+
+    Returns JSON: {rows, totals: {agent_min, operator_min, meeting_min}, truncated}
     """
     try:
         conn = db()
@@ -491,13 +493,71 @@ async def coord_hours(params: HoursInput) -> str:
         rows = hours.breakdown(conn, params.start, params.end, params.client)
         if params.by == "pipeline":
             rows = hours.rollup(rows)
-        totals = {"agent_min": round(sum(r["agent_min"] for r in rows), 1),
-                  "operator_min": round(sum(r["operator_min"] for r in rows), 1)}
+        totals = {f: round(sum(r[f] for r in rows), 1) for f in ("agent_min", "operator_min", "meeting_min")}
         shown = []
         for r in rows[:HOURS_ROW_CAP]:
             r = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in r.items()}
             shown.append({k: r[k] for k in params.fields if k in r} if params.fields else r)
         return _ok({"rows": shown, "totals": totals, "truncated": len(rows) > HOURS_ROW_CAP})
+    except Exception as e:
+        return _err(e)
+
+
+class MeetingEvent(BaseModel):
+    """One event as outlook_calendar_search returns it, trimmed to these keys."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(..., max_length=400)
+    subject: str | None = Field(default=None, max_length=400)
+    organizer: str | None = Field(default=None, max_length=200)
+    attendees: list[str] | None = Field(default=None, max_length=400)
+    start: dict[str, str] | str
+    end: dict[str, str] | str
+    showAs: str | None = Field(default=None, max_length=40)
+    isAllDay: bool = False
+    isCancelled: bool = False
+
+
+class ImportMeetingsInput(Strict):
+    start: str = Field(..., description="First day searched, YYYY-MM-DD", max_length=10)
+    end: str = Field(..., description="Last day searched, inclusive, YYYY-MM-DD", max_length=10)
+    total: int = Field(..., ge=0, description="totalResultCount the search reported")
+    events: list[MeetingEvent] = Field(..., max_length=1000, description="Every page, concatenated")
+
+
+@tool("coord_import_meetings", title="Import Outlook meetings")
+async def coord_import_meetings(params: ImportMeetingsInput) -> str:
+    """Store the operator's calendar for [start, end] as meeting hours, replacing
+    what an earlier pull stored for those days. Pass events exactly as
+    outlook_calendar_search returns them (extra keys are ignored); the server
+    classifies. Refused whole if len(events) != total.
+
+    Returns JSON: {stored, removed, counted, skipped, unclassified}
+    """
+    try:
+        from . import meetings
+        return _ok(meetings.import_events(db(), params.start, params.end, params.total,
+                                          [e.model_dump() for e in params.events]))
+    except Exception as e:
+        return _err(e)
+
+
+class AssignMeetingInput(Strict):
+    subject: str = Field(..., description="Subject text to match, as a whole word or phrase", max_length=200)
+    client: str = Field(..., description="Client key, 'Internal', or 'skip'", max_length=80)
+
+
+@tool("coord_assign_meeting", title="Classify a meeting subject")
+async def coord_assign_meeting(params: AssignMeetingInput) -> str:
+    """Teach the meeting classifier: every meeting whose subject contains this
+    text belongs to the client (or is skipped). Applies to stored meetings at
+    once and to every later pull.
+
+    Returns JSON: {rule_id, kind, pattern, client, reclassified}
+    """
+    try:
+        from . import meetings
+        meetings.seed(db())
+        return _ok(meetings.assign(db(), params.subject, params.client))
     except Exception as e:
         return _err(e)
 

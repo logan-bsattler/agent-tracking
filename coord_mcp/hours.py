@@ -37,7 +37,7 @@ CLIENTS = ("Moog", "Royal", "Cascade", "LNK", "TS Tech", "PBE", "MAG", "Furlani"
 PUSH_FLAG = "hours_push_enabled"
 UNASSIGNED = "unassigned"
 ROW_FIELDS = ("day", "client", "task_id", "title", "pipeline_task_id", "agent_min", "operator_min",
-              "total_min", "estimated")
+              "meeting_min", "total_min", "estimated")
 
 _DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -262,21 +262,25 @@ def operator_minutes(conn: sqlite3.Connection, start: date, end: date, client: s
 
 def breakdown(conn: sqlite3.Connection, start: date | str, end: date | str, client: str | None = None,
               t_now: int | None = None) -> list[dict[str, Any]]:
-    """One row per (day, client, task), agent and operator minutes side by side."""
+    """One row per (day, client, task), agent, operator and meeting minutes side
+    by side. Meetings are one `meetings` row per client per day: no task, so no
+    pipeline item, so never in the push until that is decided."""
+    from . import meetings
     start = parse_day(start) if isinstance(start, str) else start
     end = parse_day(end) if isinstance(end, str) else end
     if end < start:
         raise ValueError(f"end {end} is before start {start}")
     agent = agent_minutes(conn, start, end, client, t_now)
     op = operator_minutes(conn, start, end, client)
+    mt = {(d, c, meetings.MEETINGS): m for (d, c), m in meetings.meeting_minutes(conn, start, end, client).items()}
     rows = []
-    for k in sorted(set(agent) | set(op)):
+    for k in sorted(set(agent) | set(op) | set(mt)):
         a, o = agent.get(k, {}), op.get(k, {})
-        am, om = a.get("minutes", 0.0), o.get("minutes", 0.0)
+        am, om, mm = a.get("minutes", 0.0), o.get("minutes", 0.0), mt.get(k, 0.0)
         rows.append({"day": k[0], "client": k[1], "task_id": k[2],
                      "title": a.get("title") or o.get("title") or "",
                      "pipeline_task_id": a.get("pipeline_task_id") or o.get("pipeline_task_id"),
-                     "agent_min": am, "operator_min": om, "total_min": am + om,
+                     "agent_min": am, "operator_min": om, "meeting_min": mm, "total_min": am + om + mm,
                      "estimated": bool(a.get("estimated"))})
     return rows
 
@@ -287,8 +291,8 @@ def rollup(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for r in rows:
         k = (r["day"], r["client"], r["pipeline_task_id"] or UNASSIGNED)
         d = acc.setdefault(k, {"day": k[0], "client": k[1], "pipeline_task_id": k[2], "agent_min": 0.0,
-                               "operator_min": 0.0, "total_min": 0.0, "estimated": False, "tasks": []})
-        for f in ("agent_min", "operator_min", "total_min"):
+                               "operator_min": 0.0, "meeting_min": 0.0, "total_min": 0.0, "estimated": False, "tasks": []})
+        for f in ("agent_min", "operator_min", "meeting_min", "total_min"):
             d[f] += r[f]
         d["estimated"] = d["estimated"] or r["estimated"]
         if r["task_id"] != UNASSIGNED:
