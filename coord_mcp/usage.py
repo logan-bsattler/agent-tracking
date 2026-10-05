@@ -233,7 +233,8 @@ def ingest(conn: sqlite3.Connection) -> dict[str, int]:
             conn.execute("ROLLBACK")
             raise
     return {"files_read": files, "requests_added": requests,
-            "desktop_quota_added": ingest_desktop_quota(conn)}
+            "desktop_quota_added": ingest_desktop_quota(conn),
+            "live_quota_added": ingest_live_quota(conn)}
 
 
 # ------------------------------------------------- Claude Desktop quota file
@@ -331,6 +332,40 @@ def ingest_desktop_quota(conn: sqlite3.Connection) -> int:
         "INSERT OR IGNORE INTO quota_snapshots(ts, source, five_hour_pct, seven_day_pct) VALUES (?,?,?,?)", rows)
     after = conn.execute("SELECT COUNT(*) n FROM quota_snapshots WHERE source='desktop'").fetchone()["n"]
     return after - before
+
+
+def live_quota_path() -> Path:
+    db = Path(os.environ.get("COORD_DB", Path.home() / ".coord" / "coord.db")).expanduser()
+    return Path(os.environ.get("COORD_LIVE_QUOTA", db.parent / "live-quota.json"))
+
+
+def ingest_live_quota(conn: sqlite3.Connection) -> int:
+    """Load the coord-guard mod's latest reading: the session's own rate limits,
+    with reset times, written whenever a window moves. Idempotent."""
+    raw = _read_bytes(live_quota_path())
+    if not raw:
+        return 0
+    try:
+        d = json.loads(raw.decode("utf-8-sig", "replace"))
+        ts = int(d["ts"])
+    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError):
+        return 0
+    if d.get("five_hour_pct") is None and d.get("seven_day_pct") is None:
+        return 0
+
+    def reset(v: Any) -> int | None:
+        try:
+            return _iso_to_ts(v) if v else None
+        except ValueError:
+            return None
+
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO quota_snapshots(ts, source, five_hour_pct, five_hour_reset, seven_day_pct, "
+        "seven_day_reset) VALUES (?, 'session', ?, ?, ?, ?)",
+        (ts, d.get("five_hour_pct"), reset(d.get("five_hour_reset")), d.get("seven_day_pct"),
+         reset(d.get("seven_day_reset"))))
+    conn.commit()
+    return cur.rowcount
 
 
 # --------------------------------------------------------------- statusline

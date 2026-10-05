@@ -159,3 +159,20 @@ def test_context_tile_gets_loud_past_the_thresholds():
     assert usage._ctx_text(75).startswith("! ctx") and "park soon" in usage._ctx_text(75)
     loud = usage._ctx_text(91)
     assert loud.startswith("!! CTX") and "PARK + CLEAR NOW" in loud
+
+
+def test_ingest_live_quota_keeps_resets(tmp_path, monkeypatch):
+    import json as _json
+    from coord_mcp import usage as _u
+    from coord_mcp.db import connect as _connect
+    f = tmp_path / "live-quota.json"
+    monkeypatch.setenv("COORD_LIVE_QUOTA", str(f))
+    c = _connect(tmp_path / "live.db")
+    assert _u.ingest_live_quota(c) == 0                     # no file yet
+    f.write_text(_json.dumps({"ts": 1790800000, "five_hour_pct": 12.5,
+                              "five_hour_reset": "2026-10-01T20:00:00Z",
+                              "seven_day_pct": 17, "seven_day_reset": None}))
+    assert _u.ingest_live_quota(c) == 1
+    assert _u.ingest_live_quota(c) == 0                     # idempotent
+    r = c.execute("SELECT source, five_hour_pct, five_hour_reset, seven_day_pct FROM quota_snapshots").fetchone()
+    assert tuple(r) == ("session", 12.5, 1790884800, 17)

@@ -1,0 +1,1 @@
+{ "name": "coord-guard", "version": "0.1.0", "description": "Usage guard for the coord agent team: blocks near the 5-hour, weekly and context limits, in-process, from the session's own figures." }

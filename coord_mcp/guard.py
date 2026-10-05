@@ -163,8 +163,8 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
         # the whole pool. Reading it is a local file read, so it is cheap enough
         # to do on a tool call -- but only when the row we have is actually old.
         try:
-            from .usage import ingest_desktop_quota
-            if ingest_desktop_quota(conn):
+            from .usage import ingest_desktop_quota, ingest_live_quota
+            if ingest_live_quota(conn) + ingest_desktop_quota(conn):
                 q = latest_quota(conn)
                 age = _quota_age(q)
         except Exception:
