@@ -10,6 +10,19 @@ import type { Register, SessionContextUsage, SessionRateLimit } from 'claude-cod
 // in: a teammate's typed result, the lead's decision record, a park.
 const EXEMPT = new Set(['coord_complete_task', 'coord_record_decision', 'coord_park_task'])
 
+// coord takes a few seconds to answer initialize, so a session's first turn often
+// sees it as "still connecting". Agents read that as "down" and open coord.db
+// directly, which skips every contract the server enforces. Refuse the read and
+// say how to wait. agent-tracking itself is exempt: that is where the db is built.
+const DB_TOOLS = new Set(['Bash', 'PowerShell', 'Read', 'Grep', 'Glob'])
+const DIRECT_DB = /coord\.db/i
+const DB_OWNER = /[\\/]agent-tracking([\\/]|$)/i
+const DIRECT_DB_DENY =
+  'Reading coord.db directly is blocked: the board is reached only through the coord MCP tools. ' +
+  'If coord shows as "still connecting" or its tools are missing, it is starting up (a few seconds). ' +
+  'Call ToolSearch with query "select:mcp__coord__coord_board" -- it waits for the server, then call coord_board. ' +
+  'If ToolSearch still finds no coord tools, report coord as down and stop; do not work around it.'
+
 type Limits = { ctxWarn: number; ctxHard: number; warn5h: number; hard5h: number; warn7d: number; hard7d: number }
 type Figures = { context?: SessionContextUsage; rateLimits: SessionRateLimit[] }
 type Assessment = { level: 'ok' | 'warn' | 'block'; ctxLevel: 'ok' | 'warn' | 'block'; reasons: string[] }
@@ -139,6 +152,10 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const nowMs = await $.clock.now()
     if (isOff) return next(e)
+    // Not subject to the pause: pausing is about spend, this is about the board.
+    if (DB_TOOLS.has(e.tool) && DIRECT_DB.test(JSON.stringify(e)) && !DB_OWNER.test(await $.session.cwd())) {
+      return { deny: DIRECT_DB_DENY }
+    }
     if (coordDir) {
       try {
         if (pausedUntil(await $.fs.read(`${coordDir}/guard-pause`)) > nowMs) return next(e)
