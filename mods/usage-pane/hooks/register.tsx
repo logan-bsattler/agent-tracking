@@ -53,12 +53,21 @@ function bar(pct: number, width: number): string {
   return '█'.repeat(n) + '░'.repeat(width - n)
 }
 
+// The coord dashboard (coord_mcp.usage serve, kept up by a logon task). Opened
+// in the default browser by the master session at start instead of the pane,
+// at most once per DASH_EVERY_MS so a run of clears does not stack up tabs.
+// Client sessions open nothing. /dashboard opens it on demand anywhere.
+const DASH_URL = 'http://127.0.0.1:8765/'
+const DASH_EVERY_MS = 8 * 60 * 60 * 1000
+const MASTER_ROOT = /^c:[\\/]development[\\/]agents([\\/]|$)/i
+
 const fmt = (n?: number) =>
   n === undefined ? '-' : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'usage-pane', description: 'Open the usage pane' })
+    await $.command.register({ name: 'dashboard', description: 'Open the coord dashboard in the browser' })
     const prev = await read($, snap)
     const first = toSnap(await $.session.usage({ breakdown: 'summary' }), await $.clock.now(), prev)
     await update($, snap, () => first)
@@ -69,8 +78,22 @@ export const register: Register = on => {
         await update($, snap, () => s)
       })()
     })
-    void $.ui.open({ id: PANE, title: 'Usage' })
+    if (MASTER_ROOT.test(await $.session.root())) {
+      const nowMs = await $.clock.now()
+      const last = Number((await $.store.get('dashboardOpenedAt')) ?? 0)
+      if (nowMs - last > DASH_EVERY_MS) {
+        try {
+          await $.process.run(['cmd', '/c', 'start', '', DASH_URL])
+          await $.store.set('dashboardOpenedAt', nowMs)
+        } catch { /* no browser to hand it to: say nothing, /dashboard still works */ }
+      }
+    }
     return next(e)
+  })
+
+  on('command.run', { command: 'dashboard' }, async $ => {
+    await $.process.run(['cmd', '/c', 'start', '', DASH_URL])
+    return { text: `Dashboard opened: ${DASH_URL}` }
   })
 
   on('command.run', { command: 'usage-pane' }, async $ => {
