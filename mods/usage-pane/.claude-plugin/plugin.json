@@ -1,0 +1,1 @@
+{ "name": "usage-pane", "version": "0.1.0", "description": "A pane you can leave open: 5-hour and weekly limits with resets, context fill and session cost.", "types": "./types/index.d.ts" }

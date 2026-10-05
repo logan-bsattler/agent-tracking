@@ -73,68 +73,60 @@ function assess(f: Figures, L: Limits, nowMs: number): Assessment {
   return { level, ctxLevel, reasons }
 }
 
+function statusText(f: Figures): string | undefined {
+  const parts: string[] = []
+  for (const [kind, label] of [['five_hour', '5h'], ['seven_day', '7d']] as const) {
+    const w = f.rateLimits.find(r => r.kind === kind)
+    if (w) parts.push(`${label} ${w.percentUsed}%`)
+  }
+  if (f.context?.tokens) parts.push(`ctx ${k(f.context.tokens)}`)
+  return parts.length ? `guard: ${parts.join(' · ')}` : undefined
+}
+
+const numOr = (v: string | undefined, dflt: number) => {
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 ? n : dflt
+}
+
+const pausedUntil = (text: string) => Number(String(text).trim()) * 1000
+
+// Every $ call sits in a hook (the engine reads them off the source), so the
+// session's settings are gathered once at session.start, which a reload re-runs.
 export const register: Register = on => {
-  let figures: Figures | undefined
-  let limits: Limits | undefined
+  let figures: Figures = { rateLimits: [] }
+  let L: Limits = { ctxWarn: 150000, ctxHard: 300000, warn5h: 75, hard5h: 92, warn7d: 85, hard7d: 97 }
+  let coordDir = ''
+  let isOff = false
   let calls = 0
 
-  const num = async ($: any, name: string, dflt: number) => {
-    const v = Number(await $.env.get(name))
-    return Number.isFinite(v) && v > 0 ? v : dflt
-  }
-
-  const loadLimits = async ($: any): Promise<Limits> => limits ??= {
-    ctxWarn: await num($, 'COORD_CTX_WARN', 150000),
-    ctxHard: await num($, 'COORD_CTX_HARD', 300000),
-    warn5h: await num($, 'COORD_WARN_5H', 75),
-    hard5h: await num($, 'COORD_HARD_5H', 92),
-    warn7d: await num($, 'COORD_WARN_7D', 85),
-    hard7d: await num($, 'COORD_HARD_7D', 97),
-  }
-
-  const home = async ($: any) => (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '~'
-
-  // The same switches the Python guard honours: COORD_GUARD=off, and the pause
-  // file `python -m coord_mcp.guard pause N` writes (epoch seconds).
-  const paused = async ($: any, nowMs: number) => {
-    if (['off', '0', 'false'].includes(((await $.env.get('COORD_GUARD')) ?? '').toLowerCase())) return true
-    try {
-      const until = Number(String(await $.fs.read(`${await home($)}/.coord/guard-pause`)).trim())
-      return until * 1000 > nowMs
-    } catch {
-      return false
+  on('session.start', async ($, e, next) => {
+    L = {
+      ctxWarn: numOr(await $.env.get('COORD_CTX_WARN'), 150000),
+      ctxHard: numOr(await $.env.get('COORD_CTX_HARD'), 300000),
+      warn5h: numOr(await $.env.get('COORD_WARN_5H'), 75),
+      hard5h: numOr(await $.env.get('COORD_HARD_5H'), 92),
+      warn7d: numOr(await $.env.get('COORD_WARN_7D'), 85),
+      hard7d: numOr(await $.env.get('COORD_HARD_7D'), 97),
     }
-  }
-
-  const current = async ($: any): Promise<Figures> => {
-    if (!figures) {
-      const u = await $.session.usage()
-      figures = { context: u.context, rateLimits: u.rateLimits }
-    }
-    return figures
-  }
-
-  const showStatus = ($: any, f: Figures) => {
-    const parts: string[] = []
-    for (const [kind, label] of [['five_hour', '5h'], ['seven_day', '7d']] as const) {
-      const w = f.rateLimits.find(r => r.kind === kind)
-      if (w) parts.push(`${label} ${w.percentUsed}%`)
-    }
-    if (f.context?.tokens) parts.push(`ctx ${k(f.context.tokens)}`)
-    $.ui.status(parts.length ? `guard: ${parts.join(' · ')}` : undefined)
-  }
+    const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
+    coordDir = home ? `${home.replace(/\\/g, '/')}/.coord` : ''
+    isOff = ['off', '0', 'false'].includes(((await $.env.get('COORD_GUARD')) ?? '').toLowerCase())
+    const u = await $.session.usage()
+    figures = { context: u.context, rateLimits: u.rateLimits }
+    $.ui.status(statusText(figures))
+    return next(e)
+  })
 
   // Pushed after every main-thread turn and whenever a window moves a point.
-  // Also hand the reading to the coord dashboard, which otherwise has only
-  // Desktop's 15-minute samples (usage.ingest_live_quota reads this file).
+  // Also hand the reading to the coord dashboard (usage.ingest_live_quota).
   on('session.measure', async ($, e, next) => {
     figures = { context: e.context, rateLimits: e.rateLimits }
-    showStatus($, figures)
-    if (e.changed.includes('rateLimits') && e.rateLimits.length) {
-      const pick = (kind: string) => e.rateLimits.find(r => r.kind === kind)
-      const fh = pick('five_hour'), sd = pick('seven_day')
+    $.ui.status(statusText(figures))
+    if (coordDir && e.rateLimits.length) {
+      const fh = e.rateLimits.find(r => r.kind === 'five_hour')
+      const sd = e.rateLimits.find(r => r.kind === 'seven_day')
       try {
-        await $.fs.write(`${await home($)}/.coord/live-quota.json`, JSON.stringify({
+        await $.fs.write(`${coordDir}/live-quota.json`, JSON.stringify({
           ts: Math.floor((await $.clock.now()) / 1000),
           five_hour_pct: fh?.percentUsed ?? null, five_hour_reset: fh?.resetsAt ?? null,
           seven_day_pct: sd?.percentUsed ?? null, seven_day_reset: sd?.resetsAt ?? null,
@@ -146,8 +138,13 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const nowMs = await $.clock.now()
-    if (await paused($, nowMs)) return next(e)
-    const a = assess(await current($), await loadLimits($), nowMs)
+    if (isOff) return next(e)
+    if (coordDir) {
+      try {
+        if (pausedUntil(await $.fs.read(`${coordDir}/guard-pause`)) > nowMs) return next(e)
+      } catch { /* no pause file */ }
+    }
+    const a = assess(figures, L, nowMs)
     calls += 1
     if (a.level === 'block') {
       const bare = String(e.tool).split('__').pop() ?? ''
@@ -160,8 +157,7 @@ export const register: Register = on => {
         ? { ...ran, context: [...(ran.context ?? []), banner('BLOCKED -- THIS WRITE IS YOUR LAST ACTION', a.reasons)] }
         : ran
     }
-    // Context warnings need action (park and clear), so nudge once every ten
-    // tool calls; limit warnings ride the next prompt instead.
+    // Context warnings need action (park and clear): nudge once every ten calls.
     if (a.ctxLevel === 'warn' && calls % 10 === 1) {
       const ran = await next(e)
       return ran.deny === undefined
@@ -173,15 +169,19 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     const nowMs = await $.clock.now()
-    if (await paused($, nowMs)) return next(e)
-    const a = assess(await current($), await loadLimits($), nowMs)
+    if (isOff) return next(e)
+    if (coordDir) {
+      try {
+        if (pausedUntil(await $.fs.read(`${coordDir}/guard-pause`)) > nowMs) return next(e)
+      } catch { /* no pause file */ }
+    }
+    const a = assess(figures, L, nowMs)
     if (a.level === 'ok') return next(e)
     const text = a.ctxLevel === 'ok'
       ? 'Usage guard: ' + a.reasons.join(' ')
       : banner(a.level === 'block' ? 'BLOCKED BY THE USAGE GUARD' : 'CONTEXT IS RUNNING OUT -- SAVE AND CLEAR', a.reasons)
     // A prompt is never dropped: the person may be answering the very question
-    // (clear? park?) the block is asking. The model reads the block, and every
-    // tool call it then makes is refused.
+    // (clear? park?) the block asks. Tool calls are what the block refuses.
     return next({ ...e, context: [...(e.context ?? []), text] })
   })
 }
