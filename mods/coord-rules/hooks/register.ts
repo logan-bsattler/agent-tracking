@@ -6,7 +6,11 @@ import type { Register } from 'claude-code'
 // 1. Clear guard. clear_session "self" fires as the turn ends, so a warning in
 //    the same turn is read in a session that no longer remembers it (9/30,
 //    10/01). It is refused unless the operator's own prompt in this turn says
-//    "clear". A message from a client session never counts.
+//    "clear". A message from a client session never counts. One exception: a
+//    session that parked a board task this turn may clear itself, because a
+//    client's park-and-clear is the protocol and nobody types in that session
+//    (10/05: MAG and LNK parked, could not clear, and re-parked on re-dispatch).
+//    The master never parks, so the exception does not reach it.
 // 2. Dispatch check. coord_create_task writes a row and wakes nobody; a task
 //    whose id never reaches send_message sits open forever. Each one created
 //    this turn and not yet named in a send_message is flagged at turn end, and
@@ -25,6 +29,7 @@ const bare = (tool: string) => String(tool).split('__').pop() ?? ''
 
 export const register: Register = on => {
   let operatorGo = false
+  let parked = false
   // task id -> client key, for tasks created and not yet named in a send_message
   const pending = new Map<string, string>()
   let carried: string[] = []
@@ -44,11 +49,17 @@ export const register: Register = on => {
 
     if (name === 'clear_session') {
       const target = String((e as Record<string, unknown>).session_id ?? '')
-      if (target === 'self' && !operatorGo) {
+      if (target === 'self' && !operatorGo && !parked) {
         return { deny: 'coord-rules: refusing to clear this session. Ben\'s message this turn did not say ' +
-          '"clear". Put the clear on Needs you and wait for his go in a later turn.' }
+          '"clear" and no task was parked this turn. Put the clear on Needs you and wait for his go in a later turn.' }
       }
       return next(e)
+    }
+
+    if (name === 'coord_park_task') {
+      const ran = await next(e)
+      if (ran.deny === undefined && !ran.isError) parked = true
+      return ran
     }
 
     if (name === 'send_message' || name === 'SendMessage') {
@@ -76,6 +87,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId) return next(e)
     operatorGo = false
+    parked = false
     if (pending.size) {
       carried = [...pending].map(([id, client]) => `${id} (${client})`)
       pending.clear()
