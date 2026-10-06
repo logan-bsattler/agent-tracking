@@ -646,6 +646,28 @@ def _by_client(rows: list[dict[str, Any]], t: int) -> str:
         for c, g in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])))
 
 
+# Every card on the board pages folds on a click of its heading. The board
+# auto-refreshes, so the folded set lives in localStorage, keyed by page path
+# and heading text (the count badge stripped, so a changing count keeps it).
+COLLAPSE_CSS = """
+.card > h2 { cursor: pointer; user-select: none; }
+.card > h2::before { content: "\\25BE  "; color: var(--muted, #888); }
+.card.collapsed > h2::before { content: "\\25B8  "; }
+.card.collapsed > :not(h2) { display: none; }
+"""
+COLLAPSE_JS = """<script>
+try { const k = "coord-collapsed", c = new Set(JSON.parse(localStorage.getItem(k) || "[]"));
+  document.querySelectorAll(".card > h2").forEach(h => {
+    const card = h.parentElement, label = h.cloneNode(true);
+    label.querySelectorAll(".count").forEach(s => s.remove());
+    const key = location.pathname + "|" + label.textContent.trim();
+    if (c.has(key)) card.classList.add("collapsed");
+    h.addEventListener("click", () => {
+      card.classList.toggle("collapsed") ? c.add(key) : c.delete(key);
+      try { localStorage.setItem(k, JSON.stringify([...c])); } catch (e) {} }); }); } catch (e) {}
+</script>"""
+
+
 def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
     """Operator view of the coord board: what needs you first, then the rest."""
     t = v["as_of"]
@@ -657,7 +679,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
                 f"{_items(rows, t, empty)}</div>")
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{'(' + str(n) + ') ' if n else ''}Coord board</title>
-<style>{CSS}{BOARD_CSS}</style></head><body><main>
+<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}</style></head><body><main>
 <nav><a href="/">Usage</a> · <b>Board</b> · <a href="/hours">Hours</a></nav>
 <h1>Coord board</h1>
 <p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
@@ -674,6 +696,7 @@ try {{ const k = "coord-open", o = new Set(JSON.parse(localStorage.getItem(k) ||
 {grp("Running", v["running"], "Nothing picked up and in progress.")}
 {grp("Not picked up", v["waiting"], "Every open task has been picked up.")}
 {grp(f"Done, last {v['recent_h']}h", v["recent"], "Nothing finished recently.")}
+{COLLAPSE_JS}
 </main></body></html>"""
 
 
@@ -698,7 +721,7 @@ def _val(v: Any) -> str:
 def _shell(title: str, body: str) -> str:
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title>'
-            f"<style>{CSS}{BOARD_CSS}</style></head><body><main>{body}</main></body></html>")
+            f"<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}</style></head><body><main>{body}{COLLAPSE_JS}</main></body></html>")
 
 
 def task_page(d: dict[str, Any] | None, task_id: str = "") -> str:
