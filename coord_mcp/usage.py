@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from .db import connect, now
@@ -71,7 +71,8 @@ def cost_usd(model: str, inp: int, out: int, cr: int, cw5: int, cw1: int) -> flo
 
 def _project_name(cwd: str | None, dirname: str) -> str:
     if cwd:
-        return Path(cwd).name or cwd
+        # Transcripts can come from Windows; PureWindowsPath splits on \ and / alike.
+        return PureWindowsPath(cwd).name or cwd
     return dirname
 
 
