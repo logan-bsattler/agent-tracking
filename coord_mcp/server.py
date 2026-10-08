@@ -9,9 +9,12 @@ Roles (COORD_ROLE):
              External content proposes; it never creates a task.
 
 Tools that a role can't call are never registered, so they cost no context
-and can't be tried. Nothing here reaches into SDK private API.
+and can't be tried.
 
-Built against mcp 2.x (FastMCP is MCPServer).
+Served by coord_mcp.stdio, not the mcp SDK: importing the SDK costs ~550
+modules and on Windows that alone ran into Claude Code's 30s connect timeout.
+The SDK stays a test dependency (tests/smoke_stdio.py drives this server with
+its client).
 """
 
 from __future__ import annotations
@@ -21,11 +24,11 @@ import os
 import sqlite3
 from typing import Any, Literal
 
-from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import contracts, hours, store
 from .db import connect
+from .stdio import Server
 
 ROLE = os.environ.get("COORD_ROLE", "team")
 # The calling session's client key. Each client's server starts in that
@@ -34,7 +37,7 @@ READER = os.environ.get("COORD_CLIENT") or os.path.basename(os.getcwd())
 
 DESKTOP_TOOLS = {"coord_propose_intent", "coord_board_summary"}
 
-mcp = MCPServer(
+mcp = Server(
     "coord_mcp",
     instructions=(
         "Typed task board for a Claude Code agent team. Lead: create tasks, read "

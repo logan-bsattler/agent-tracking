@@ -24,7 +24,10 @@ python -m pytest -q             # 107 tests
 python tests/smoke_stdio.py     # end-to-end over real stdio, both roles
 ```
 
-Requires Python 3.11+ and `mcp>=2.0`.
+Requires Python 3.11+ and pydantic. The server speaks MCP over stdio itself
+(`coord_mcp/stdio.py`); the `mcp` SDK is only a test dependency, because
+importing it loads ~550 modules and on Windows that pushed startup past
+Claude Code's 30s MCP connect timeout.
 
 ## Wire it up
 

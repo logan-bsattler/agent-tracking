@@ -7,10 +7,10 @@ name = "coord-mcp"
 version = "0.2.0"
 description = "Typed task board for Claude Code agent teams: contracts, decisions, intents."
 requires-python = ">=3.11"
-dependencies = ["mcp>=2.0,<3", "pydantic>=2"]
+dependencies = ["pydantic>=2"]
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8", "mcp>=2.0,<3"]  # smoke_stdio.py drives the server with the SDK client
 
 [project.scripts]
 coord-mcp = "coord_mcp.server:main"

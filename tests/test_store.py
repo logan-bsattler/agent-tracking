@@ -265,8 +265,8 @@ def test_board_summary_leaks_nothing(conn):
 
 def _surface(role: str) -> list[str]:
     code = (
-        "import asyncio, coord_mcp.server as s;"
-        "print(sorted(t.name for t in asyncio.run(s.mcp.list_tools())))"
+        "import coord_mcp.server as s;"
+        "print(sorted(t['name'] for t in s.mcp.list_tools()))"
     )
     env = dict(os.environ, COORD_ROLE=role, PYTHONPATH=str(ROOT))
     out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
