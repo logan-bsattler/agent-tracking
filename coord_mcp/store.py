@@ -269,8 +269,10 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
            WHERE f.state='open' ORDER BY f.created_at, f.idx LIMIT ?""",
         (LOOSE_ENDS_CAP,))]
     loose_total = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='open'").fetchone()["n"]
+    deferred = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='deferred'").fetchone()["n"]
     return {"tasks_by_kind": counts, "live": live, "loose_ends": loose,
-            "loose_ends_total": loose_total, "open_intents": open_intents, "as_of": now()}
+            "loose_ends_total": loose_total, "deferred_total": deferred,
+            "open_intents": open_intents, "as_of": now()}
 
 
 # -------------------------------------------------------------- decisions
@@ -430,6 +432,13 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
     running: list[dict[str, Any]] = []
     waiting: list[dict[str, Any]] = []
     recent: list[dict[str, Any]] = []
+    acknowledged: list[dict[str, Any]] = []
+    # A failure the master has recorded a decision on since it failed has been
+    # dealt with: retried, superseded or dropped. Without this every failure
+    # sat in Needs you forever, since a failed task never changes state again.
+    acked = {r["task_id"] for r in conn.execute(
+        """SELECT d.task_id FROM decisions d JOIN tasks t ON t.id = d.task_id
+           WHERE t.state='failed' AND d.created_at >= t.completed_at""")}
     rows = conn.execute(
         """SELECT t.id, t.kind, t.title, t.state, t.assigned_to, t.result,
                   t.created_at, t.completed_at, t.picked_up_at,
@@ -445,7 +454,8 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
         if r["state"] == "failed":
             res = json.loads(r["result"] or "{}")
             d["note"] = _gist(r["result"]) + ("" if res.get("retryable") else " (not retryable)")
-            needs_you.append(d)
+            d["failed"] = True
+            (acknowledged if r["id"] in acked else needs_you).append(d)
         elif r["state"] == "open":
             status = _open_status(r["last_park"], r["picked_up_at"])
             if status == "parked":
@@ -465,21 +475,28 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
     running.sort(key=lambda d: d["since"])
     waiting.sort(key=lambda d: d["since"])
     loose_ends: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
     for r in conn.execute(
-        """SELECT f.id fid, f.task_id, f.who, f.what, f.created_at, t.assigned_to, t.title
+        """SELECT f.id fid, f.task_id, f.who, f.what, f.state, f.created_at, t.assigned_to, t.title
            FROM follow_ups f JOIN tasks t ON t.id = f.task_id
-           WHERE f.state='open' ORDER BY f.created_at, f.idx"""
+           WHERE f.state IN ('open','deferred') ORDER BY f.created_at, f.idx"""
     ):
         d = {"id": r["task_id"], "kind": "follow_up", "title": r["what"], "client": r["assigned_to"] or "—",
-             "since": r["created_at"], "note": f"{r['who']} · from: {r['title']}"}
-        loose_ends.append(d)
-        if r["who"].strip().lower() == "ben":
+             "since": r["created_at"], "who": r["who"], "note": f"{r['who']} · from: {r['title']}"}
+        if r["state"] == "deferred":
+            deferred.append(d)
+        elif r["who"].strip().lower() == "ben":
             needs_you.append(d)
+        elif r["who"].strip().lower() == "master":
+            master_owes.append(d)
+        else:
+            loose_ends.append(d)  # owed by someone else: a client, a colleague
     intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
     if intents:
         master_owes.append({"id": "", "kind": "intent", "title": f"{intents} open intent(s) to triage",
                             "client": "—", "since": t, "note": ""})
     return {"needs_you": needs_you, "master_owes": master_owes, "loose_ends": loose_ends,
+            "deferred": deferred, "acknowledged": acknowledged,
             "running": running, "waiting": waiting, "recent": recent, "recent_h": recent_h, "as_of": t}
 
 
@@ -512,20 +529,38 @@ def resolve_follow_up(
     follow_up_id: str,
     task_id: str | None = None,
     decision_id: str | None = None,
+    defer: bool = False,
+    reopen: bool = False,
 ) -> dict[str, Any]:
-    """Close a loose end: 'tasked' by a child task, or 'dropped' by a decision."""
-    if bool(task_id) == bool(decision_id):
-        raise ValueError("give exactly one of task_id (it became a task) or decision_id (recorded why not)")
+    """Close a loose end: 'tasked' by a child task, or 'dropped' by a decision.
+
+    defer parks it as 'deferred' behind a decision naming its trigger: still
+    owed, but off the board's loose ends. reopen puts a deferred one back.
+    """
     row = conn.execute("SELECT state FROM follow_ups WHERE id=?", (follow_up_id,)).fetchone()
     if row is None:
         raise KeyError(f"unknown follow-up '{follow_up_id}'")
-    if row["state"] != "open":
+    if reopen:
+        if task_id or decision_id or defer:
+            raise ValueError("reopen takes no task_id, decision_id or defer")
+        if row["state"] != "deferred":
+            raise ValueError(f"follow-up '{follow_up_id}' is {row['state']}; only a deferred one reopens")
+        conn.execute("UPDATE follow_ups SET state='open', resolved_by=NULL, resolved_at=NULL WHERE id=?",
+                     (follow_up_id,))
+        left = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='open'").fetchone()["n"]
+        return {"ok": True, "follow_up_id": follow_up_id, "state": "open", "resolved_by": None,
+                "loose_ends_left": left}
+    if defer and (task_id or not decision_id):
+        raise ValueError("defer needs decision_id (the decision naming what it waits on) and no task_id")
+    if bool(task_id) == bool(decision_id):
+        raise ValueError("give exactly one of task_id (it became a task) or decision_id (recorded why not)")
+    if row["state"] not in ("open", "deferred") or (defer and row["state"] == "deferred"):
         raise ValueError(f"follow-up '{follow_up_id}' is already {row['state']}")
     if task_id and not conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
         raise KeyError(f"unknown task '{task_id}'. Create the child task first.")
     if decision_id and not conn.execute("SELECT 1 FROM decisions WHERE id=?", (decision_id,)).fetchone():
         raise KeyError(f"unknown decision '{decision_id}'. Record the decision first.")
-    state = "tasked" if task_id else "dropped"
+    state = "tasked" if task_id else "deferred" if defer else "dropped"
     conn.execute("UPDATE follow_ups SET state=?, resolved_by=?, resolved_at=? WHERE id=?",
                  (state, task_id or decision_id, now(), follow_up_id))
     left = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='open'").fetchone()["n"]

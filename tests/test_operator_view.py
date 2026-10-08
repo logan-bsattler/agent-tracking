@@ -181,10 +181,12 @@ def test_follow_ups_surface_on_board_and_operator_view(conn):
     b = store.board(conn)
     assert [(x["who"], x["client"], x["task_id"]) for x in b["loose_ends"]] == [("Shannon", "LNK", t), ("Ben", "LNK", t)]
     v = store.operator_view(conn)
-    assert [d["title"] for d in v["loose_ends"]] == [f["what"] for f in FU]
+    # Ben's own items are in Needs you only; the page no longer lists them twice.
+    assert [d["title"] for d in v["loose_ends"]] == ["Answer Q2, Q6, Q9-Q12"]
     assert [d["title"] for d in v["needs_you"]] == ["Chase Shannon for a date"]
     html = report.board_page(v)
-    assert "Loose ends" in html and "Answer Q2, Q6, Q9-Q12" in html
+    assert "Others owe" in html and "Answer Q2, Q6, Q9-Q12" in html
+    assert html.count("Chase Shannon for a date") == 2  # Next up, and its Needs-you type group
 
 
 def test_resolving_clears_the_loose_end(conn):
@@ -230,3 +232,102 @@ def test_board_reports_loose_end_total_past_the_cap(conn, monkeypatch):
     store.complete_task(conn, t, {**INV, "follow_ups": FU})
     b = store.board(conn)
     assert [x["what"] for x in b["loose_ends"]] == [FU[0]["what"]] and b["loose_ends_total"] == 2
+
+
+# ------------------------------------------------------- board readability
+
+
+def test_master_follow_ups_land_in_master_owes(conn):
+    t = _task(conn, "LNK")
+    store.complete_task(conn, t, {**INV, "follow_ups": [{"who": "Master", "what": "Fix LNK CLAUDE.md"}]})
+    v = store.operator_view(conn)
+    assert [d["title"] for d in v["master_owes"]] == ["Fix LNK CLAUDE.md"]
+    assert v["loose_ends"] == [] and v["needs_you"] == []
+
+
+def test_defer_takes_it_off_the_board_until_reopened(conn):
+    t = _task(conn, "MAG")
+    store.complete_task(conn, t, {**INV, "follow_ups": FU})
+    a, b = [x["id"] for x in store.board(conn)["loose_ends"]]
+    with pytest.raises(ValueError):
+        store.resolve_follow_up(conn, b, defer=True)  # a deferral names its trigger
+    dec = store.record_decision(conn, "Defer until first builds", task_id=t)["decision_id"]
+    r = store.resolve_follow_up(conn, b, decision_id=dec, defer=True)
+    assert r["state"] == "deferred" and r["loose_ends_left"] == 1
+    board = store.board(conn)
+    assert [x["id"] for x in board["loose_ends"]] == [a] and board["deferred_total"] == 1
+    v = store.operator_view(conn)
+    assert v["needs_you"] == [] and [d["title"] for d in v["deferred"]] == ["Chase Shannon for a date"]
+    assert "Deferred" in report.board_page(v)
+    with pytest.raises(ValueError):
+        store.resolve_follow_up(conn, b, decision_id=dec, defer=True)
+    with pytest.raises(ValueError):
+        store.resolve_follow_up(conn, a, reopen=True)  # only a deferred one reopens
+    assert store.resolve_follow_up(conn, b, reopen=True)["state"] == "open"
+    assert store.board(conn)["deferred_total"] == 0
+    assert [d["title"] for d in store.operator_view(conn)["needs_you"]] == ["Chase Shannon for a date"]
+    store.resolve_follow_up(conn, b, decision_id=dec, defer=True)
+    assert store.resolve_follow_up(conn, b, task_id=t)["state"] == "tasked"  # a deferred one still resolves
+
+
+def test_failure_with_a_later_decision_is_acknowledged(conn):
+    t = _task(conn, "Moog", "needs the box")
+    store.complete_task(conn, t, {"done": False, "reason": "VPN down", "retryable": True})
+    conn.execute("UPDATE tasks SET completed_at=completed_at-10 WHERE id=?", (t,))
+    store.record_decision(conn, "Superseded by the retry", task_id=t)
+    v = store.operator_view(conn)
+    assert v["needs_you"] == [] and [d["id"] for d in v["acknowledged"]] == [t]
+    html = report.board_page(v)
+    assert "Acknowledged failures" in html and 'data-fold="closed"' in html
+
+
+def test_decision_before_the_failure_does_not_acknowledge_it(conn):
+    t = _task(conn, "Moog")
+    store.record_decision(conn, "Dispatch when the VPN is up", task_id=t)
+    conn.execute("UPDATE decisions SET created_at=created_at-10 WHERE task_id=?", (t,))
+    store.complete_task(conn, t, {"done": False, "reason": "VPN down", "retryable": True})
+    assert [d["id"] for d in store.operator_view(conn)["needs_you"]] == [t]
+
+
+def test_needs_you_splits_by_type_and_ages_out(conn):
+    t = _task(conn, "LNK")
+    store.complete_task(conn, t, {**INV, "follow_ups": [
+        {"who": "Ben", "what": "Compile xxauto01.p in DEVL"},
+        {"who": "Ben", "what": "Review and send the DRAFT to Shelton"},
+        {"who": "Ben", "what": "Pick batch-only vs streamline"},
+        {"who": "Ben", "what": "Old question nobody answered"}]})
+    conn.execute("UPDATE follow_ups SET created_at=? WHERE what LIKE 'Old%'", (now() - 8 * 86400,))
+    f = _task(conn, "Moog")
+    store.complete_task(conn, f, {"done": False, "reason": "VPN down", "retryable": True})
+    v = store.operator_view(conn)
+    assert {report.need_type(d) for d in v["needs_you"]} == {
+        "Fix failed", "Do in DEVL / on a server", "Review & send", "Decide"}
+    html = report.board_page(v)
+    assert html.index("Next up") < html.index("Needs you")
+    assert html.index("Fix failed") < html.index("Do in DEVL") < html.index("Review &amp; send") < html.index("Decide")
+    assert "<title>(4) Coord board</title>" in html  # the stale one does not count
+    assert html.index("Stale, over 7 days") < html.index("Old question nobody answered")
+
+
+def test_v7_database_migrates_follow_ups_in_place(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    c = connect(path)
+    t = _task(c, "LNK")
+    store.complete_task(c, t, {**INV, "follow_ups": FU})
+    c.close()
+    raw = sqlite3.connect(str(path))
+    sql = raw.execute("SELECT sql FROM sqlite_master WHERE name='follow_ups'").fetchone()[0]
+    raw.executescript(
+        "ALTER TABLE follow_ups RENAME TO fx;"
+        + sql.replace(",'deferred'", "") + ";"
+        "INSERT INTO follow_ups SELECT * FROM fx; DROP TABLE fx;"
+        "UPDATE meta SET value='7' WHERE key='schema_version';")
+    raw.close()
+    c = connect(path)
+    assert "'deferred'" in c.execute("SELECT sql FROM sqlite_master WHERE name='follow_ups'").fetchone()[0]
+    names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE tbl_name='follow_ups' AND type='index'")}
+    assert {"follow_ups_state", "follow_ups_task"} <= names
+    assert store.board(c)["loose_ends_total"] == 2
+    c.close()

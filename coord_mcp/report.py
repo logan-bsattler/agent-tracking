@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -599,6 +600,11 @@ details.client summary .count { margin-left:8px; }
 .item:last-child { border-bottom:0; }
 .client { font-weight:600; }
 .item .note { grid-column:2 / 4; color:var(--ink2); font-size:13px; }
+.item.bare { grid-template-columns:1fr auto; } .item.bare .note { grid-column:1 / 3; }
+h3.type { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink2); margin:14px 0 2px; }
+h3.type .count { color:var(--muted); font-weight:400; margin-left:6px; }
+.next .head { font-size:16px; } .next .head .item { border-bottom:2px solid var(--s1); }
+.next .behind { color:var(--ink2); }
 .item .age { color:var(--muted); font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
 .item code { color:var(--muted); font-size:12px; }
 .clear { color:var(--good); font-weight:600; }
@@ -620,7 +626,7 @@ def _age(ts: int, t: int) -> str:
     return f"{m}m ago" if m < 60 else f"{m // 60}h ago" if m < 48 * 60 else f"{m // 1440}d ago"
 
 
-def _items(rows: list[dict[str, Any]], t: int, empty: str) -> str:
+def _items(rows: list[dict[str, Any]], t: int, empty: str, client: bool = True) -> str:
     if not rows:
         return f'<p class="empty">{esc(empty)}</p>'
     out = []
@@ -629,21 +635,51 @@ def _items(rows: list[dict[str, Any]], t: int, empty: str) -> str:
         title = (f'<a class="drill" href="/board/task/{esc(d["id"])}">{esc(d["title"])}</a>' if d["id"]
                  else esc(d["title"]))
         note = f'<div class="note">{esc(d["note"][:220])}</div>' if d.get("note") else ""
-        out.append(f'<div class="item"><div class="client">{esc(d["client"])}</div>'
+        who = f'<div class="client">{esc(d["client"])}</div>' if client else ""
+        out.append(f'<div class="item{"" if client else " bare"}">{who}'
                    f'<div>{title}{tid}</div><div class="age">{_age(d["since"], t)}</div>{note}</div>')
     return "".join(out)
 
 
-def _by_client(rows: list[dict[str, Any]], t: int) -> str:
+def _by_client(rows: list[dict[str, Any]], t: int, scope: str = "") -> str:
     """One collapsible line per client, so a busy Needs-you reads as a short
-    list of names with counts and opens only where you drill in."""
+    list of names with counts and opens only where you drill in. The client is
+    the group heading, so the rows inside drop their client column."""
     groups: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
         groups.setdefault(r.get("client") or "—", []).append(r)
     return "".join(
-        f'<details class="client" data-client="{esc(c)}"><summary>{esc(c)}<span class="count">{len(g)}</span></summary>'
-        f'{_items(g, t, "")}</details>'
+        f'<details class="client" data-client="{esc(scope + c)}"><summary>{esc(c)}<span class="count">{len(g)}</span></summary>'
+        f'{_items(g, t, "", client=False)}</details>'
         for c, g in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])))
+
+
+# Needs-you items sorted by what Ben has to do, so a sitting can take one kind
+# at a time. A keyword guess on the item's text; failed tasks are always Fix.
+NEED_TYPES = ("Fix failed", "Do in DEVL / on a server", "Review & send", "Decide")
+STALE_DAYS = 7
+
+
+def need_type(d: dict[str, Any]) -> str:
+    if d.get("failed"):
+        return "Fix failed"
+    w = d["title"].lower()
+    if re.search(r"\b(devl|compile|run t\d+|test plan|winscp|kiro)\b", w):
+        return "Do in DEVL / on a server"
+    if re.search(r"\b(review|send|forward|route)\b", w):
+        return "Review & send"
+    return "Decide"
+
+
+def _next_up(rows: list[dict[str, Any]], t: int) -> str:
+    """The one thing to do first, and the three behind it: failures gate
+    dispatch, so they lead; after that, oldest first."""
+    if not rows:
+        return ""
+    order = sorted(rows, key=lambda d: (not d.get("failed"), d["since"]))
+    head, behind = order[0], order[1:4]
+    return (f'<div class="card grp next"><h2>Next up</h2><div class="head">{_items([head], t, "")}</div>'
+            + (f'<div class="behind">{_items(behind, t, "")}</div>' if behind else "") + "</div>")
 
 
 # Every card on the board pages folds on a click of its heading. The board
@@ -656,33 +692,53 @@ COLLAPSE_CSS = """
 .card.collapsed > :not(h2) { display: none; }
 """
 COLLAPSE_JS = """<script>
-try { const k = "coord-collapsed", c = new Set(JSON.parse(localStorage.getItem(k) || "[]"));
+try { const k = "coord-collapsed", x = "coord-expanded",
+    c = new Set(JSON.parse(localStorage.getItem(k) || "[]")), e = new Set(JSON.parse(localStorage.getItem(x) || "[]"));
   document.querySelectorAll(".card > h2").forEach(h => {
-    const card = h.parentElement, label = h.cloneNode(true);
+    const card = h.parentElement, label = h.cloneNode(true), shut = card.dataset.fold === "closed";
     label.querySelectorAll(".count").forEach(s => s.remove());
     const key = location.pathname + "|" + label.textContent.trim();
-    if (c.has(key)) card.classList.add("collapsed");
+    if (shut ? !e.has(key) : c.has(key)) card.classList.add("collapsed");
     h.addEventListener("click", () => {
-      card.classList.toggle("collapsed") ? c.add(key) : c.delete(key);
-      try { localStorage.setItem(k, JSON.stringify([...c])); } catch (e) {} }); }); } catch (e) {}
+      const folded = card.classList.toggle("collapsed");
+      if (shut) { folded ? e.delete(key) : e.add(key); } else { folded ? c.add(key) : c.delete(key); }
+      try { localStorage.setItem(k, JSON.stringify([...c])); localStorage.setItem(x, JSON.stringify([...e])); }
+      catch (err) {} }); }); } catch (err) {}
 </script>"""
 
 
 def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
     """Operator view of the coord board: what needs you first, then the rest."""
     t = v["as_of"]
-    n = len(v["needs_you"])
-    needs = _by_client(v["needs_you"], t) if n else '<p class="clear">Nothing needs you.</p>'
+    fresh = [d for d in v["needs_you"] if t - d["since"] <= STALE_DAYS * 86400]
+    stale = [d for d in v["needs_you"] if t - d["since"] > STALE_DAYS * 86400]
+    n = len(fresh)
+    typed: dict[str, list[dict[str, Any]]] = {}
+    for d in fresh:
+        typed.setdefault(need_type(d), []).append(d)
+    needs = "".join(
+        f'<h3 class="type">{esc(k)}<span class="count">{len(typed[k])}</span></h3>{_by_client(typed[k], t, k + "|")}'
+        for k in NEED_TYPES if k in typed)
+    if not v["needs_you"]:
+        needs = '<p class="clear">Nothing needs you.</p>'
+    elif not fresh:
+        needs = f'<p class="empty">Nothing from the last {STALE_DAYS} days; the rest is under Stale.</p>'
     meta_refresh = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
-    def grp(title: str, rows: list, empty: str, cls: str = "") -> str:
-        return (f'<div class="card grp {cls}"><h2>{esc(title)}<span class="count">{len(rows)}</span></h2>'
+    def grp(title: str, rows: list, empty: str, cls: str = "", shut: bool = False) -> str:
+        fold = ' data-fold="closed"' if shut else ""
+        return (f'<div class="card grp {cls}"{fold}><h2>{esc(title)}<span class="count">{len(rows)}</span></h2>'
                 f"{_items(rows, t, empty)}</div>")
+    def by_client_grp(title: str, rows: list, empty: str) -> str:
+        body = _by_client(rows, t, title + "|") if rows else f'<p class="empty">{esc(empty)}</p>'
+        return (f'<div class="card grp" data-fold="closed"><h2>{esc(title)}<span class="count">{len(rows)}</span></h2>'
+                f"{body}</div>")
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{'(' + str(n) + ') ' if n else ''}Coord board</title>
 <style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}</style></head><body><main>
 <nav><a href="/">Usage</a> · <b>Board</b> · <a href="/hours">Hours</a></nav>
 <h1>Coord board</h1>
 <p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
+{_next_up(fresh, t)}
 <div class="card grp {'alert' if n else ''}"><h2>Needs you<span class="count">{n}</span></h2>{needs}</div>
 <script>/* the page auto-refreshes, so keep drilled-in clients open across reloads */
 try {{ const k = "coord-open", o = new Set(JSON.parse(localStorage.getItem(k) || "[]"));
@@ -691,11 +747,14 @@ try {{ const k = "coord-open", o = new Set(JSON.parse(localStorage.getItem(k) ||
     d.addEventListener("toggle", () => {{ d.open ? o.add(d.dataset.client) : o.delete(d.dataset.client);
       try {{ localStorage.setItem(k, JSON.stringify([...o])); }} catch (e) {{}} }}); }}); }} catch (e) {{}}
 </script>
-{grp("Master owes", v["master_owes"], "Nothing: no parked tasks, no open intents.")}
-{grp("Loose ends", v["loose_ends"], "No follow-ups waiting: every next step is a task or a decision.")}
+{grp("Master owes", v["master_owes"], "Nothing: no parked tasks, no open intents, no follow-ups.")}
+{grp("Others owe", v["loose_ends"], "No follow-ups waiting on clients or colleagues.")}
 {grp("Running", v["running"], "Nothing picked up and in progress.")}
 {grp("Not picked up", v["waiting"], "Every open task has been picked up.")}
 {grp(f"Done, last {v['recent_h']}h", v["recent"], "Nothing finished recently.")}
+{by_client_grp(f"Stale, over {STALE_DAYS} days", stale, "Nothing of yours is older than a week.")}
+{by_client_grp("Deferred", v.get("deferred", []), "Nothing deferred.")}
+{grp("Acknowledged failures", v.get("acknowledged", []), "No failures on record.", shut=True)}
 {COLLAPSE_JS}
 </main></body></html>"""
 

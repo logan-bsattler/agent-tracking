@@ -14,7 +14,7 @@ from pathlib import Path
 # Bump this whenever DDL or _migrate changes. connect() skips both entirely
 # when the file already reports this version, so a new table or column that
 # ships without a bump will not be created.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 def default_db_path() -> Path:
     """COORD_DB if set, else ~/.coord/coord.db -- read on every call, not at import.
@@ -134,14 +134,16 @@ CREATE TABLE IF NOT EXISTS meeting_rules (
 
 -- Next steps a finished task named in its result. Each is owed a resolution:
 -- 'tasked' (resolved_by = the child task) or 'dropped' (resolved_by = the
--- decision saying why). Open rows are the board's loose ends.
+-- decision saying why). Open rows are the board's loose ends. 'deferred'
+-- (resolved_by = the decision naming its trigger) is still owed but parked off
+-- the board until it is reopened or resolved.
 CREATE TABLE IF NOT EXISTS follow_ups (
   id          TEXT PRIMARY KEY,
   task_id     TEXT NOT NULL REFERENCES tasks(id),
   idx         INTEGER NOT NULL,
   who         TEXT NOT NULL,
   what        TEXT NOT NULL,
-  state       TEXT NOT NULL CHECK (state IN ('open','tasked','dropped')),
+  state       TEXT NOT NULL CHECK (state IN ('open','tasked','dropped','deferred')),
   resolved_by TEXT,
   created_at  INTEGER NOT NULL,
   resolved_at INTEGER
@@ -233,6 +235,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN picked_up_at INTEGER")
     if "pipeline_task_id" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN pipeline_task_id TEXT")
+    # v8 added 'deferred' to follow_ups.state. SQLite cannot alter a CHECK, so
+    # rebuild the table from the current DDL and copy the rows across.
+    fu_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='follow_ups'").fetchone()
+    if fu_sql and "'deferred'" not in fu_sql[0]:
+        ddl = DDL[DDL.index("CREATE TABLE IF NOT EXISTS follow_ups"):]
+        ddl = ddl[:ddl.index("CREATE TABLE IF NOT EXISTS intents")]
+        table, *indexes = [x.strip() for x in ddl.split(";") if x.strip()]
+        # Build beside the old table and rename into place: renaming the old
+        # one away would carry its indexes with it and leave the new one bare.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(table.replace("IF NOT EXISTS follow_ups", "follow_ups_v8"))
+            conn.execute("INSERT INTO follow_ups_v8 SELECT * FROM follow_ups")
+            conn.execute("DROP TABLE follow_ups")
+            conn.execute("ALTER TABLE follow_ups_v8 RENAME TO follow_ups")
+            for ix in indexes:
+                conn.execute(ix)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     cols = {r[1] for r in conn.execute("PRAGMA table_info(quota_snapshots)")}
     if "source" not in cols:
         conn.execute("ALTER TABLE quota_snapshots ADD COLUMN source TEXT NOT NULL DEFAULT 'statusline'")

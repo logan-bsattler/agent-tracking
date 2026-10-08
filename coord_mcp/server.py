@@ -228,6 +228,8 @@ class ResolveFollowUpInput(Strict):
                                 max_length=40)
     decision_id: str | None = Field(default=None, description="Decision recording why it is not pursued",
                                     max_length=40)
+    defer: bool = Field(default=False, description="Park it as deferred behind decision_id instead of dropping it")
+    reopen: bool = Field(default=False, description="Put a deferred follow-up back on the board; no other field")
 
 
 @tool("coord_resolve_follow_up", title="Resolve follow-up")
@@ -236,10 +238,15 @@ async def coord_resolve_follow_up(params: ResolveFollowUpInput) -> str:
     a child task; create that first) or decision_id (you recorded why it is not
     pursued; record that first).
 
+    defer=true with decision_id parks it as deferred: still owed, but off the
+    board's loose_ends (counted in deferred_total) until reopen=true puts it
+    back, or a task_id/decision_id resolves it.
+
     Returns JSON: {ok, follow_up_id, state, resolved_by, loose_ends_left}
     """
     try:
-        return _ok(store.resolve_follow_up(db(), params.follow_up_id, params.task_id, params.decision_id))
+        return _ok(store.resolve_follow_up(db(), params.follow_up_id, params.task_id, params.decision_id,
+                                           defer=params.defer, reopen=params.reopen))
     except Exception as e:
         return _err(e)
 
@@ -283,10 +290,11 @@ async def coord_board(params: Empty) -> str:
 
     Returns JSON: {tasks_by_kind, live: [{id, kind, title, state, assigned_to}],
     loose_ends: [{id, task_id, client, who, what}], loose_ends_total,
-    open_intents, as_of}
+    deferred_total, open_intents, as_of}
 
     loose_ends is oldest first and capped; loose_ends_total counts every open
-    one. If the total is larger than the list, some are not shown.
+    one. If the total is larger than the list, some are not shown. Deferred
+    follow-ups are not loose ends; deferred_total counts them.
     """
     try:
         return _ok(store.board(db()))
