@@ -32,7 +32,7 @@ IDLE_GAP = 300
 # Client keys, as the board's assigned_to spells them. Distinct assignees on
 # the board are added at run time, so a newly wired client counts without an
 # edit here. Folders that are not clients (Posey, the master) never match.
-CLIENTS = ("Moog", "Royal", "Cascade", "LNK", "TS Tech", "PBE", "MAG", "Furlani", "Yamamoto")
+CLIENTS = ("Moog", "Royal", "Cascade", "LNK", "TS Tech", "PBE", "MAG", "Furlani", "Yamamoto", "GHSP")
 
 PUSH_FLAG = "hours_push_enabled"
 UNASSIGNED = "unassigned"
