@@ -277,6 +277,49 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
             "open_intents": open_intents, "as_of": now()}
 
 
+def list_follow_ups(
+    conn: sqlite3.Connection,
+    task_id: str | None = None,
+    client: str | None = None,
+    who: str | None = None,
+) -> dict[str, Any]:
+    """Open loose ends narrowed by source task, client and/or owner, newest first.
+
+    created_at is whole seconds, so tasks finished in the same second are
+    ordered by insertion; within a task, follow-ups keep their result order.
+
+    board() caps its list oldest first, so once the backlog passes the cap the
+    newest follow-ups have no visible id to resolve by. This is the way to them.
+    """
+    where, args = ["f.state='open'"], []
+    if task_id:
+        where.append("f.task_id=?")
+        args.append(task_id)
+    if client:
+        where.append("lower(t.assigned_to)=lower(?)")
+        args.append(client)
+    if who:
+        where.append("lower(trim(f.who))=lower(trim(?))")
+        args.append(who)
+    sql_where = " AND ".join(where)
+    rows = [dict(r) for r in conn.execute(
+        f"""SELECT f.id, f.task_id, t.assigned_to client, f.who, f.what
+            FROM follow_ups f JOIN tasks t ON t.id = f.task_id
+            WHERE {sql_where}
+            ORDER BY f.created_at DESC,
+                     (SELECT MAX(g.rowid) FROM follow_ups g WHERE g.task_id = f.task_id) DESC,
+                     f.idx
+            LIMIT ?""",
+        (*args, LOOSE_ENDS_CAP))]
+    total = conn.execute(
+        f"SELECT COUNT(*) n FROM follow_ups f JOIN tasks t ON t.id = f.task_id WHERE {sql_where}", args
+    ).fetchone()["n"]
+    out: dict[str, Any] = {"follow_ups": rows, "total": total}
+    if task_id and not rows and conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
+        out["note"] = f"unknown task '{task_id}'"
+    return out
+
+
 # -------------------------------------------------------------- decisions
 
 

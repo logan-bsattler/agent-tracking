@@ -279,9 +279,9 @@ def test_desktop_role_has_exactly_two_tools():
 
 def test_team_role_has_all_tools():
     names = _surface("team")
-    assert len(names) == 18
+    assert len(names) == 19
     assert {"coord_create_task", "coord_complete_task", "coord_get_decisions",
-            "coord_park_task", "coord_resolve_follow_up"} <= set(names)
+            "coord_park_task", "coord_resolve_follow_up", "coord_list_follow_ups"} <= set(names)
 
 
 # ------------------------------------------------ referential integrity
@@ -398,3 +398,56 @@ def test_complete_writes_one_row_per_follow_up(conn):
 def test_result_without_follow_ups_is_unchanged(conn):
     t = store.create_task(conn, "code_change", "x", {"f": 1})["task_id"]
     assert "follow_ups" not in store.complete_task(conn, t, GOOD_CODE_CHANGE)
+
+
+def _finish_with(conn, client, fus):
+    t = store.create_task(conn, "code_change", "x", {"f": 1}, assigned_to=client)["task_id"]
+    store.complete_task(conn, t, {**GOOD_CODE_CHANGE, "follow_ups": fus})
+    return t
+
+
+def test_list_follow_ups_reaches_past_the_board_cap(conn, monkeypatch):
+    """The board shows the oldest loose ends; a new task's follow-ups fell off
+    the end with no id to resolve them by (ca4ed738f66b, 2026-10-14)."""
+    monkeypatch.setattr(store, "LOOSE_ENDS_CAP", 2)
+    old = _finish_with(conn, "MAG", [{"who": "MAG", "what": "old one"}, {"who": "Ben", "what": "old two"}])
+    conn.execute("UPDATE follow_ups SET created_at=1 WHERE task_id=?", (old,))
+    new = _finish_with(conn, "Moog", [{"who": "Moog", "what": "new one"}, {"who": "Ben", "what": "new two"}])
+    b = store.board(conn)
+    assert b["loose_ends_total"] == 4 and new not in {x["task_id"] for x in b["loose_ends"]}
+
+    out = store.list_follow_ups(conn, task_id=new)
+    assert out["total"] == 2
+    assert [(x["task_id"], x["client"], x["who"], x["what"]) for x in out["follow_ups"]] == [
+        (new, "Moog", "Moog", "new one"), (new, "Moog", "Ben", "new two")]
+    assert set(out["follow_ups"][0]) == {"id", "task_id", "client", "who", "what"}
+    # and the id it hands back is one coord_resolve_follow_up accepts
+    d = store.record_decision(conn, "not pursued", "test")["decision_id"]
+    store.resolve_follow_up(conn, out["follow_ups"][0]["id"], None, d)
+    assert store.list_follow_ups(conn, task_id=new)["total"] == 1
+
+
+def test_list_follow_ups_filters_and_order(conn):
+    old = _finish_with(conn, "MAG", [{"who": "Ben", "what": "a"}])
+    conn.execute("UPDATE follow_ups SET created_at=1 WHERE task_id=?", (old,))
+    new = _finish_with(conn, "LNK", [{"who": "LNK", "what": "b"}, {"who": "ben ", "what": "c"}])
+    same_second = _finish_with(conn, "LNK", [{"who": "LNK", "what": "d"}])
+    conn.execute("UPDATE follow_ups SET created_at=(SELECT created_at FROM follow_ups WHERE task_id=?)"
+                 " WHERE task_id=?", (new, same_second))
+
+    assert [x["what"] for x in store.list_follow_ups(conn)["follow_ups"]] == ["d", "b", "c", "a"]
+    assert [x["what"] for x in store.list_follow_ups(conn, client="lnk")["follow_ups"]] == ["d", "b", "c"]
+    assert [x["what"] for x in store.list_follow_ups(conn, who="Ben")["follow_ups"]] == ["c", "a"]
+    assert [x["what"] for x in store.list_follow_ups(conn, client="LNK", who="Ben")["follow_ups"]] == ["c"]
+    assert store.list_follow_ups(conn, task_id="nope") == {"follow_ups": [], "total": 0,
+                                                           "note": "unknown task 'nope'"}
+
+
+def test_list_follow_ups_leaves_board_unchanged(conn):
+    _finish_with(conn, "MAG", [{"who": "MAG", "what": "a"}])
+    before = store.board(conn)
+    store.list_follow_ups(conn, client="MAG")
+    after = store.board(conn)
+    before.pop("as_of"), after.pop("as_of")
+    assert before == after and set(before) == {"tasks_by_kind", "live", "loose_ends", "loose_ends_total",
+                                               "deferred_total", "open_intents"}

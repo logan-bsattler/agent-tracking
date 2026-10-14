@@ -293,11 +293,37 @@ async def coord_board(params: Empty) -> str:
     deferred_total, open_intents, as_of}
 
     loose_ends is oldest first and capped; loose_ends_total counts every open
-    one. If the total is larger than the list, some are not shown. Deferred
+    one. If the total is larger than the list, some are not shown: use
+    coord_list_follow_ups (by task_id, client or who) to reach them. Deferred
     follow-ups are not loose ends; deferred_total counts them.
     """
     try:
         return _ok(store.board(db()))
+    except Exception as e:
+        return _err(e)
+
+
+class ListFollowUpsInput(Strict):
+    task_id: str | None = Field(default=None, description="Only follow-ups from this finished task",
+                                max_length=40)
+    client: str | None = Field(default=None, description="Only follow-ups from this client's tasks",
+                               max_length=40)
+    who: str | None = Field(default=None, description="Only follow-ups owed by this party (e.g. Ben)",
+                            max_length=40)
+
+
+@tool("coord_list_follow_ups", read_only=True, title="List follow-ups")
+async def coord_list_follow_ups(params: ListFollowUpsInput) -> str:
+    """Open loose ends, newest first, narrowed by any of task_id, client, who.
+
+    Use when coord_board's loose_ends_total exceeds its list: the board shows
+    the oldest ones, so a just-finished task's follow-ups may be cut off. The
+    ids here go to coord_resolve_follow_up.
+
+    Returns JSON: {follow_ups: [{id, task_id, client, who, what}], total}
+    """
+    try:
+        return _ok(store.list_follow_ups(db(), params.task_id, params.client, params.who))
     except Exception as e:
         return _err(e)
 

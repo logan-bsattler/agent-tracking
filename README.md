@@ -75,6 +75,7 @@ email -> coord_propose_intent -> intents (open, untrusted)
 | Tool | Role | Purpose |
 | --- | --- | --- |
 | `coord_board` | team | counts by kind and state, open/failed task lines, open-intent count |
+| `coord_list_follow_ups` | team | open loose ends newest first, by task, client or owner |
 | `coord_create_task` | team | put a task on the board, get the contract echoed back |
 | `coord_get_task` | team | teammate reads spec and expected result shape |
 | `coord_complete_task` | team | close with a validated result, or a typed failure |

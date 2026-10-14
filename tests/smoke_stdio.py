@@ -51,7 +51,7 @@ async def main() -> int:
     async with stdio_client(params("team", db)) as (tr, tw), ClientSession(tr, tw) as team:
         await team.initialize()
         tools = {t.name for t in (await team.list_tools()).tools}
-        check("team exposes 18 tools", len(tools) == 18, str(sorted(tools)))
+        check("team exposes 19 tools", len(tools) == 19, str(sorted(tools)))
 
         r = await team.call_tool("coord_list_intents", {"params": {}})
         intents = json.loads(text(r))
@@ -100,6 +100,10 @@ async def main() -> int:
         check("board shows done count and no live work",
               b["tasks_by_kind"] == {"data_pull": {"done": 1}} and b["live"] == [] and b["open_intents"] == 0, text(r))
         check("board under 300 bytes", len(text(r)) < 300, str(len(text(r))))
+
+        r = await team.call_tool("coord_list_follow_ups", {"params": {"client": "nobody"}})
+        check("follow-up list answers with an empty, counted list",
+              json.loads(text(r)) == {"follow_ups": [], "total": 0}, text(r))
 
     print()
     print("ALL PASS" if not failures else f"{len(failures)} FAILED:\n  " + "\n  ".join(failures))
