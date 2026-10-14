@@ -364,3 +364,15 @@ def test_deliverables_page_links_files_and_flags_missing(conn, tmp_path):
     assert "/deliverables/file?task=" in html and "x.csv" in html
     assert "missing" in html and "&lt;b&gt;esc" in html and "Ben: Review it &amp; send" in html
     assert "No deliverables" in report.deliverables_page(store.deliverables(conn, root=tmp_path, client="MAG"))
+
+
+def test_deliverables_page_is_searchable(conn, tmp_path):
+    (tmp_path / "LNK").mkdir()
+    (tmp_path / "LNK" / "Payments.csv").write_text("a", encoding="utf-8")
+    tid = _pull(conn, "LNK", "Payments.csv", title="AMEX pull")
+    v = store.deliverables(conn, root=tmp_path)
+    v["q"] = 'amex "x'
+    html = report.deliverables_page(v)
+    assert 'id="dl-q"' in html and 'value="amex &quot;x"' in html
+    row = next(l for l in html.split("<tr") if "Payments.csv" in l)
+    assert "payments.csv" in row and "amex pull" in row and tid in row and "review it &amp; send" in row

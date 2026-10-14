@@ -855,7 +855,9 @@ def deliverables_page(v: dict[str, Any]) -> str:
     form = (f'<form class="card" method="get" action="/deliverables">'
             f'<label>Last <input type="number" name="days" min="1" max="365" value="{v["days"]}" size="4"> days</label> '
             f'<label>client <input name="client" value="{esc(v["client"] or "")}" placeholder="all" size="10"></label> '
-            f'<button>Show</button></form>')
+            f'<button>Show</button> · <label>search <input type="search" id="dl-q" name="q" '
+            f'value="{esc(v.get("q") or "")}" placeholder="file, path, task, owed…" size="28" autocomplete="off"></label> '
+            f'<span class="muted" id="dl-n"></span></form>')
     sub = ('<p class="sub">Read from results on the board: data-pull outputs, changed files and '
            'investigation pointers that a person would open. Newest first; a file two tasks touched '
            'shows under the newer one. <i>missing</i> means the result named it but it is not on disk.</p>')
@@ -872,15 +874,43 @@ def deliverables_page(v: dict[str, Any]) -> str:
             name = (f'<a class="drill" href="/deliverables/file?{esc(urlencode({"task": d["task_id"], "path": d["path"]}))}">'
                     f'{esc(d["name"])}</a>' if d["exists"] else f'{esc(d["name"])} <b class="st-failed">missing</b>')
             owed = ("".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"]) if d["ben"] else "")
-            trs.append(f'<tr><td>{name}<div class="muted">{esc(d["path"])}</div>{owed}</td>'
+            hay = " ".join([d["name"], d["path"], d["title"], d["task_id"], c, *d["ben"]]).lower()
+            trs.append(f'<tr class="dl{" owes" if d["ben"] else ""}" data-s="{esc(hay)}"><td>{name}<div class="muted">{esc(d["path"])}</div>{owed}</td>'
                        f'<td><a class="drill" href="/board/task/{esc(d["task_id"])}">{esc(d["title"])}</a></td>'
                        f'<td class="n">{_size(d["size"])}</td><td class="n">{_age(d["completed_at"], t)}</td></tr>')
         owe = sum(1 for d in g if d["ben"])
-        badge = f' <span class="count">{owe} owed</span>' if owe else ""
-        cards.append(f'<div class="card"><h2>{esc(c)}<span class="count">{len(g)}</span>{badge}</h2><div class="wrap"><table>'
+        badge = f' <span class="count owed">{owe} owed</span>' if owe else ""
+        cards.append(f'<div class="card dlc"><h2>{esc(c)}<span class="count">{len(g)}</span>{badge}</h2><div class="wrap"><table>'
                      f'<tr><th>File</th><th>Task</th><th class="n">Size</th><th class="n">Done</th></tr>'
                      f'{"".join(trs)}</table></div></div>')
-    return _shell(f"Deliverables ({len(files)})", f'{nav}<h1>Deliverables</h1>{sub}{form}{"".join(cards)}')
+    none = '<p class="empty" id="dl-none" hidden>Nothing matches.</p>'
+    return _shell(f"Deliverables ({len(files)})",
+                  f'{nav}<h1>Deliverables</h1>{sub}{form}{none}{"".join(cards)}{DELIVERABLES_JS}')
+
+
+# Live filter: every word typed must appear in the row's file, path, task,
+# client or what Ben owes. Kept in ?q= so a filtered view can be bookmarked.
+DELIVERABLES_JS = """<script>
+(() => { const q = document.getElementById("dl-q"), n = document.getElementById("dl-n"),
+    none = document.getElementById("dl-none"), rows = [...document.querySelectorAll("tr.dl")];
+  if (!q) return;
+  q.form.addEventListener("submit", () => { if (!q.value.trim()) q.disabled = true; });
+  const run = () => {
+    const words = q.value.toLowerCase().split(/\\s+/).filter(Boolean);
+    let shown = 0;
+    rows.forEach(r => { const hit = words.every(w => r.dataset.s.includes(w)); r.hidden = !hit; shown += hit; });
+    document.querySelectorAll(".card.dlc").forEach(c => {
+      const k = c.querySelectorAll("tr.dl:not([hidden])").length;
+      c.hidden = !k; c.querySelector("h2 .count").textContent = k;
+      const o = c.querySelector("h2 .owed"), m = c.querySelectorAll("tr.owes:not([hidden])").length;
+      if (o) { o.textContent = m + " owed"; o.hidden = !m; } });
+    n.textContent = words.length ? shown + " of " + rows.length : "";
+    none.hidden = !(words.length && !shown);
+    try { const u = new URL(location.href);
+      words.length ? u.searchParams.set("q", q.value.trim()) : u.searchParams.delete("q");
+      history.replaceState(null, "", u); } catch (e) {} };
+  q.addEventListener("input", run); run(); })();
+</script>"""
 
 
 # What the browser is told a deliverable is. Anything else downloads.
@@ -1074,8 +1104,9 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             if path == "/deliverables":
                 days = int((self._query.get("days") or ["14"])[0] or 14)
                 client = (self._query.get("client") or [""])[0].strip() or None
-                return deliverables_page(store.deliverables(conn, days=max(1, min(days, 365)),
-                                                            client=client)).encode("utf-8")
+                v = store.deliverables(conn, days=max(1, min(days, 365)), client=client)
+                v["q"] = (self._query.get("q") or [""])[0].strip()
+                return deliverables_page(v).encode("utf-8")
             if path == "/deliverables/file":
                 f = store.deliverable_path(conn, (self._query.get("task") or [""])[0],
                                            (self._query.get("path") or [""])[0])
