@@ -331,3 +331,36 @@ def test_v7_database_migrates_follow_ups_in_place(tmp_path):
     assert {"follow_ups_state", "follow_ups_task"} <= names
     assert store.board(c)["loose_ends_total"] == 2
     c.close()
+
+
+# -------------------------------------------------------------- deliverables
+
+def _pull(conn, client, out, title="pull"):
+    tid = store.create_task(conn, "data_pull", title, {"q": "x"}, assigned_to=client)["task_id"]
+    store.complete_task(conn, tid, {"done": True, "output_path": out, "rows": 1,
+                                    "follow_ups": [{"who": "Ben", "what": "Review it & send"}]})
+    return tid
+
+
+def test_deliverables_resolve_against_the_client_folder(conn, tmp_path):
+    (tmp_path / "MAG" / "work").mkdir(parents=True)
+    (tmp_path / "MAG" / "work" / "a.md").write_text("# hi", encoding="utf-8")
+    tid = _pull(conn, "MAG", "work/a.md (report, per-group tables)")
+    _pull(conn, "MAG", "harness.p")  # source, not a deliverable
+    v = store.deliverables(conn, root=tmp_path)
+    assert [d["name"] for d in v["files"]] == ["a.md"]
+    d = v["files"][0]
+    assert d["exists"] and d["task_id"] == tid and d["ben"] == ["Review it & send"]
+    assert store.deliverable_path(conn, tid, d["path"], root=tmp_path) == tmp_path / "MAG" / "work" / "a.md"
+    assert store.deliverable_path(conn, tid, str(tmp_path / "secret.md"), root=tmp_path) is None
+
+
+def test_deliverables_page_links_files_and_flags_missing(conn, tmp_path):
+    (tmp_path / "LNK").mkdir()
+    (tmp_path / "LNK" / "x.csv").write_text("a,b", encoding="utf-8")
+    _pull(conn, "LNK", "x.csv")
+    _pull(conn, "LNK", "gone.xlsx", title="<b>esc</b>")
+    html = report.deliverables_page(store.deliverables(conn, root=tmp_path))
+    assert "/deliverables/file?task=" in html and "x.csv" in html
+    assert "missing" in html and "&lt;b&gt;esc" in html and "Ben: Review it &amp; send" in html
+    assert "No deliverables" in report.deliverables_page(store.deliverables(conn, root=tmp_path, client="MAG"))

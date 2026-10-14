@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
+from pathlib import Path
 from typing import Any
 
 from . import contracts
@@ -498,6 +500,103 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
     return {"needs_you": needs_you, "master_owes": master_owes, "loose_ends": loose_ends,
             "deferred": deferred, "acknowledged": acknowledged,
             "running": running, "waiting": waiting, "recent": recent, "recent_h": recent_h, "as_of": t}
+
+
+# ------------------------------------------------------------ deliverables
+
+# Files a person opens, reviews or sends. Source code, harness output and .bak
+# copies are the agent's working set, not deliverables.
+DELIVERABLE_EXT = {".md", ".docx", ".xlsx", ".xlsm", ".csv", ".pdf", ".html", ".htm", ".pptx", ".zip", ".txt"}
+DOCS_ROOT = Path.home() / "OneDrive - Logan Consulting" / "Documents"
+
+
+def _clean_path(raw: str) -> str:
+    """'work/x.md (report, per-group tables)' -> 'work/x.md'. Agents annotate
+    pointers in prose after the path; the path is everything before that."""
+    s = re.split(r"\s+(?:\(|—|--|l\.\d)", raw.strip(), maxsplit=1)[0]
+    return s.strip().strip("`'\"").rstrip(".,;:")
+
+
+def _split_paths(raw: str) -> list[str]:
+    """One pointer can name several files: 'a.csv / .md', 'dir/a.md, b.csv'.
+    A bare extension reuses the previous stem; a bare name its directory."""
+    out: list[str] = []
+    for tok in re.split(r"\s*,\s+|\s+[\/|]\s+", _clean_path(raw)):
+        tok = tok.strip()
+        if not tok or "*" in tok:
+            continue
+        if out and tok.startswith("."):
+            tok = str(Path(out[-1]).with_suffix(tok))
+        elif out and len(Path(tok).parts) == 1 and len(Path(out[-1]).parts) > 1:
+            tok = str(Path(out[-1]).parent / tok)
+        out.append(tok)
+    return out
+
+
+def _resolve(path: str, client: str | None, root: Path) -> Path:
+    """Absolute paths stand; relative ones are tried against the client's
+    folder, the documents root and home, since agents write all three."""
+    p = Path(path)
+    if p.is_absolute():
+        return p
+    parts = p.parts
+    if client and len(parts) > 1 and parts[0].lower() == client.lower():
+        p = Path(*parts[1:])
+    tries = [root / (client or "") / p, root / Path(path), root.parent / Path(path), Path.home() / Path(path)]
+    return next((c for c in tries if c.is_file()), tries[0])
+
+
+def deliverables(conn: sqlite3.Connection, days: int = 14, root: Path | None = None,
+                 client: str | None = None) -> dict[str, Any]:
+    """Files finished tasks produced, newest first, for the operator to track.
+
+    Read from results already on the board (data_pull output_path, code_change
+    files_changed, investigation pointers), so nothing new has to be reported.
+    Each file carries the open follow-ups addressed to Ben on its task: the
+    deliverable and what he owes on it, side by side.
+    """
+    root = root or DOCS_ROOT
+    t = now()
+    sql = """SELECT id, kind, title, assigned_to, result, completed_at FROM tasks
+             WHERE state='done' AND completed_at >= ?"""
+    args: list[Any] = [t - days * 86400]
+    if client:
+        sql += " AND assigned_to = ?"
+        args.append(client)
+    rows = conn.execute(sql + " ORDER BY completed_at DESC", args).fetchall()
+    ben: dict[str, list[str]] = {}
+    for f in conn.execute("SELECT task_id, what FROM follow_ups WHERE state='open' AND lower(trim(who))='ben' ORDER BY idx"):
+        ben.setdefault(f["task_id"], []).append(f["what"])
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        res = json.loads(r["result"] or "{}")
+        raw = (([res["output_path"]] if res.get("output_path") else [])
+               + [f.get("path", "") for f in res.get("files_changed") or [] if isinstance(f, dict)]
+               + [x for x in res.get("pointers") or [] if isinstance(x, str)])
+        for path in [x for item in raw for x in _split_paths(item)]:
+            if Path(path).suffix.lower() not in DELIVERABLE_EXT:
+                continue
+            full = _resolve(path, r["assigned_to"], root)
+            key = str(full).lower()
+            if key in seen:  # an older task touched the same file: newest wins
+                continue
+            seen.add(key)
+            exists = full.is_file()
+            out.append({"task_id": r["id"], "title": r["title"], "kind": r["kind"],
+                        "client": r["assigned_to"] or "—", "name": full.name, "path": str(full),
+                        "exists": exists, "size": full.stat().st_size if exists else None,
+                        "completed_at": r["completed_at"], "ben": ben.get(r["id"], [])})
+    return {"files": out, "days": days, "client": client, "as_of": t}
+
+
+def deliverable_path(conn: sqlite3.Connection, task_id: str, path: str, root: Path | None = None) -> Path | None:
+    """The file behind a dashboard link, only if the board lists it. The
+    server never opens a path just because a URL named it."""
+    for d in deliverables(conn, days=3650, root=root)["files"]:
+        if d["task_id"] == task_id and d["path"] == path and d["exists"]:
+            return Path(d["path"])
+    return None
 
 
 def task_detail(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:

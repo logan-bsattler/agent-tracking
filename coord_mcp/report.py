@@ -571,7 +571,7 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude usage</title>
 <style>{CSS}</style></head><body><main>
-<nav><b>Usage</b> · <a href="/board">Board</a> · <a href="/hours">Hours</a></nav>
+<nav><b>Usage</b> · <a href="/board">Board</a> · <a href="/hours">Hours</a> · <a href="/deliverables">Deliverables</a></nav>
 <h1>Claude usage</h1>
 <p class="sub">{esc(period)} · generated {when(s['generated'])}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · spend is API-equivalent, the same figure as <code>/cost</code></p>
 {kpis(s)}
@@ -735,7 +735,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{'(' + str(n) + ') ' if n else ''}Coord board</title>
 <style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}</style></head><body><main>
-<nav><a href="/">Usage</a> · <b>Board</b> · <a href="/hours">Hours</a></nav>
+<nav><a href="/">Usage</a> · <b>Board</b> · <a href="/hours">Hours</a> · <a href="/deliverables">Deliverables</a></nav>
 <h1>Coord board</h1>
 <p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
 {_next_up(fresh, t)}
@@ -785,7 +785,8 @@ def _shell(title: str, body: str) -> str:
 
 def task_page(d: dict[str, Any] | None, task_id: str = "") -> str:
     """One task in full: what was asked, what came back, and how it got there."""
-    nav = '<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Task</b></nav>'
+    nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Task</b> · '
+           '<a href="/deliverables">Deliverables</a></nav>')
     if d is None:
         return _shell("Coord task", f'{nav}<h1>No such task</h1>'
                       f'<p class="sub">Nothing on the board has id <code>{esc(task_id)}</code>.</p>')
@@ -839,6 +840,55 @@ def task_page(d: dict[str, Any] | None, task_id: str = "") -> str:
     return _shell(f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', head + "".join(cards))
 
 
+def _size(n: int | None) -> str:
+    if n is None:
+        return "—"
+    return f"{n} B" if n < 1024 else f"{n / 1024:.0f} KB" if n < 1024 ** 2 else f"{n / 1024 ** 2:.1f} MB"
+
+
+def deliverables_page(v: dict[str, Any]) -> str:
+    """Files finished tasks produced, by client, each beside what Ben owes on it."""
+    from urllib.parse import urlencode
+    nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <a href="/hours">Hours</a> · '
+           '<b>Deliverables</b></nav>')
+    t, files = v["as_of"], v["files"]
+    form = (f'<form class="card" method="get" action="/deliverables">'
+            f'<label>Last <input type="number" name="days" min="1" max="365" value="{v["days"]}" size="4"> days</label> '
+            f'<label>client <input name="client" value="{esc(v["client"] or "")}" placeholder="all" size="10"></label> '
+            f'<button>Show</button></form>')
+    sub = ('<p class="sub">Read from results on the board: data-pull outputs, changed files and '
+           'investigation pointers that a person would open. Newest first; a file two tasks touched '
+           'shows under the newer one. <i>missing</i> means the result named it but it is not on disk.</p>')
+    if not files:
+        return _shell("Deliverables", f'{nav}<h1>Deliverables</h1>{sub}{form}'
+                      '<p class="empty">No deliverables in this range.</p>')
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for d in files:
+        groups.setdefault(d["client"], []).append(d)
+    cards = []
+    for c, g in sorted(groups.items(), key=lambda kv: -max(d["completed_at"] for d in kv[1])):
+        trs = []
+        for d in g:
+            name = (f'<a class="drill" href="/deliverables/file?{esc(urlencode({"task": d["task_id"], "path": d["path"]}))}">'
+                    f'{esc(d["name"])}</a>' if d["exists"] else f'{esc(d["name"])} <b class="st-failed">missing</b>')
+            owed = ("".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"]) if d["ben"] else "")
+            trs.append(f'<tr><td>{name}<div class="muted">{esc(d["path"])}</div>{owed}</td>'
+                       f'<td><a class="drill" href="/board/task/{esc(d["task_id"])}">{esc(d["title"])}</a></td>'
+                       f'<td class="n">{_size(d["size"])}</td><td class="n">{_age(d["completed_at"], t)}</td></tr>')
+        owe = sum(1 for d in g if d["ben"])
+        badge = f' <span class="count">{owe} owed</span>' if owe else ""
+        cards.append(f'<div class="card"><h2>{esc(c)}<span class="count">{len(g)}</span>{badge}</h2><div class="wrap"><table>'
+                     f'<tr><th>File</th><th>Task</th><th class="n">Size</th><th class="n">Done</th></tr>'
+                     f'{"".join(trs)}</table></div></div>')
+    return _shell(f"Deliverables ({len(files)})", f'{nav}<h1>Deliverables</h1>{sub}{form}{"".join(cards)}')
+
+
+# What the browser is told a deliverable is. Anything else downloads.
+INLINE_TYPES = {".md": "text/plain; charset=utf-8", ".txt": "text/plain; charset=utf-8",
+                ".csv": "text/plain; charset=utf-8", ".pdf": "application/pdf",
+                ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8"}
+
+
 def _h(minutes: float) -> str:
     q = hours.quarter_hours(minutes)
     return f"{q:.2f}" if q else '<span class="muted">·</span>'
@@ -865,7 +915,8 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
     """Day x client grid, then each client's tasks. A draft for the operator."""
     from datetime import date, timedelta
     from urllib.parse import urlencode
-    nav = '<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Hours</b></nav>'
+    nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Hours</b> · '
+           '<a href="/deliverables">Deliverables</a></nav>')
     qs = urlencode({k: v for k, v in (("start", start), ("end", end), ("client", client)) if v})
     # Every day in range, empty ones too, so a gap reads as a gap. Stops at
     # today: the rest of the billing period has nothing to show yet.
@@ -990,7 +1041,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             path, _, query = self.path.partition("?")
             path = path.rstrip("/")
             self._query = parse_qs(query)
-            self._type, self._disp = "text/html; charset=utf-8", None
+            self._type, self._disp, self._sandbox = "text/html; charset=utf-8", None, False
             conn = connect()
             try:
                 try:
@@ -1007,6 +1058,8 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             self.send_header("Content-Type", self._type)
             if self._disp:
                 self.send_header("Content-Disposition", f'attachment; filename="{self._disp}"')
+            if self._sandbox:
+                self.send_header("Content-Security-Policy", "sandbox")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -1018,6 +1071,23 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             if path.startswith("/board/task/"):
                 tid = path.rsplit("/", 1)[1]
                 return task_page(store.task_detail(conn, tid), tid).encode("utf-8")
+            if path == "/deliverables":
+                days = int((self._query.get("days") or ["14"])[0] or 14)
+                client = (self._query.get("client") or [""])[0].strip() or None
+                return deliverables_page(store.deliverables(conn, days=max(1, min(days, 365)),
+                                                            client=client)).encode("utf-8")
+            if path == "/deliverables/file":
+                f = store.deliverable_path(conn, (self._query.get("task") or [""])[0],
+                                           (self._query.get("path") or [""])[0])
+                if f is None:
+                    return None
+                ext = f.suffix.lower()
+                if ext in INLINE_TYPES:
+                    # An agent wrote this HTML; it must not script the dashboard's origin.
+                    self._type, self._sandbox = INLINE_TYPES[ext], ext in (".html", ".htm")
+                else:
+                    self._type, self._disp = "application/octet-stream", f.name
+                return f.read_bytes()
             if path in ("/hours", "/hours.csv"):
                 start, end, client = hours_range(self._query)
                 with ingest_lock:
