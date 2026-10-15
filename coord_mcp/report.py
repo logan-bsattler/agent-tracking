@@ -1102,9 +1102,10 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 tid = path.rsplit("/", 1)[1]
                 return task_page(store.task_detail(conn, tid), tid).encode("utf-8")
             if path == "/deliverables":
-                days = int((self._query.get("days") or ["14"])[0] or 14)
+                # Not `days`: assigning it here would shadow serve()'s and break "/".
+                window = int((self._query.get("days") or ["14"])[0] or 14)
                 client = (self._query.get("client") or [""])[0].strip() or None
-                v = store.deliverables(conn, days=max(1, min(days, 365)), client=client)
+                v = store.deliverables(conn, days=max(1, min(window, 365)), client=client)
                 v["q"] = (self._query.get("q") or [""])[0].strip()
                 return deliverables_page(v).encode("utf-8")
             if path == "/deliverables/file":

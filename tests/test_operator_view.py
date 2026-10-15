@@ -170,6 +170,35 @@ def test_server_answers_while_another_connection_hangs(tmp_path):
         idle.close()
 
 
+def test_every_page_answers_through_the_server(tmp_path, monkeypatch):
+    """Route bodies share serve()'s closure; a local that shadows `days` kills "/"."""
+    import functools
+    import socket
+    import threading
+    import time
+    import urllib.request
+
+    from coord_mcp import usage
+    from coord_mcp.db import connect as db_connect
+
+    monkeypatch.setattr(usage, "ingest", lambda conn: None)  # no real transcripts
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    make = functools.partial(db_connect, tmp_path / "srv.db")
+    make().close()
+    threading.Thread(target=report.serve, args=(make, port), daemon=True).start()
+    for _ in range(50):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    for path in ("/", "/board", "/deliverables", "/hours"):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
+            assert r.status == 200, path
+
+
 # ---------------------------------------------------------------- loose ends
 
 FU = [{"who": "Shannon", "what": "Answer Q2, Q6, Q9-Q12"}, {"who": "Ben", "what": "Chase Shannon for a date"}]
