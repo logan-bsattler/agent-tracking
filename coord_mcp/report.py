@@ -618,6 +618,20 @@ ul.vals { margin:0; padding-left:18px; } ul.vals li { margin:2px 0; overflow-wra
 .state { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600;
   border:1px solid currentColor; margin-left:8px; vertical-align:3px; }
 .st-done { color:var(--good); } .st-failed { color:var(--critical); } .st-open { color:var(--s1); }
+.actions { margin-bottom:20px; } .actions .btns { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+form.act { display:inline; margin:0; }
+form.act button { font:inherit; font-size:13px; padding:5px 12px; border-radius:6px; cursor:pointer;
+  border:1px solid var(--axis); background:var(--surface); color:var(--ink); }
+form.act button.primary { background:var(--s1); border-color:var(--s1); color:#fff; font-weight:600; }
+form.act button:hover { border-color:var(--s1); }
+ul.parked { list-style:none; margin:12px 0 0; padding:0; }
+ul.parked li { padding:6px 0; border-top:1px solid var(--grid); overflow-wrap:anywhere; }
+ul.parked .age { color:var(--muted); font-size:12px; margin-left:6px; }
+form.go textarea { width:100%; box-sizing:border-box; font:inherit; font-size:14px; padding:8px; border-radius:6px;
+  border:1px solid var(--axis); background:var(--page); color:var(--ink); resize:vertical; }
+form.go .btns { display:flex; gap:10px; align-items:center; margin-top:8px; }
+form.go button { font:inherit; font-size:14px; padding:6px 18px; border-radius:6px; cursor:pointer;
+  background:var(--s1); border:1px solid var(--s1); color:#fff; font-weight:600; }
 """
 
 
@@ -707,6 +721,29 @@ try { const k = "coord-collapsed", x = "coord-expanded",
 </script>"""
 
 
+def _button(action: str, label: str, task: str = "", primary: bool = False) -> str:
+    hidden = f'<input type="hidden" name="task" value="{esc(task)}">' if task else ""
+    return (f'<form method="post" action="/api/prompt" class="act"><input type="hidden" name="action" '
+            f'value="{esc(action)}">{hidden}<button{" class=primary" if primary else ""}>{esc(label)}</button></form>')
+
+
+def _actions(v: dict[str, Any]) -> str:
+    """Buttons that queue a prompt for the master (the master-console mod
+    submits it once the master is idle). One click, no typing."""
+    parked = v.get("parked", [])
+    rows = "".join(
+        f'<li>{_button("redispatch", "Re-dispatch", d["id"])} <b>{esc(d["client"])}</b> '
+        f'<a class="drill" href="/board/task/{esc(d["id"])}">{esc(d["title"])}</a> '
+        f'<span class="age">parked {d["parks"]}x · {_age(d["parked_at"], v["as_of"])}</span></li>'
+        for d in parked)
+    queued = v.get("queued", 0)
+    note = (f'<span class="age">{queued} queued for master</span>' if queued
+            else '<span class="age">sent to master when it is idle</span>')
+    return (f'<div class="card actions"><h2>Ask master</h2><div class="btns">'
+            f'{_button("next", "Next question", primary=True)}{_button("board", "Board check")}{note}</div>'
+            + (f'<ul class="parked">{rows}</ul>' if rows else "") + "</div>")
+
+
 def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
     """Operator view of the coord board: what needs you first, then the rest."""
     t = v["as_of"]
@@ -738,6 +775,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
 <nav><a href="/">Usage</a> · <b>Board</b> · <a href="/hours">Hours</a> · <a href="/deliverables">Deliverables</a></nav>
 <h1>Coord board</h1>
 <p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
+{_actions(v)}
 {_next_up(fresh, t)}
 <div class="card grp {'alert' if n else ''}"><h2>Needs you<span class="count">{n}</span></h2>{needs}</div>
 <script>/* the page auto-refreshes, so keep drilled-in clients open across reloads */
@@ -783,7 +821,7 @@ def _shell(title: str, body: str) -> str:
             f"<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}</style></head><body><main>{body}{COLLAPSE_JS}</main></body></html>")
 
 
-def task_page(d: dict[str, Any] | None, task_id: str = "") -> str:
+def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False) -> str:
     """One task in full: what was asked, what came back, and how it got there."""
     nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Task</b> · '
            '<a href="/deliverables">Deliverables</a></nav>')
@@ -836,7 +874,16 @@ def task_page(d: dict[str, Any] | None, task_id: str = "") -> str:
             for c in d["children"])
         cards.append(f'<div class="card"><h2>Follow-up tasks</h2><ul class="vals">{items}</ul></div>')
     head = (f'{nav}<h1>{esc(d["title"])}<span class="state st-{esc(d["state"])}">{esc(d["state"])}</span></h1>'
-            f'<p class="sub">{esc(d["assigned_to"] or "")} · {esc(d["kind"])}{took}</p>')
+            f'<p class="sub">{esc(d["assigned_to"] or "")} · {esc(d["kind"])}{took}</p>'
+            f'<form class="card go" method="post" action="/api/prompt"><h2>Tell master</h2>'
+            f'<input type="hidden" name="action" value="go"><input type="hidden" name="task" value="{esc(d["id"])}">'
+            f'<input type="hidden" name="back" value="/board/task/{esc(d["id"])}">'
+            f'<textarea name="comment" rows="2" maxlength="{store.COMMENT_MAX}" '
+            f'placeholder="Optional direction, e.g. &quot;split it: schema first&quot; or &quot;hold until Monday&quot;"></textarea>'
+            f'<div class="btns"><button class="primary">Go</button>'
+            + ('<b class="st-done">Sent. Master picks it up when idle.</b>' if queued else
+               '<span class="muted">queued for master; it runs when master is idle</span>')
+            + '</div></form>')
     return _shell(f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', head + "".join(cards))
 
 
@@ -1095,12 +1142,74 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             self.end_headers()
             self.wfile.write(body)
 
+        def _json(self, code: int, obj: Any) -> None:
+            body = json.dumps(obj).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _foreign(self) -> bool:
+            """A POST from some other site's page in Ben's browser. Each one
+            ends in a prompt to the master, so only this origin, or no browser
+            at all (the mod's own fetch), may send one."""
+            origin = self.headers.get("Origin")
+            if origin and origin not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
+                return True
+            return self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site")
+
+        def do_POST(self):  # noqa: N802
+            from urllib.parse import parse_qs
+            path = self.path.partition("?")[0].rstrip("/")
+            if self._foreign():
+                self.send_error(403, "cross-origin request refused")
+                return
+            n = int(self.headers.get("Content-Length") or 0)
+            form = parse_qs(self.rfile.read(n).decode("utf-8")) if n else {}
+            conn = connect()
+            try:
+                if path == "/api/prompt":
+                    try:
+                        r = store.queue_operator_prompt(conn, (form.get("action") or [""])[0],
+                                                        (form.get("task") or [None])[0],
+                                                        (form.get("comment") or [""])[0])
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    if "json" in (self.headers.get("Accept") or ""):
+                        self._json(200, r)
+                        return
+                    self.send_response(303)
+                    back = (form.get("back") or ["/board"])[0]
+                    back = back if re.fullmatch(r"/board(/task/[0-9a-f]{12})?", back) else "/board"
+                    self.send_header("Location", back + "?queued=1")
+                    self.end_headers()
+                    return
+                if path == "/api/prompts/take":
+                    self._json(200, {"prompt": store.take_operator_prompt(conn)})
+                    return
+            finally:
+                conn.close()
+            self.send_error(404)
+
         def _body(self, conn, path):
+            if path == "/api/parked":
+                self._type = "application/json"
+                return json.dumps({"parked": store.parked_tasks(conn),
+                                   "queued": store.queued_operator_prompts(conn),
+                                   "actions": {k: v for k, v in store.OPERATOR_ACTIONS.items()
+                                               if k != "redispatch"}}).encode("utf-8")
             if path == "/board":
-                return board_page(store.operator_view(conn)).encode("utf-8")
+                v = store.operator_view(conn)
+                v["parked"] = store.parked_tasks(conn)
+                v["queued"] = store.queued_operator_prompts(conn)
+                return board_page(v).encode("utf-8")
             if path.startswith("/board/task/"):
                 tid = path.rsplit("/", 1)[1]
-                return task_page(store.task_detail(conn, tid), tid).encode("utf-8")
+                return task_page(store.task_detail(conn, tid), tid,
+                                 queued="queued" in self._query).encode("utf-8")
             if path == "/deliverables":
                 # Not `days`: assigning it here would shadow serve()'s and break "/".
                 window = int((self._query.get("days") or ["14"])[0] or 14)

@@ -1,0 +1,1 @@
+{ "name": "master-console", "version": "0.1.0", "description": "Master session only: one-click prompts (next question, board check, re-dispatch parked tasks) from a band or the dashboard, and an auto-clear nudge when context runs high.", "types": "./types/index.d.ts" }

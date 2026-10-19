@@ -708,3 +708,96 @@ def resolve_follow_up(
     left = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='open'").fetchone()["n"]
     return {"ok": True, "follow_up_id": follow_up_id, "state": state, "resolved_by": task_id or decision_id,
             "loose_ends_left": left}
+
+
+# ------------------------------------------------------------ operator prompts
+
+# The prompts a dashboard or band button may queue for the master. Fixed text:
+# a button picks one, it never writes one. Re-dispatch names a task the board
+# says is parked, and nothing else.
+OPERATOR_ACTIONS = {
+    "next": "Next question: rebuild my queue from coord_board and present its head.",
+    "board": ("Board check: run coord_board, dispatch whatever an agent can do (loose ends, "
+              "awaiting_redispatch, intents), then reply Done / Next for you."),
+    "redispatch": ("Re-dispatch parked task {task_id} ({client}): check coord_get_decisions for a hold on it, "
+                   "confirm the client's turn has stopped (get_session isRunning false), send the same dispatch "
+                   "line, then read get_usage to confirm the clear."),
+    "go": ("Go on task {task_id} ({client}: {title}): take the next step it needs now -- dispatch or "
+           "re-dispatch it, task its open loose ends, or decide what is owed -- then reply Done / Next for you."),
+}
+COMMENT_MAX = 2000
+PROMPT_TTL = 30 * 60  # an untaken click older than this is stale, not owed
+
+
+def parked_tasks(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Open tasks awaiting re-dispatch, each with the prompt its button sends."""
+    out = []
+    for r in conn.execute(
+        """SELECT t.id, t.title, t.assigned_to, COUNT(p.id) parks, MAX(p.created_at) last_park, t.picked_up_at
+           FROM tasks t JOIN task_parks p ON p.task_id = t.id
+           WHERE t.state = 'open' GROUP BY t.id ORDER BY last_park"""
+    ):
+        if _open_status(r["last_park"], r["picked_up_at"]) != "parked":
+            continue
+        client = r["assigned_to"] or "unassigned"
+        out.append({"id": r["id"], "title": r["title"], "client": client, "parks": r["parks"],
+                    "parked_at": r["last_park"],
+                    "prompt": OPERATOR_ACTIONS["redispatch"].format(task_id=r["id"], client=client)})
+    return out
+
+
+def queue_operator_prompt(conn: sqlite3.Connection, action: str, task_id: str | None = None,
+                          comment: str | None = None) -> dict[str, Any]:
+    """Queue one of OPERATOR_ACTIONS for the master. Refuses anything else.
+
+    `comment` is Ben's own direction from the task page, appended verbatim.
+    """
+    if action not in OPERATOR_ACTIONS:
+        raise ValueError(f"unknown action {action!r}")
+    comment = (comment or "").strip()
+    if len(comment) > COMMENT_MAX:
+        raise ValueError(f"comment over {COMMENT_MAX} characters")
+    if action == "go":
+        r = conn.execute("SELECT id, title, assigned_to FROM tasks WHERE id=?", (task_id or "",)).fetchone()
+        if r is None:
+            raise ValueError(f"no task {task_id!r}")
+        text = OPERATOR_ACTIONS["go"].format(task_id=r["id"], client=r["assigned_to"] or "unassigned",
+                                             title=r["title"])
+    elif action == "redispatch":
+        task = next((d for d in parked_tasks(conn) if d["id"] == task_id), None)
+        if task is None:
+            raise ValueError(f"task {task_id!r} is not awaiting re-dispatch")
+        text = task["prompt"]
+    else:
+        task_id, text = None, OPERATOR_ACTIONS[action]
+    if comment:
+        text += "\n\nBen's direction: " + comment
+    t = now()
+    dup = conn.execute(
+        "SELECT id FROM operator_prompts WHERE taken_at IS NULL AND text = ? AND created_at >= ?",
+        (text, t - PROMPT_TTL)).fetchone()
+    if dup:
+        return {"ok": True, "id": dup["id"], "duplicate": True}
+    cur = conn.execute("INSERT INTO operator_prompts(action, task_id, text, created_at) VALUES (?,?,?,?)",
+                       (action, task_id, text, t))
+    return {"ok": True, "id": cur.lastrowid, "duplicate": False}
+
+
+def take_operator_prompt(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """Claim the oldest live queued prompt, or None. Stale ones are dropped."""
+    t = now()
+    conn.execute("UPDATE operator_prompts SET taken_at = -1 WHERE taken_at IS NULL AND created_at < ?",
+                 (t - PROMPT_TTL,))
+    r = conn.execute("SELECT id, action, task_id, text FROM operator_prompts WHERE taken_at IS NULL "
+                     "ORDER BY created_at, id LIMIT 1").fetchone()
+    if r is None:
+        return None
+    if conn.execute("UPDATE operator_prompts SET taken_at = ? WHERE id = ? AND taken_at IS NULL",
+                    (t, r["id"])).rowcount != 1:
+        return None  # another taker won it
+    return dict(r)
+
+
+def queued_operator_prompts(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) n FROM operator_prompts WHERE taken_at IS NULL AND created_at >= ?",
+                        (now() - PROMPT_TTL,)).fetchone()["n"]

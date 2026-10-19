@@ -14,7 +14,7 @@ from pathlib import Path
 # Bump this whenever DDL or _migrate changes. connect() skips both entirely
 # when the file already reports this version, so a new table or column that
 # ships without a bump will not be created.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 def default_db_path() -> Path:
     """COORD_DB if set, else ~/.coord/coord.db -- read on every call, not at import.
@@ -165,6 +165,20 @@ CREATE TABLE IF NOT EXISTS intents (
   note        TEXT
 );
 CREATE INDEX IF NOT EXISTS intents_state ON intents(state, created_at);
+
+-- Prompts the operator queued for the master from the dashboard (a button
+-- press). The master-console mod takes them one at a time and submits each as
+-- a prompt once the master is idle. `action` is from a fixed set; the text is
+-- built here, never taken from the request, so a page cannot write the prompt.
+CREATE TABLE IF NOT EXISTS operator_prompts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  action     TEXT NOT NULL,
+  task_id    TEXT,
+  text       TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  taken_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS operator_prompts_open ON operator_prompts(taken_at, created_at);
 
 -- Usage tracking. One row per API request, ingested from Claude Code's own
 -- transcript files, so it covers every session on the machine whether or

@@ -6,7 +6,11 @@ import type { Register } from 'claude-code'
 // 1. Clear guard. clear_session "self" fires as the turn ends, so a warning in
 //    the same turn is read in a session that no longer remembers it (9/30,
 //    10/01). It is refused unless the operator's own prompt in this turn says
-//    "clear". A message from a client session never counts. The rule is the
+//    "clear", or a coord_record_decision succeeded earlier in this turn (the
+//    handoff: since 10/19 the master clears itself when context runs high,
+//    nudged by master-console, because Fable filled it faster than Ben could
+//    answer). A clear with no handoff on the board is still refused. A message
+//    from a client session never counts as the operator's go. The rule is the
 //    master's alone: the mod loads in every session, and a client's
 //    park-and-clear is the protocol with nobody typing in that session (10/05:
 //    MAG and LNK parked, could not clear, and re-parked on re-dispatch). Scoped
@@ -35,6 +39,7 @@ const LOG_KEEP = 200
 
 export const register: Register = on => {
   let operatorGo = false
+  let handoff = false
   // task id -> client key, for tasks created and not yet named in a send_message
   const pending = new Map<string, string>()
   let carried: string[] = []
@@ -57,7 +62,7 @@ export const register: Register = on => {
       if (target !== 'self') return next(e)
       const root = await $.session.root()
       const isMaster = MASTER_ROOT.test(root)
-      const allow = !isMaster || operatorGo
+      const allow = !isMaster || operatorGo || handoff
       try {
         const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/\\/g, '/')
         if (home) {
@@ -65,13 +70,13 @@ export const register: Register = on => {
           let prior = ''
           try { prior = await $.fs.read(path) } catch { /* first entry */ }
           const line = `${new Date(await $.clock.now()).toISOString()} ${allow ? 'allow' : 'deny'} ` +
-            `master=${isMaster} operatorGo=${operatorGo} root=${root}`
+            `master=${isMaster} operatorGo=${operatorGo} handoff=${handoff} root=${root}`
           await $.fs.write(path, [...prior.split('\n').filter(Boolean).slice(-(LOG_KEEP - 1)), line].join('\n') + '\n')
         }
       } catch { /* the log must never decide the clear */ }
       if (!allow) {
-        return { deny: 'coord-rules: refusing to clear the master session. Ben\'s message this turn did not say ' +
-          '"clear". Put the clear on Needs you and wait for his go in a later turn.' }
+        return { deny: 'coord-rules: refusing to clear the master session: no handoff decision was recorded ' +
+          'this turn. coord_record_decision the handoff (live state plus Ben\'s queue) first, then clear.' }
       }
       return next(e)
     }
@@ -80,6 +85,12 @@ export const register: Register = on => {
       const sent = JSON.stringify(e)
       for (const id of [...pending.keys()]) if (sent.includes(id)) pending.delete(id)
       return next(e)
+    }
+
+    if (name === 'coord_record_decision') {
+      const ran = await next(e)
+      if (ran.deny === undefined && !ran.isError) handoff = true
+      return ran
     }
 
     if (name === 'coord_create_task') {
@@ -101,6 +112,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId) return next(e)
     operatorGo = false
+    handoff = false
     if (pending.size) {
       carried = [...pending].map(([id, client]) => `${id} (${client})`)
       pending.clear()
