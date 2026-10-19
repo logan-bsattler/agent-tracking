@@ -884,6 +884,18 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
             + ('<b class="st-done">Sent. Master picks it up when idle.</b>' if queued else
                '<span class="muted">queued for master; it runs when master is idle</span>')
             + '</div></form>')
+    q = d.get("question")
+    if q:
+        btns = "".join(
+            f'<form method="post" action="/api/prompt" class="act"><input type="hidden" name="action" value="answer">'
+            f'<input type="hidden" name="question" value="{q["id"]}"><input type="hidden" name="option" value="{i}">'
+            f'<input type="hidden" name="back" value="/board/task/{esc(d["id"])}">'
+            f'<button{" class=primary" if i == q["recommended"] else ""}>{esc(o)}</button></form>'
+            for i, o in enumerate(q["options"]))
+        head += (f'<div class="card go"><h2>Master asks</h2><p>{esc(q["question"])}</p>'
+                 f'<div class="btns">{btns}</div>'
+                 f'<p class="muted">On <code>{esc(q["ref"])}</code>. A press sends master '
+                 f'&quot;Answer on {esc(q["ref"])}: &lt;option&gt;&quot; when it is idle.</p></div>')
     return _shell(f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', head + "".join(cards))
 
 
@@ -1243,7 +1255,9 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     try:
                         r = store.queue_operator_prompt(conn, (form.get("action") or [""])[0],
                                                         (form.get("task") or [None])[0],
-                                                        (form.get("comment") or [""])[0])
+                                                        (form.get("comment") or [""])[0],
+                                                        (form.get("question") or [None])[0],
+                                                        (form.get("option") or [None])[0])
                     except ValueError as e:
                         self._json(400, {"ok": False, "error": str(e)})
                         return
@@ -1259,6 +1273,9 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 if path == "/api/prompts/take":
                     self._json(200, {"prompt": store.take_operator_prompt(conn)})
                     return
+                if path == "/api/question/close":  # the band answered it in chat
+                    self._json(200, {"closed": store.close_question(conn, (form.get("question") or [None])[0])})
+                    return
             finally:
                 conn.close()
             self.send_error(404)
@@ -1268,6 +1285,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 self._type = "application/json"
                 return json.dumps({"parked": store.parked_tasks(conn),
                                    "queued": store.queued_operator_prompts(conn),
+                                   "question": store.current_question(conn),
                                    "actions": {k: v for k, v in store.OPERATOR_ACTIONS.items()
                                                if k != "redispatch"}}).encode("utf-8")
             if path == "/board":

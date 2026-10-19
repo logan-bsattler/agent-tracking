@@ -14,7 +14,7 @@ from pathlib import Path
 # Bump this whenever DDL or _migrate changes. connect() skips both entirely
 # when the file already reports this version, so a new table or column that
 # ships without a bump will not be created.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 def default_db_path() -> Path:
     """COORD_DB if set, else ~/.coord/coord.db -- read on every call, not at import.
@@ -179,6 +179,22 @@ CREATE TABLE IF NOT EXISTS operator_prompts (
   taken_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS operator_prompts_open ON operator_prompts(taken_at, created_at);
+
+-- The question master is putting to Ben (CLAUDE.md "One question at a time"),
+-- so each option can be a button in the master-console band and on the task
+-- page. One is current: presenting another closes the last. closed_at is set
+-- when an option is pressed or the question is superseded.
+CREATE TABLE IF NOT EXISTS questions (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id      TEXT NOT NULL,
+  follow_up_id TEXT,
+  question     TEXT NOT NULL,
+  options      TEXT NOT NULL,
+  recommended  INTEGER,
+  created_at   INTEGER NOT NULL,
+  closed_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS questions_open ON questions(closed_at, created_at);
 
 -- Usage tracking. One row per API request, ingested from Claude Code's own
 -- transcript files, so it covers every session on the machine whether or

@@ -663,6 +663,7 @@ def task_detail(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None
         (task_id,))]
     d["children"] = [dict(x) for x in conn.execute(
         "SELECT id, title, state, assigned_to FROM tasks WHERE parent_id=? ORDER BY created_at", (task_id,))]
+    d["question"] = current_question(conn, task_id)
     return d
 
 
@@ -724,6 +725,7 @@ OPERATOR_ACTIONS = {
                    "line, then read get_usage to confirm the clear."),
     "go": ("Go on task {task_id} ({client}: {title}): take the next step it needs now -- dispatch or "
            "re-dispatch it, task its open loose ends, or decide what is owed -- then reply Done / Next for you."),
+    "answer": "Answer on {ref}: {option}\n\n(Your question: {question})",
 }
 COMMENT_MAX = 2000
 PROMPT_TTL = 30 * 60  # an untaken click older than this is stale, not owed
@@ -747,17 +749,23 @@ def parked_tasks(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def queue_operator_prompt(conn: sqlite3.Connection, action: str, task_id: str | None = None,
-                          comment: str | None = None) -> dict[str, Any]:
+                          comment: str | None = None, question_id: Any = None,
+                          option: Any = None) -> dict[str, Any]:
     """Queue one of OPERATOR_ACTIONS for the master. Refuses anything else.
 
     `comment` is Ben's own direction from the task page, appended verbatim.
+    `answer` takes a question id and an option index, never the option text:
+    the text comes from what master stored with coord_present_question.
     """
     if action not in OPERATOR_ACTIONS:
         raise ValueError(f"unknown action {action!r}")
     comment = (comment or "").strip()
     if len(comment) > COMMENT_MAX:
         raise ValueError(f"comment over {COMMENT_MAX} characters")
-    if action == "go":
+    if action == "answer":
+        text, task_id = answer_prompt(conn, question_id, option)
+        close_question(conn, question_id)
+    elif action == "go":
         r = conn.execute("SELECT id, title, assigned_to FROM tasks WHERE id=?", (task_id or "",)).fetchone()
         if r is None:
             raise ValueError(f"no task {task_id!r}")
@@ -801,3 +809,91 @@ def take_operator_prompt(conn: sqlite3.Connection) -> dict[str, Any] | None:
 def queued_operator_prompts(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) n FROM operator_prompts WHERE taken_at IS NULL AND created_at >= ?",
                         (now() - PROMPT_TTL,)).fetchone()["n"]
+
+
+# ------------------------------------------------------------------ questions
+
+QUESTION_MAX = 500
+OPTION_MAX = 200
+OPTIONS_MAX = 6
+
+
+def present_question(conn: sqlite3.Connection, question: str, options: list[str], task_id: str | None = None,
+                     follow_up_id: str | None = None, recommended: int | None = None) -> dict[str, Any]:
+    """Store the question master is putting to Ben; it closes the one before.
+
+    The band and the task page draw one button per option. A press sends a
+    prompt built from this row, so the text master wrote here is the only
+    text an answer can carry.
+    """
+    question = (question or "").strip()
+    options = [str(o).strip() for o in options or []]
+    if not question or len(question) > QUESTION_MAX:
+        raise ValueError(f"question must be 1-{QUESTION_MAX} characters")
+    if not 2 <= len(options) <= OPTIONS_MAX:
+        raise ValueError(f"give 2-{OPTIONS_MAX} options")
+    if any(not o or len(o) > OPTION_MAX for o in options):
+        raise ValueError(f"each option must be 1-{OPTION_MAX} characters")
+    if len(set(options)) != len(options):
+        raise ValueError("options repeat")
+    if recommended is not None and not 0 <= recommended < len(options):
+        raise ValueError(f"recommended is an option index, 0-{len(options) - 1}")
+    if follow_up_id:
+        fu = conn.execute("SELECT task_id FROM follow_ups WHERE id=?", (follow_up_id,)).fetchone()
+        if fu is None:
+            raise KeyError(f"unknown follow-up '{follow_up_id}'")
+        if task_id and task_id != fu["task_id"]:
+            raise ValueError(f"follow-up '{follow_up_id}' belongs to task '{fu['task_id']}', not '{task_id}'")
+        task_id = fu["task_id"]
+    if not task_id:
+        raise ValueError("give task_id or follow_up_id: the answer must name what it answers")
+    if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
+        raise KeyError(f"unknown task '{task_id}'")
+    t = now()
+    conn.execute("UPDATE questions SET closed_at=? WHERE closed_at IS NULL", (t,))
+    cur = conn.execute(
+        "INSERT INTO questions(task_id, follow_up_id, question, options, recommended, created_at) "
+        "VALUES (?,?,?,?,?,?)", (task_id, follow_up_id, question, json.dumps(options), recommended, t))
+    return {"ok": True, "question_id": cur.lastrowid, "task_id": task_id, "follow_up_id": follow_up_id}
+
+
+def current_question(conn: sqlite3.Connection, task_id: str | None = None) -> dict[str, Any] | None:
+    """The open question, with the prompt each option's button sends. None
+    once it is answered or superseded, or its loose end was resolved anyway.
+    With task_id, only if it is that task's."""
+    r = conn.execute(
+        "SELECT q.* FROM questions q LEFT JOIN follow_ups f ON f.id = q.follow_up_id "
+        "WHERE q.closed_at IS NULL AND (q.follow_up_id IS NULL OR f.state = 'open') "
+        "ORDER BY q.created_at DESC, q.id DESC LIMIT 1").fetchone()
+    if r is None or (task_id and r["task_id"] != task_id):
+        return None
+    d = dict(r)
+    d["options"] = json.loads(d["options"])
+    d["ref"] = d["follow_up_id"] or d["task_id"]
+    d["prompts"] = [OPERATOR_ACTIONS["answer"].format(ref=d["ref"], option=o, question=d["question"])
+                    for o in d["options"]]
+    return d
+
+
+def answer_prompt(conn: sqlite3.Connection, question_id: Any, option: Any) -> tuple[str, str]:
+    """(prompt text, task id) for option `option` of open question `question_id`."""
+    try:
+        qid, i = int(question_id), int(option)
+    except (TypeError, ValueError):
+        raise ValueError("answer needs a question id and an option number") from None
+    q = current_question(conn)
+    if q is None or q["id"] != qid:
+        raise ValueError(f"question {qid} is not open: master has moved on or it was answered")
+    if not 0 <= i < len(q["options"]):
+        raise ValueError(f"question {qid} has no option {i}")
+    return q["prompts"][i], q["task_id"]
+
+
+def close_question(conn: sqlite3.Connection, question_id: Any) -> bool:
+    """Mark a question answered, so its buttons go. True if it was open."""
+    try:
+        qid = int(question_id)
+    except (TypeError, ValueError):
+        return False
+    return conn.execute("UPDATE questions SET closed_at=? WHERE id=? AND closed_at IS NULL",
+                        (now(), qid)).rowcount == 1

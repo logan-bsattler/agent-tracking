@@ -251,6 +251,35 @@ async def coord_resolve_follow_up(params: ResolveFollowUpInput) -> str:
         return _err(e)
 
 
+class PresentQuestionInput(Strict):
+    question: str = Field(..., description="The question, in one line, as you put it to Ben",
+                          max_length=store.QUESTION_MAX)
+    options: list[str] = Field(..., description="The options, each as the answer Ben would give",
+                               min_length=2, max_length=store.OPTIONS_MAX)
+    follow_up_id: str | None = Field(default=None, description="Loose end it answers; its task is implied",
+                                     max_length=40)
+    task_id: str | None = Field(default=None, description="Task it is about, when no loose end fits",
+                                max_length=40)
+    recommended: int | None = Field(default=None, description="Index into options of your recommendation", ge=0)
+
+
+@tool("coord_present_question", title="Present question")
+async def coord_present_question(params: PresentQuestionInput) -> str:
+    """Call this every time you put a question with options to Ben. Each option
+    becomes a button in his prompt band and on the task's dashboard page; a
+    press sends you "Answer on <follow_up_id or task_id>: <option>" as his own
+    prompt. Presenting a question closes the previous one. Give follow_up_id
+    or task_id.
+
+    Returns JSON: {ok, question_id, task_id, follow_up_id}
+    """
+    try:
+        return _ok(store.present_question(db(), params.question, params.options, params.task_id,
+                                          params.follow_up_id, params.recommended))
+    except Exception as e:
+        return _err(e)
+
+
 class ResultInput(Strict):
     task_id: str = Field(..., description="Task id")
     fields: list[str] | None = Field(
