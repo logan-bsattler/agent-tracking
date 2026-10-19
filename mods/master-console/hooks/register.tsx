@@ -20,7 +20,7 @@ import type { Parked } from '../types'
 // Master only: client sessions load the mod and it does nothing there.
 
 const DASH = 'http://127.0.0.1:8765'
-const MASTER_ROOT = /^c:[\/]development[\/]agents([\/]|$)/i
+const MASTER_ROOT = /^c:[\\/]development[\\/]agents([\\/]|$)/i
 const MAX_BUTTONS = 5
 const FALLBACK: Record<string, string> = {
   next: 'Next question: rebuild my queue from coord_board and present its head.',
