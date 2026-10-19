@@ -96,6 +96,13 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // A self-clear is the last call of its turn, and that turn never reports
+  // turn.complete: without this, busy stays set and no queued prompt is taken.
+  on('session.end', async ($, e, next) => {
+    if (isMaster && e.reason === 'clear') busy = false
+    return next(e)
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!isMaster || e.props.hasSurvey) return next(e)
     const list = await read($, parked)

@@ -1095,22 +1095,44 @@ def write(conn: sqlite3.Connection, out: Path, days: int = 7) -> Path:
     return out
 
 
+INGEST_EVERY = 30
+
+
 def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) -> int:
-    """Localhost server that re-ingests and re-renders on every request.
+    """Localhost server that re-renders on every request; a background thread
+    re-ingests every INGEST_EVERY seconds.
+
+    Ingest used to run inline on "/" and /hours under a lock. Its writes wait
+    on the coord servers' (busy_timeout, per transcript), so a page load took
+    anywhere from 1 s to a minute and queued every other "/" behind it. Pages
+    now only read; WAL readers never wait on a writer.
 
     The page carries a 60-second meta refresh, so a browser tab left open is
     a live dashboard. Bound to 127.0.0.1 only.
 
     Threaded, because a browser that holds a connection open would otherwise
     stall every other request. `connect` makes one sqlite connection per
-    request, since a connection cannot cross threads; ingest takes a lock so
-    two page loads do not race on the same transcript offsets.
+    request, since a connection cannot cross threads; ingest has one thread,
+    so nothing races on the transcript offsets.
     """
     import webbrowser
     import threading
+    import time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    ingest_lock = threading.Lock()
+    def ingest_loop() -> None:
+        while True:
+            try:
+                conn = connect()
+                try:
+                    usage.ingest(conn)
+                finally:
+                    conn.close()
+            except Exception:  # a locked db or a vanished file: the next pass gets it
+                pass
+            time.sleep(INGEST_EVERY)
+
+    threading.Thread(target=ingest_loop, name="ingest", daemon=True).start()
 
     class H(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
@@ -1231,8 +1253,6 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 return f.read_bytes()
             if path in ("/hours", "/hours.csv"):
                 start, end, client = hours_range(self._query)
-                with ingest_lock:
-                    usage.ingest(conn)
                 rows = hours.breakdown(conn, start, end, client)
                 if path == "/hours.csv":
                     self._type, self._disp = "text/csv; charset=utf-8", f"hours-{start}-{end}.csv"
@@ -1241,8 +1261,6 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 return hours_page(rows, start, end, client, hours.push_to_pipeline(conn, rows),
                                   unclassified=un).encode("utf-8")
             if path == "":
-                with ingest_lock:
-                    usage.ingest(conn)
                 return render(usage.summary(conn, days), usage.live(conn), refresh=60).encode("utf-8")
             return None
 
