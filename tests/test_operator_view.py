@@ -199,6 +199,38 @@ def test_every_page_answers_through_the_server(tmp_path, monkeypatch):
             assert r.status == 200, path
 
 
+def test_home_is_served_from_the_ingest_threads_copy(tmp_path, monkeypatch):
+    """"/" must not query or render per request: the ingest thread builds it."""
+    import functools
+    import socket
+    import threading
+    import time
+    import urllib.request
+
+    from coord_mcp import usage
+    from coord_mcp.db import connect as db_connect
+
+    monkeypatch.setattr(usage, "ingest", lambda conn: None)
+    renders = []
+    real = report.render
+    monkeypatch.setattr(report, "render", lambda *a, **k: renders.append(1) or real(*a, **k))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    make = functools.partial(db_connect, tmp_path / "srv.db")
+    make().close()
+    threading.Thread(target=report.serve, args=(make, port), daemon=True).start()
+    for _ in range(100):
+        if renders:
+            break
+        time.sleep(0.05)
+    assert renders == [1]  # the ingest thread's first pass built it
+    for _ in range(3):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=10) as r:
+            assert r.status == 200 and b"<html" in r.read().lower()
+    assert renders == [1]
+
+
 # ---------------------------------------------------------------- loose ends
 
 FU = [{"who": "Shannon", "what": "Answer Q2, Q6, Q9-Q12"}, {"who": "Ben", "what": "Chase Shannon for a date"}]

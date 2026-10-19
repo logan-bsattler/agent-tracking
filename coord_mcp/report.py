@@ -1098,6 +1098,30 @@ def write(conn: sqlite3.Connection, out: Path, days: int = 7) -> Path:
 INGEST_EVERY = 30
 
 
+def _normal_priority() -> None:
+    """Lift this process to normal CPU, I/O and memory priority on Windows.
+
+    Task Scheduler starts a task at priority 7 unless told otherwise: CPU
+    BelowNormal, I/O and memory priority low. Best effort; a failure leaves
+    the priority as it was.
+    """
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32, nt = ctypes.windll.kernel32, ctypes.windll.ntdll
+        me = wintypes.HANDLE(-1)  # GetCurrentProcess(); its int restype would truncate it
+        k32.SetPriorityClass(me, 0x20)  # NORMAL_PRIORITY_CLASS
+        mem = ctypes.c_ulong(5)  # MEMORY_PRIORITY_NORMAL, ProcessMemoryPriority = 0
+        k32.SetProcessInformation(me, 0, ctypes.byref(mem), ctypes.sizeof(mem))
+        io = ctypes.c_ulong(2)  # IoPriorityNormal, ProcessIoPriority = 33
+        nt.NtSetInformationProcess(me, 33, ctypes.byref(io), ctypes.sizeof(io))
+    except Exception:
+        pass
+
+
 def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) -> int:
     """Localhost server that re-renders on every request; a background thread
     re-ingests every INGEST_EVERY seconds.
@@ -1106,6 +1130,18 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
     on the coord servers' (busy_timeout, per transcript), so a page load took
     anywhere from 1 s to a minute and queued every other "/" behind it. Pages
     now only read; WAL readers never wait on a writer.
+
+    That did not fix it. The stall (1.5 s to 236 s for "/", 2026-10-19) was
+    the scheduled task: Task Scheduler's default priority 7 starts the process
+    BelowNormal with low I/O and memory priority, so every page read lost the
+    disk to whatever else the machine was doing. A copy of this server run by
+    hand against the same db answered in 0.4 s at the same moments. The task
+    now runs at priority 4, and _normal_priority() undoes a priority-7 launch
+    in case it is ever re-registered with the default.
+
+    "/" is also built by the ingest thread after each pass and served from
+    that copy, so a page load costs no query or render time; it is at most
+    one pass (INGEST_EVERY) behind, which the 60-second refresh hides.
 
     The page carries a 60-second meta refresh, so a browser tab left open is
     a live dashboard. Bound to 127.0.0.1 only.
@@ -1120,12 +1156,23 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
     import time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+    _normal_priority()
+    home: list[tuple[float, bytes]] = []  # (built at, page); one slot, swapped whole
+
+    def build_home(conn) -> bytes:
+        body = render(usage.summary(conn, days), usage.live(conn), refresh=60).encode("utf-8")
+        home[:] = [(time.monotonic(), body)]
+        return body
+
     def ingest_loop() -> None:
         while True:
             try:
                 conn = connect()
                 try:
-                    usage.ingest(conn)
+                    try:
+                        usage.ingest(conn)
+                    finally:
+                        build_home(conn)
                 finally:
                     conn.close()
             except Exception:  # a locked db or a vanished file: the next pass gets it
@@ -1261,7 +1308,10 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 return hours_page(rows, start, end, client, hours.push_to_pipeline(conn, rows),
                                   unclassified=un).encode("utf-8")
             if path == "":
-                return render(usage.summary(conn, days), usage.live(conn), refresh=60).encode("utf-8")
+                cached = home[0] if home else None
+                if cached and time.monotonic() - cached[0] < 2 * INGEST_EVERY:
+                    return cached[1]
+                return build_home(conn)  # first load, or the ingest thread is stuck
             return None
 
         def log_message(self, *a):
