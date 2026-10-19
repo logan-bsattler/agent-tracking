@@ -94,6 +94,20 @@ def test_five_hour_reading_dropped_once_its_window_reset(conn, tmp_path, monkeyp
     assert not any("5-hour limit" in r for r in a["reasons"])
 
 
+def test_borrowed_weekly_reading_dropped_once_its_window_reset(conn, tmp_path, monkeypatch):
+    """The newest row lacks a weekly figure, so 98% is borrowed from an older row
+    whose week has since reset. The reset must come along with it, or the guard
+    blocks on last week's number (seen 2026-10-19)."""
+    conn.execute("INSERT INTO quota_snapshots(ts, five_hour_pct, five_hour_reset, seven_day_pct, seven_day_reset) "
+                 "VALUES (?,?,?,?,?)", (now() - 3600, 1, now() + 3600, 98, now() - 1800))
+    conn.execute("INSERT INTO quota_snapshots(ts, five_hour_pct, five_hour_reset) VALUES (?,?,?)",
+                 (now() - 60, 1, now() + 3600))
+    assert usage.latest_quota(conn)["seven_day_reset"] is not None
+    a = guard.assess(conn, _transcript(tmp_path, 10_000))
+    assert a["seven_day"] is None
+    assert a["level"] != "block"
+
+
 def test_stale_quota_triggers_a_desktop_refresh(conn, tmp_path, monkeypatch):
     """When the row is old, the Desktop history is re-read before deciding."""
     monkeypatch.setattr(guard, "QUOTA_STALE_S", 600)

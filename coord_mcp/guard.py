@@ -189,6 +189,12 @@ def assess(conn: sqlite3.Connection, transcript_path: str | None) -> dict[str, A
     # catches them.
     if fh is not None and fh_age is not None and fh_age >= 5 * 3600:
         fh = None
+    # The weekly window gets the same treatment: once its reset has passed,
+    # the percentage describes last week.
+    if sd is not None and q and q.get("seven_day_reset") and q["seven_day_reset"] <= now():
+        sd = None
+    if sd is not None and sd_age is not None and sd_age >= 7 * 86400:
+        sd = None
     reasons: list[str] = []
     level = "ok"
 

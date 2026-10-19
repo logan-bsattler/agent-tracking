@@ -510,16 +510,21 @@ def latest_quota(conn: sqlite3.Connection) -> dict[str, Any] | None:
     # A row can carry one percentage and not the other; fall back to the most
     # recent reading of whichever is missing, so a tile is never blank because
     # of one partial sample.
-    for k in ("five_hour_pct", "seven_day_pct"):
+    # The reset travels with the percentage it belongs to: a borrowed reading
+    # without its reset can't be recognised as describing a window that has
+    # since ended.
+    for k, rk in (("five_hour_pct", "five_hour_reset"), ("seven_day_pct", "seven_day_reset")):
         d[f"{k}_ts"] = d["ts"] if d.get(k) is not None else None
         if d.get(k) is None:
             back = conn.execute(
-                f"SELECT ts, {k} FROM quota_snapshots WHERE {k} IS NOT NULL AND ts >= ? "
+                f"SELECT ts, {k}, {rk} FROM quota_snapshots WHERE {k} IS NOT NULL AND ts >= ? "
                 "ORDER BY ts DESC LIMIT 1",
                 (d["ts"] - 86400,)).fetchone()
             if back:
                 d[k] = back[k]
                 d[f"{k}_ts"] = back["ts"]
+                if back[rk] is not None:
+                    d[rk] = back[rk]
     if d.get("five_hour_reset") is None:
         r2 = conn.execute(
             "SELECT five_hour_reset, seven_day_reset FROM quota_snapshots "
