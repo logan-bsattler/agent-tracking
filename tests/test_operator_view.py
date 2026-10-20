@@ -553,3 +553,21 @@ def test_open_endpoint_opens_only_the_tasks_files(tmp_path, monkeypatch):
     assert len(opened) == 2
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/board/task/{tid}", timeout=10) as r:
         assert b'data-how="reveal"' in r.read()
+
+
+def test_next_up_leads_with_masters_presented_question(conn):
+    t = _task(conn, "LNK")
+    store.complete_task(conn, t, {**INV, "follow_ups": [
+        {"who": "Ben", "what": "Pick batch-only vs streamline"},
+        {"who": "Ben", "what": "Older thing master did not pick"}]})
+    fids = {r["what"]: r["id"] for r in conn.execute("SELECT id, what FROM follow_ups")}
+    store.present_question(conn, "Batch-only or streamline?", ["Batch-only", "Streamline"],
+                           follow_up_id=fids["Pick batch-only vs streamline"], recommended=1)
+    v = store.operator_view(conn)
+    v["question"] = store.current_question(conn)
+    html = report.board_page(v)
+    nxt = html[html.index("Next up"):html.index("Needs you")]
+    assert "Batch-only or streamline?" in nxt and 'name="option" value="1"' in nxt
+    assert 'name="back" value="/board"' in nxt
+    assert "Pick batch-only vs streamline" not in nxt  # not repeated behind itself
+    assert "Older thing master did not pick" in nxt

@@ -526,7 +526,8 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
            FROM follow_ups f JOIN tasks t ON t.id = f.task_id
            WHERE f.state IN ('open','deferred') ORDER BY f.created_at, f.idx"""
     ):
-        d = {"id": r["task_id"], "kind": "follow_up", "title": r["what"], "client": r["assigned_to"] or "—",
+        d = {"id": r["task_id"], "fid": r["fid"], "kind": "follow_up", "title": r["what"],
+             "client": r["assigned_to"] or "—",
              "since": r["created_at"], "who": r["who"], "note": f"{r['who']} · from: {r['title']}"}
         if r["state"] == "deferred":
             deferred.append(d)

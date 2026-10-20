@@ -698,14 +698,33 @@ def need_type(d: dict[str, Any]) -> str:
     return "Decide"
 
 
-def _next_up(rows: list[dict[str, Any]], t: int) -> str:
-    """The one thing to do first, and the three behind it: failures gate
-    dispatch, so they lead; after that, oldest first."""
-    if not rows:
-        return ""
+def _answer_buttons(q: dict[str, Any], back: str) -> str:
+    """One button per option of master's open question; a press queues
+    "Answer on <ref>: <option>" for master, then returns to `back`."""
+    return "".join(
+        f'<form method="post" action="/api/prompt" class="act"><input type="hidden" name="action" value="answer">'
+        f'<input type="hidden" name="question" value="{q["id"]}"><input type="hidden" name="option" value="{i}">'
+        f'<input type="hidden" name="back" value="{esc(back)}">'
+        f'<button{" class=primary" if i == q["recommended"] else ""}>{esc(o)}</button></form>'
+        for i, o in enumerate(q["options"]))
+
+
+def _next_up(rows: list[dict[str, Any]], t: int, q: dict[str, Any] | None = None) -> str:
+    """The one thing to do first, and the three behind it. Master's open
+    question leads when there is one: it is the head of Ben's queue as master
+    ordered it. Otherwise failures lead, since they gate dispatch, then oldest."""
     order = sorted(rows, key=lambda d: (not d.get("failed"), d["since"]))
-    head, behind = order[0], order[1:4]
-    return (f'<div class="card grp next"><h2>Next up</h2><div class="head">{_items([head], t, "")}</div>'
+    if q:
+        tid = q.get("task_id") or ""
+        link = (f' <a class="drill" href="/board/task/{esc(tid)}">{esc(tid[:8])}</a>' if tid else "")
+        head = (f'<div class="head"><p class="ask">{esc(q["question"])}{link}</p>'
+                f'<div class="btns">{_answer_buttons(q, "/board")}</div></div>')
+        behind = [d for d in order if not q.get("follow_up_id") or d.get("fid") != q["follow_up_id"]][:3]
+    elif rows:
+        head, behind = f'<div class="head">{_items([order[0]], t, "")}</div>', order[1:4]
+    else:
+        return ""
+    return (f'<div class="card grp next"><h2>Next up</h2>{head}'
             + (f'<div class="behind">{_items(behind, t, "")}</div>' if behind else "") + "</div>")
 
 
@@ -789,7 +808,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
 <h1>Coord board</h1>
 <p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
 {_actions(v)}
-{_next_up(fresh, t)}
+{_next_up(fresh, t, v.get("question"))}
 <div class="card grp {'alert' if n else ''}"><h2>Needs you<span class="count">{n}</span></h2>{needs}</div>
 <script>/* the page auto-refreshes, so keep drilled-in clients open across reloads */
 try {{ const k = "coord-open", o = new Set(JSON.parse(localStorage.getItem(k) || "[]"));
@@ -966,14 +985,8 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
             + '</div></form>')
     q = d.get("question")
     if q:
-        btns = "".join(
-            f'<form method="post" action="/api/prompt" class="act"><input type="hidden" name="action" value="answer">'
-            f'<input type="hidden" name="question" value="{q["id"]}"><input type="hidden" name="option" value="{i}">'
-            f'<input type="hidden" name="back" value="/board/task/{esc(d["id"])}">'
-            f'<button{" class=primary" if i == q["recommended"] else ""}>{esc(o)}</button></form>'
-            for i, o in enumerate(q["options"]))
         head += (f'<div class="card go"><h2>Master asks</h2><p>{esc(q["question"])}</p>'
-                 f'<div class="btns">{btns}</div>'
+                 f'<div class="btns">{_answer_buttons(q, "/board/task/" + d["id"])}</div>'
                  f'<p class="muted">On <code>{esc(q["ref"])}</code>. A press sends master '
                  f'&quot;Answer on {esc(q["ref"])}: &lt;option&gt;&quot; when it is idle.</p></div>')
     return _shell(f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', head + "".join(cards) + FILE_JS)
@@ -1390,6 +1403,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v = store.operator_view(conn)
                 v["parked"] = store.parked_tasks(conn)
                 v["queued"] = store.queued_operator_prompts(conn)
+                v["question"] = store.current_question(conn)
                 return board_page(v).encode("utf-8")
             if path.startswith("/board/task/"):
                 tid = path.rsplit("/", 1)[1]
