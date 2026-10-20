@@ -642,7 +642,116 @@ def deliverable_path(conn: sqlite3.Connection, task_id: str, path: str, root: Pa
     return None
 
 
-def task_detail(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
+# What a file path in a task's text can end in: deliverables plus the
+# working set an agent names (source, scripts, data).
+FILE_EXT = DELIVERABLE_EXT | {".docm", ".xls", ".p", ".i", ".w", ".cls", ".py", ".ps1", ".sh", ".json",
+                              ".sql", ".log", ".xml", ".yaml", ".yml", ".js", ".ts", ".tsx", ".png", ".jpg"}
+_EXT = "|".join(sorted((e[1:] for e in FILE_EXT), key=len, reverse=True))
+_END = r"(?![\w/\\-])(?!\.\w)"  # the extension ends the name: not 'a.md/x', 'a.mdx' or 'a.md.bak'
+# An absolute path may hold spaces ('OneDrive - Logan Consulting'), so it runs
+# lazily from the drive or ~ to the first extension that ends a name.
+_ABS_RE = re.compile(rf"(?:[A-Za-z]:|~)[\\/][^\"'<>|*?\n`]*?\.(?:{_EXT}){_END}", re.I)
+_REL_RE = re.compile(rf"[\w.~-][^\s\"'<>|*?`,;()\[\]]*\.(?:{_EXT}){_END}", re.I)
+
+
+def _found(raw: str, client: str | None, root: Path) -> tuple[str, Path]:
+    raw = raw.rstrip(".,;:")
+    p = Path(raw).expanduser() if raw.startswith("~") else _resolve(raw, client, root)
+    return raw, p
+
+
+def _paths_in(text: str, client: str | None, root: Path) -> list[tuple[str, Path]]:
+    """File paths named in free text, each as (what the text says, where it is).
+
+    A relative name with no folder counts only if it is on disk ('xmfagtcp.p'
+    is usually a QAD program, not a local file). One that is not on disk may be
+    the tail of a name with spaces in it ('Unapproved Documents/FDD x.docx'),
+    so up to eight words before it are tried as well.
+    """
+    out: list[tuple[str, Path]] = []
+    taken: list[tuple[int, int]] = []
+    for m in _ABS_RE.finditer(text):
+        out.append(_found(m.group(), client, root))
+        taken.append(m.span())
+    for m in _REL_RE.finditer(text):
+        if any(a <= m.start() < b for a, b in taken):
+            continue
+        raw, p = _found(m.group(), client, root)
+        if not p.is_file():
+            words = text[:m.start()].split(" ")[:-1] if text[:m.start()].endswith(" ") else []
+            for k in range(1, min(len(words), 8) + 1):
+                if "\n" in " ".join(words[-k:]):
+                    break
+                cand = _found(" ".join(words[-k:]) + " " + raw, client, root)
+                if cand[1].is_file():
+                    raw, p = cand
+                    break
+        if p.is_file() or "/" in raw or "\\" in raw:
+            out.append((raw, p))
+    # 'work/x.md/.docx' names two siblings; the text links the first.
+    for i, (raw, p) in enumerate(list(out)):
+        m = re.fullmatch(r"(.+\.\w+)[\\/](\.\w+)", raw)
+        if m:
+            first = _found(m[1], client, root)
+            out[i] = first
+            out.append(("", first[1].with_suffix(m[2])))
+    # Splitting can leave a bare name that is not on disk: prose, as above.
+    return [(r, p) for r, p in out if p.is_file() or "/" in r or "\\" in r]
+
+
+def _strings(v: Any):
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, dict):
+        for x in v.values():
+            yield from _strings(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _strings(x)
+
+
+def task_files(conn: sqlite3.Connection, task_id: str, root: Path | None = None) -> list[dict[str, Any]]:
+    """Every file a task names, in its spec, result, parks and follow-ups,
+    plus its deliverables: [{raw, path, exists}], one per distinct file.
+
+    `raw` is the text as the task wrote it, so the page can link it in place;
+    `path` is where it resolved. This list is also the whole of what the
+    dashboard will open for that task."""
+    root = root or DOCS_ROOT
+    r = conn.execute("SELECT spec, result, assigned_to FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if r is None:
+        return []
+    texts = [*_strings(json.loads(r["spec"] or "null")), *_strings(json.loads(r["result"] or "null"))]
+    texts += [x["what"] for x in conn.execute("SELECT what FROM follow_ups WHERE task_id=?", (task_id,))]
+    texts += [s for p in parks(conn, task_id) for s in _strings(p)]
+    out: list[dict[str, Any]] = []
+    seen: dict[str, dict[str, Any]] = {}
+    for t in texts:
+        for raw, p in _paths_in(t, r["assigned_to"], root):
+            f = seen.get(str(p).lower())
+            if f is None:
+                f = seen[str(p).lower()] = {"raw": [], "path": str(p), "exists": p.is_file()}
+                out.append(f)
+            if raw and raw not in f["raw"]:
+                f["raw"].append(raw)
+    for d in deliverables(conn, days=3650, root=root)["files"]:
+        if d["task_id"] == task_id and d["path"].lower() not in seen:
+            out.append({"raw": [], "path": d["path"], "exists": d["exists"]})
+    return out
+
+
+def task_file(conn: sqlite3.Connection, task_id: str, path: str, root: Path | None = None) -> Path | None:
+    """The file the dashboard may open for a task: only one that the task
+    itself names and that is on disk. A path that merely arrives in a request
+    ('..\\..\\secret', another task's file) is never opened."""
+    for f in task_files(conn, task_id, root):
+        if f["path"] == path:
+            p = Path(path).resolve()
+            return p if p.is_file() else None
+    return None
+
+
+def task_detail(conn: sqlite3.Connection, task_id: str, root: Path | None = None) -> dict[str, Any] | None:
     """Everything the board holds on one task, for the operator's drill-down.
 
     Deliberately not an MCP tool: the master reads results by named field and
@@ -664,6 +773,7 @@ def task_detail(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None
     d["children"] = [dict(x) for x in conn.execute(
         "SELECT id, title, state, assigned_to FROM tasks WHERE parent_id=? ORDER BY created_at", (task_id,))]
     d["question"] = current_question(conn, task_id)
+    d["files"] = task_files(conn, task_id, root)
     return d
 
 

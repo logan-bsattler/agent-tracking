@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import subprocess
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -632,6 +634,17 @@ form.go textarea { width:100%; box-sizing:border-box; font:inherit; font-size:14
 form.go .btns { display:flex; gap:10px; align-items:center; margin-top:8px; }
 form.go button { font:inherit; font-size:14px; padding:6px 18px; border-radius:6px; cursor:pointer;
   background:var(--s1); border:1px solid var(--s1); color:#fff; font-weight:600; }
+a.file { color:var(--s1); text-decoration:none; border-bottom:1px solid transparent; cursor:pointer; }
+a.file:hover { border-bottom-color:var(--s1); }
+a.reveal { display:inline-block; margin-left:4px; color:var(--muted); cursor:pointer; vertical-align:-2px; }
+a.reveal:hover { color:var(--s1); } a.reveal svg { width:14px; height:14px; display:inline; }
+.file.gone { color:var(--muted); text-decoration:line-through; text-decoration-color:var(--axis); cursor:not-allowed; }
+ul.files { list-style:none; margin:0; padding:0; } ul.files li { padding:4px 0; overflow-wrap:anywhere; }
+ul.files .where { color:var(--muted); font-size:12px; }
+.card > h2 .count { color:var(--muted); font-weight:400; margin-left:6px; }
+.card > h2 .count { color:var(--muted); font-weight:400; margin-left:6px; }
+#opened { position:fixed; bottom:16px; right:16px; background:var(--ink); color:var(--page); padding:8px 12px;
+  border-radius:6px; font-size:13px; display:none; z-index:9; max-width:60ch; overflow-wrap:anywhere; }
 """
 
 
@@ -797,22 +810,80 @@ try {{ const k = "coord-open", o = new Set(JSON.parse(localStorage.getItem(k) ||
 </main></body></html>"""
 
 
-def _val(v: Any) -> str:
-    """Any JSON value as readable HTML: dicts as key/value, lists as bullets."""
+def _val(v: Any, text=esc) -> str:
+    """Any JSON value as readable HTML: dicts as key/value, lists as bullets.
+    `text` renders each string; task_page passes one that links file paths."""
     if isinstance(v, dict):
         if not v:
             return '<span class="muted">none</span>'
         return '<dl class="kv">' + "".join(
-            f"<dt>{esc(str(k).replace('_', ' '))}</dt><dd>{_val(x)}</dd>" for k, x in v.items()) + "</dl>"
+            f"<dt>{esc(str(k).replace('_', ' '))}</dt><dd>{_val(x, text)}</dd>" for k, x in v.items()) + "</dl>"
     if isinstance(v, list):
         if not v:
             return '<span class="muted">none</span>'
-        return '<ul class="vals">' + "".join(f"<li>{_val(x)}</li>" for x in v) + "</ul>"
+        return '<ul class="vals">' + "".join(f"<li>{_val(x, text)}</li>" for x in v) + "</ul>"
     if isinstance(v, bool):
         return "yes" if v else "no"
     if v is None:
         return '<span class="muted">—</span>'
-    return esc(v)
+    return text(v) if isinstance(v, str) else esc(v)
+
+
+FOLDER_SVG = ('<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.4" '
+              'stroke-linejoin="round" d="M1.5 4a1 1 0 0 1 1-1h3.6l1.5 1.6h5.9a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg>')
+
+
+def file_link(task_id: str, path: str, exists: bool, text: str | None = None) -> str:
+    """A file as Explorer would open it: the name opens it on this machine,
+    the folder icon shows it in its folder. The dashboard does the opening
+    (POST /api/open), since a browser will not follow file:// from http."""
+    text = esc(text if text is not None else path)
+    if not exists:
+        return f'<span class="file gone" title="Not on disk: {esc(path)}">{text}</span>'
+    attrs = f'href="#" data-task="{esc(task_id)}" data-path="{esc(path)}" data-name="{esc(Path(path).name)}"'
+    return (f'<a class="file" {attrs} data-how="open" title="Open {esc(path)}">{text}</a>'
+            f'<a class="reveal" {attrs} data-how="reveal" title="Show in folder">{FOLDER_SVG}</a>')
+
+
+def _linker(task_id: str, files: list[dict[str, Any]]):
+    """str -> HTML, with every path in the task's file list linked in place."""
+    by_raw = {r: f for f in files for r in f["raw"]}
+    if not by_raw:
+        return esc
+    pat = re.compile("|".join(re.escape(r) for r in sorted(by_raw, key=len, reverse=True)))
+
+    def link(s: Any) -> str:
+        s, out, at = str(s), [], 0
+        for m in pat.finditer(s):
+            f = by_raw[m.group()]
+            out += [esc(s[at:m.start()]), file_link(task_id, f["path"], f["exists"], m.group())]
+            at = m.end()
+        return "".join(out) + esc(s[at:])
+    return link
+
+
+# A click on a file link posts to /api/open; the outcome shows in a toast.
+FILE_JS = """<div id="opened"></div><script>
+(() => { const t = document.getElementById("opened"); let h;
+  const say = m => { t.textContent = m; t.style.display = "block"; clearTimeout(h);
+    h = setTimeout(() => t.style.display = "none", 3000); };
+  document.addEventListener("click", async e => {
+    const a = e.target.closest("a[data-how]"); if (!a) return; e.preventDefault();
+    const d = a.dataset;
+    try { const r = await fetch("/api/open", {method: "POST", headers: {Accept: "application/json"},
+        body: new URLSearchParams({task: d.task, path: d.path, how: d.how})});
+      const j = await r.json();
+      say(j.ok ? (d.how === "reveal" ? "Showing " : "Opening ") + d.name : (j.error || "Could not open " + d.name));
+    } catch (err) { say("Could not reach the dashboard"); } }); })();
+</script>"""
+
+
+def open_path(p: Path, how: str = "open") -> None:
+    """Open a file as a double-click in Explorer would, or select it there."""
+    if how == "reveal":
+        subprocess.Popen(f'explorer /select,"{p}"')
+    else:
+        os.startfile(str(p))  # type: ignore[attr-defined]  # Windows only, as is this dashboard
 
 
 def _shell(title: str, body: str) -> str:
@@ -841,9 +912,18 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
         meta["from intent"] = d["from_intent"]
     cards = ['<div class="card"><dl class="kv">' + "".join(
         f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in meta.items()) + "</dl></div>"]
+    files = d.get("files") or []
+    link = _linker(d["id"], files)
+    if files:
+        items = "".join(
+            f'<li>{file_link(d["id"], f["path"], f["exists"], Path(f["path"]).name)}'
+            f' <span class="where">{esc(str(Path(f["path"]).parent))}'
+            f'{"" if f["exists"] else " · not on disk"}</span></li>' for f in files)
+        cards.append(f'<div class="card"><h2>Files<span class="count">{len(files)}</span></h2>'
+                     f'<ul class="files">{items}</ul></div>')
     if d["result"] is not None:
         shown = {k: x for k, x in d["result"].items() if k != "follow_ups"}
-        cards.append(f'<div class="card"><h2>Result</h2>{_val(shown)}</div>')
+        cards.append(f'<div class="card"><h2>Result</h2>{_val(shown, link)}</div>')
     else:
         cards.append('<div class="card"><h2>Result</h2><p class="empty">Still open; nothing reported yet.</p></div>')
     if d.get("follow_ups"):
@@ -855,12 +935,12 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
                 how = f'dropped (decision <code>{esc(f["resolved_by"])}</code>)'
             else:
                 how = '<b class="st-failed">open</b>'
-            items.append(f'<li><b>{esc(f["who"])}</b>: {esc(f["what"])} <span class="muted">— </span>{how}</li>')
+            items.append(f'<li><b>{esc(f["who"])}</b>: {link(f["what"])} <span class="muted">— </span>{how}</li>')
         cards.append(f'<div class="card"><h2>Follow-ups</h2><ul class="vals">{"".join(items)}</ul></div>')
-    cards.append(f'<div class="card"><h2>What was asked</h2>{_val(d["spec"])}</div>')
+    cards.append(f'<div class="card"><h2>What was asked</h2>{_val(d["spec"], link)}</div>')
     for i, p in enumerate(d["parks"], 1):
         p = {k: v for k, v in p.items() if k not in ("park_id", "at")}
-        cards.append(f'<div class="card"><h2>Park {i} of {len(d["parks"])}</h2>{_val(p)}</div>')
+        cards.append(f'<div class="card"><h2>Park {i} of {len(d["parks"])}</h2>{_val(p, link)}</div>')
     if d["decisions"]:
         items = "".join(
             f'<li>{esc(x["statement"])}'
@@ -896,7 +976,7 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
                  f'<div class="btns">{btns}</div>'
                  f'<p class="muted">On <code>{esc(q["ref"])}</code>. A press sends master '
                  f'&quot;Answer on {esc(q["ref"])}: &lt;option&gt;&quot; when it is idle.</p></div>')
-    return _shell(f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', head + "".join(cards))
+    return _shell(f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', head + "".join(cards) + FILE_JS)
 
 
 def _size(n: int | None) -> str:
@@ -930,8 +1010,12 @@ def deliverables_page(v: dict[str, Any]) -> str:
     for c, g in sorted(groups.items(), key=lambda kv: -max(d["completed_at"] for d in kv[1])):
         trs = []
         for d in g:
-            name = (f'<a class="drill" href="/deliverables/file?{esc(urlencode({"task": d["task_id"], "path": d["path"]}))}">'
-                    f'{esc(d["name"])}</a>' if d["exists"] else f'{esc(d["name"])} <b class="st-failed">missing</b>')
+            name = file_link(d["task_id"], d["path"], d["exists"], d["name"])
+            if not d["exists"]:
+                name += ' <b class="st-failed">missing</b>'
+            elif Path(d["path"]).suffix.lower() in INLINE_TYPES:  # also readable right here
+                name += (f' <a class="drill muted" href="/deliverables/file?'
+                         f'{esc(urlencode({"task": d["task_id"], "path": d["path"]}))}">view</a>')
             owed = ("".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"]) if d["ben"] else "")
             hay = " ".join([d["name"], d["path"], d["title"], d["task_id"], c, *d["ben"]]).lower()
             trs.append(f'<tr class="dl{" owes" if d["ben"] else ""}" data-s="{esc(hay)}"><td>{name}<div class="muted">{esc(d["path"])}</div>{owed}</td>'
@@ -944,7 +1028,7 @@ def deliverables_page(v: dict[str, Any]) -> str:
                      f'{"".join(trs)}</table></div></div>')
     none = '<p class="empty" id="dl-none" hidden>Nothing matches.</p>'
     return _shell(f"Deliverables ({len(files)})",
-                  f'{nav}<h1>Deliverables</h1>{sub}{form}{none}{"".join(cards)}{DELIVERABLES_JS}')
+                  f'{nav}<h1>Deliverables</h1>{sub}{form}{none}{"".join(cards)}{DELIVERABLES_JS}{FILE_JS}')
 
 
 # Live filter: every word typed must appear in the row's file, path, task,
@@ -1269,6 +1353,20 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     back = back if re.fullmatch(r"/board(/task/[0-9a-f]{12})?", back) else "/board"
                     self.send_header("Location", back + "?queued=1")
                     self.end_headers()
+                    return
+                if path == "/api/open":  # a file link on a task or deliverables page
+                    tid, want = (form.get("task") or [""])[0], (form.get("path") or [""])[0]
+                    how = (form.get("how") or ["open"])[0]
+                    f = store.task_file(conn, tid, want) if how in ("open", "reveal") else None
+                    if f is None:
+                        self._json(404, {"ok": False, "error": "not a file on this task"})
+                        return
+                    try:
+                        open_path(f, how)
+                    except OSError as e:  # no app for the type, or it vanished since the check
+                        self._json(500, {"ok": False, "error": str(e)})
+                        return
+                    self._json(200, {"ok": True, "path": str(f), "how": how})
                     return
                 if path == "/api/prompts/take":
                     self._json(200, {"prompt": store.take_operator_prompt(conn)})

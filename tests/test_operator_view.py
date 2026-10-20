@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from coord_mcp import report, store
@@ -437,3 +439,117 @@ def test_deliverables_page_is_searchable(conn, tmp_path):
     assert 'id="dl-q"' in html and 'value="amex &quot;x"' in html
     row = next(l for l in html.split("<tr") if "Payments.csv" in l)
     assert "payments.csv" in row and "amex pull" in row and tid in row and "review it &amp; send" in row
+
+
+# ------------------------------------------------------------ opening files
+
+def _named(conn, client, spec_text, result=None):
+    tid = store.create_task(conn, "investigation", "t", {"q": spec_text}, assigned_to=client)["task_id"]
+    if result:
+        store.complete_task(conn, tid, result)
+    return tid
+
+
+def test_task_files_finds_paths_in_spec_result_and_follow_ups(conn, tmp_path):
+    (tmp_path / "MAG" / "work" / "Unapproved Docs").mkdir(parents=True)
+    for n in ("a.md", "b.csv", "Unapproved Docs/FDD x copy.docx"):
+        (tmp_path / "MAG" / "work" / n).write_text("x", encoding="utf-8")
+    absolute = tmp_path / "MAG" / "work" / "b.csv"
+    tid = _named(conn, "MAG", "update work/a.md, then see xmfagtcp.p", {
+        **INV, "evidence": [f"{absolute} (rows)", "work/Unapproved Docs/FDD x copy.docx"],
+        "follow_ups": [{"who": "Ben", "what": "send work/gone.xlsx to Joanne"}]})
+    files = {Path(f["path"]).name: f for f in store.task_files(conn, tid, root=tmp_path)}
+    assert set(files) == {"a.md", "b.csv", "FDD x copy.docx", "gone.xlsx"}  # not the bare program name
+    assert files["a.md"]["exists"] and files["a.md"]["raw"] == ["work/a.md"]
+    assert files["FDD x copy.docx"]["exists"]  # a name with spaces, found by growing left
+    assert not files["gone.xlsx"]["exists"]
+
+
+def test_task_page_links_files_in_place(conn, tmp_path):
+    (tmp_path / "LNK").mkdir()
+    (tmp_path / "LNK" / "x.md").write_text("x", encoding="utf-8")
+    tid = _named(conn, "LNK", "read x.md and work/old.csv")
+    d = store.task_detail(conn, tid, root=tmp_path)
+    html = report.task_page(d, tid)
+    good = str(tmp_path / "LNK" / "x.md")
+    assert f'data-path="{good}" data-name="x.md" data-how="open"' in html
+    assert 'data-how="reveal"' in html and "/api/open" in html
+    assert '<span class="file gone"' in html and ">work/old.csv</span>" in html  # greyed, not a link
+    assert 'data-path="' + str(tmp_path / "LNK" / "work" / "old.csv") not in html
+
+
+def test_task_file_guard(conn, tmp_path):
+    (tmp_path / "LNK" / "work").mkdir(parents=True)
+    ok = tmp_path / "LNK" / "work" / "ok.md"
+    ok.write_text("x", encoding="utf-8")
+    (tmp_path / "secret.md").write_text("x", encoding="utf-8")
+    tid = _named(conn, "LNK", "see work/ok.md and work/gone.md")
+    other = _named(conn, "LNK", "see secret.md")  # resolves to root/secret.md via the docs root
+    assert store.task_file(conn, tid, str(ok), root=tmp_path) == ok.resolve()
+    assert store.task_file(conn, tid, str(tmp_path / "LNK" / "work" / "gone.md"), root=tmp_path) is None  # missing
+    secret = next(f["path"] for f in store.task_files(conn, other, root=tmp_path))
+    assert store.task_file(conn, tid, secret, root=tmp_path) is None  # another task's file
+    assert store.task_file(conn, tid, str(tmp_path / "LNK" / "work" / ".." / ".." / "secret.md"), root=tmp_path) is None
+    assert store.task_file(conn, "nope", str(ok), root=tmp_path) is None
+
+
+def test_open_endpoint_opens_only_the_tasks_files(tmp_path, monkeypatch):
+    import functools
+    import json
+    import socket
+    import threading
+    import time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    from coord_mcp import usage
+    from coord_mcp.db import connect as db_connect
+
+    monkeypatch.setattr(usage, "ingest", lambda conn: None)
+    monkeypatch.setattr(store, "DOCS_ROOT", tmp_path)
+    opened = []
+    monkeypatch.setattr(report.os, "startfile", lambda p: opened.append(("open", p)), raising=False)
+    monkeypatch.setattr(report.subprocess, "Popen", lambda cmd: opened.append(("reveal", cmd)))
+    (tmp_path / "LNK").mkdir()
+    ok = tmp_path / "LNK" / "ok.md"
+    ok.write_text("x", encoding="utf-8")
+    (tmp_path / "other.md").write_text("x", encoding="utf-8")
+    make = functools.partial(db_connect, tmp_path / "srv.db")
+    c = make()
+    tid = _named(c, "LNK", "see ok.md and gone/x.md")
+    c.close()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    threading.Thread(target=report.serve, args=(make, port), daemon=True).start()
+    for _ in range(50):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+
+    def post(path, how="open", task=tid, headers=None):
+        body = urllib.parse.urlencode({"task": task, "path": path, "how": how}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/open", data=body, headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, None
+
+    assert post(str(ok))[0] == 200
+    assert post(str(ok), how="reveal")[0] == 200
+    assert opened == [("open", str(ok.resolve())), ("reveal", f'explorer /select,"{ok.resolve()}"')]
+    for refused in (str(tmp_path / "other.md"),                      # not on the task
+                    str(tmp_path / "LNK" / "gone" / "x.md"),         # on the task, not on disk
+                    str(tmp_path / "LNK" / ".." / "other.md"),       # traversal
+                    r"C:\Windows\System32\cmd.exe"):
+        assert post(refused)[0] == 404, refused
+    assert post(str(ok), how="run")[0] == 404
+    assert post(str(ok), task="0" * 12)[0] == 404
+    assert post(str(ok), headers={"Origin": "http://evil.example"})[0] == 403
+    assert len(opened) == 2
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/board/task/{tid}", timeout=10) as r:
+        assert b'data-how="reveal"' in r.read()
