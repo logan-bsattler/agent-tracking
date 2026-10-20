@@ -1031,13 +1031,15 @@ def deliverables_page(v: dict[str, Any]) -> str:
                          f'{esc(urlencode({"task": d["task_id"], "path": d["path"]}))}">view</a>')
             owed = ("".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"]) if d["ben"] else "")
             hay = " ".join([d["name"], d["path"], d["title"], d["task_id"], c, *d["ben"]]).lower()
-            trs.append(f'<tr class="dl{" owes" if d["ben"] else ""}" data-s="{esc(hay)}"><td>{name}<div class="muted">{esc(d["path"])}</div>{owed}</td>'
-                       f'<td><a class="drill" href="/board/task/{esc(d["task_id"])}">{esc(d["title"])}</a></td>'
+            task = (f'<div class="muted">from task <a class="drill" href="/board/task/{esc(d["task_id"])}">'
+                    f'{esc(d["title"])}</a> <code>{esc(d["task_id"])}</code></div>')
+            trs.append(f'<tr class="dl{" owes" if d["ben"] else ""}" data-s="{esc(hay)}"><td>{name}'
+                       f'<div class="muted" style="overflow-wrap:anywhere">{esc(d["path"])}</div>{task}{owed}</td>'
                        f'<td class="n">{_size(d["size"])}</td><td class="n">{_age(d["completed_at"], t)}</td></tr>')
         owe = sum(1 for d in g if d["ben"])
         badge = f' <span class="count owed">{owe} owed</span>' if owe else ""
         cards.append(f'<div class="card dlc"><h2>{esc(c)}<span class="count">{len(g)}</span>{badge}</h2><div class="wrap"><table>'
-                     f'<tr><th>File</th><th>Task</th><th class="n">Size</th><th class="n">Done</th></tr>'
+                     f'<tr><th>File</th><th class="n">Size</th><th class="n">Done</th></tr>'
                      f'{"".join(trs)}</table></div></div>')
     none = '<p class="empty" id="dl-none" hidden>Nothing matches.</p>'
     return _shell(f"Deliverables ({len(files)})",
