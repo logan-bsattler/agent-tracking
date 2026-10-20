@@ -573,7 +573,7 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude usage</title>
 <style>{CSS}</style></head><body><main>
-<nav><b>Usage</b> · <a href="/board">Board</a> · <a href="/hours">Hours</a> · <a href="/deliverables">Deliverables</a></nav>
+<nav><b>Usage</b> · <a href="/board">Board</a> · <a href="/hours">Hours</a> · <a href="/deliverables">Deliverables</a> · <a href="/intents">Intents</a></nav>
 <h1>Claude usage</h1>
 <p class="sub">{esc(period)} · generated {when(s['generated'])}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · spend is API-equivalent, the same figure as <code>/cost</code></p>
 {kpis(s)}
@@ -804,7 +804,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{'(' + str(n) + ') ' if n else ''}Coord board</title>
 <style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}</style></head><body><main>
-<nav><a href="/">Usage</a> · <b>Board</b> · <a href="/hours">Hours</a> · <a href="/deliverables">Deliverables</a></nav>
+<nav><a href="/">Usage</a> · <b>Board</b> · <a href="/hours">Hours</a> · <a href="/deliverables">Deliverables</a> · <a href="/intents">Intents</a></nav>
 <h1>Coord board</h1>
 <p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
 {_actions(v)}
@@ -914,7 +914,7 @@ def _shell(title: str, body: str) -> str:
 def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False) -> str:
     """One task in full: what was asked, what came back, and how it got there."""
     nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Task</b> · '
-           '<a href="/deliverables">Deliverables</a></nav>')
+           '<a href="/deliverables">Deliverables</a> · <a href="/intents">Intents</a></nav>')
     if d is None:
         return _shell("Coord task", f'{nav}<h1>No such task</h1>'
                       f'<p class="sub">Nothing on the board has id <code>{esc(task_id)}</code>.</p>')
@@ -1002,7 +1002,7 @@ def deliverables_page(v: dict[str, Any]) -> str:
     """Files finished tasks produced, by client, each beside what Ben owes on it."""
     from urllib.parse import urlencode
     nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <a href="/hours">Hours</a> · '
-           '<b>Deliverables</b></nav>')
+           '<b>Deliverables</b> · <a href="/intents">Intents</a></nav>')
     t, files = v["as_of"], v["files"]
     form = (f'<form class="card" method="get" action="/deliverables">'
             f'<label>Last <input type="number" name="days" min="1" max="365" value="{v["days"]}" size="4"> days</label> '
@@ -1043,6 +1043,83 @@ def deliverables_page(v: dict[str, Any]) -> str:
     return _shell(f"Deliverables ({len(files)})",
                   f'{nav}<h1>Deliverables</h1>{sub}{form}{none}{"".join(cards)}{DELIVERABLES_JS}{FILE_JS}')
 
+
+
+def intents_page(v: dict[str, Any]) -> str:
+    """Every email the hourly triage reviewed, what it did with it, and what Ben owes."""
+    nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <a href="/hours">Hours</a> · '
+           '<a href="/deliverables">Deliverables</a> · <b>Intents</b></nav>')
+    t, rows = v["as_of"], v["emails"]
+    form = (f'<form class="card" method="get" action="/intents">'
+            f'<label>Last <input type="number" name="days" min="1" max="90" value="{v["days"]}" size="4"> days</label> '
+            f'<label>client <input name="client" value="{esc(v["client"] or "")}" placeholder="all" size="10"></label> '
+            f'<button>Show</button> · <label><input type="checkbox" id="in-owed"{" checked" if v.get("owed") else ""}> '
+            f'only what I owe</label> · <label>search <input type="search" id="in-q" value="{esc(v.get("q") or "")}" '
+            f'placeholder="sender, client, subject…" size="24" autocomplete="off"></label> '
+            f'<span class="muted" id="in-n"></span></form>')
+    owed = sum(1 for d in rows if d["owed"])
+    tasked = sum(1 for d in rows if d["action"] == "converted")
+    sub = (f'<p class="sub">{len(rows)} emails reviewed · {tasked} turned into tasks · '
+           f'{sum(1 for d in rows if d["action"] == "dismissed")} dismissed · '
+           f'{sum(1 for d in rows if d["action"] == "noted")} noted only · '
+           f'<b>{owed} with a follow-up for you</b>. Follow-up is an open loose end addressed to you on the '
+           f'email\'s tasks, or a reply the triage flagged as yours; the page cannot see whether you have '
+           f'since replied.</p>')
+    if not rows:
+        return _shell("Intents", f'{nav}<h1>Intents</h1>{sub}{form}<p class="empty">No emails in this range.</p>')
+    trs = []
+    for d in rows:
+        if d["action"] == "converted":
+            act = "Tasked → " + ", ".join(
+                f'<a class="drill" href="/board/task/{esc(k["id"])}">{esc(k["title"])}</a> '
+                f'<span class="state st-{esc(k["state"])}">{esc(k["state"])}</span>' for k in d["tasks"])
+        elif d["action"] == "dismissed":
+            act = f'Dismissed<div class="muted">{esc((d["note"] or "")[:300])}</div>'
+        elif d["action"] == "intent":
+            act = f'Intent <code>{esc(d["intent_id"])}</code>'
+        else:
+            act = '<span class="muted">Noted, no task</span>'
+        fu = "".join(f'<div class="note">{esc(w[:240])}</div>' for w in d["owed"]) or '<span class="muted">—</span>'
+        hay = " ".join([d["sender"], d["client"], d["summary"], d["note"] or "", *d["owed"],
+                        *(k["title"] for k in d["tasks"])]).lower()
+        trs.append(f'<tr class="em{" owes" if d["owed"] else ""}" data-s="{esc(hay)}">'
+                   f'<td class="n">{esc(d["received"] or "")}<div class="muted">{_age(d["at"], t)}</div></td>'
+                   f'<td>{esc(d["sender"])}<div class="muted">{esc(d["client"])}</div></td>'
+                   f'<td>{esc(d["summary"])}</td><td>{act}</td><td>{fu}</td></tr>')
+    badge = f' <span class="count owed">{owed} owed</span>' if owed else ""
+    table = (f'<div class="card"><h2>Emails<span class="count" id="in-c">{len(rows)}</span>'
+             f'{badge}</h2><div class="wrap"><table>'
+             f'<tr><th class="n">Received</th><th>From</th><th>What</th><th>Action</th><th>Follow-up for you</th></tr>'
+             f'{"".join(trs)}</table></div></div>')
+    skipped = ""
+    if v["skipped"]:
+        n = sum(s["n"] for s in v["skipped"])
+        items = "".join(f'<li><span class="muted">{esc(s["day"])} {esc(s["run"])}</span> · {s["n"]} · '
+                        f'{esc(s["what"][:300])}</li>' for s in v["skipped"])
+        skipped = (f'<details class="card"><summary><b>Skipped as automated</b> '
+                   f'<span class="count">{n}</span></summary><ul>{items}</ul></details>')
+    none = '<p class="empty" id="in-none" hidden>Nothing matches.</p>'
+    return _shell(f"Intents ({owed} owed)", f'{nav}<h1>Intents</h1>{sub}{form}{none}{table}{skipped}{INTENTS_JS}')
+
+
+# Live filter, as on Deliverables, plus the "only what I owe" toggle.
+INTENTS_JS = """<script>
+(() => { const q = document.getElementById("in-q"), o = document.getElementById("in-owed"),
+    n = document.getElementById("in-n"), c = document.getElementById("in-c"),
+    none = document.getElementById("in-none"), rows = [...document.querySelectorAll("tr.em")];
+  if (!q) return;
+  const run = () => {
+    const words = q.value.toLowerCase().split(/\\s+/).filter(Boolean);
+    let shown = 0;
+    rows.forEach(r => { const hit = (!o.checked || r.classList.contains("owes")) &&
+      words.every(w => r.dataset.s.includes(w)); r.hidden = !hit; shown += hit; });
+    if (c) c.textContent = shown;
+    n.textContent = shown === rows.length ? "" : shown + " of " + rows.length;
+    none.hidden = shown > 0;
+  };
+  q.addEventListener("input", run); o.addEventListener("change", run); run();
+})();
+</script>"""
 
 # Live filter: every word typed must appear in the row's file, path, task,
 # client or what Ben owes. Kept in ?q= so a filtered view can be bookmarked.
@@ -1102,7 +1179,7 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
     from datetime import date, timedelta
     from urllib.parse import urlencode
     nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Hours</b> · '
-           '<a href="/deliverables">Deliverables</a></nav>')
+           '<a href="/deliverables">Deliverables</a> · <a href="/intents">Intents</a></nav>')
     qs = urlencode({k: v for k, v in (("start", start), ("end", end), ("client", client)) if v})
     # Every day in range, empty ones too, so a gap reads as a gap. Stops at
     # today: the rest of the billing period has nothing to show yet.
@@ -1416,6 +1493,12 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v = store.deliverables(conn, days=max(1, min(window, 365)), client=client)
                 v["q"] = (self._query.get("q") or [""])[0].strip()
                 return deliverables_page(v).encode("utf-8")
+            if path == "/intents":
+                window = int((self._query.get("days") or ["7"])[0] or 7)
+                client = (self._query.get("client") or [""])[0].strip() or None
+                v = store.triage_emails(conn, days=max(1, min(window, 90)), client=client)
+                v["owed"] = "owed" in self._query
+                return intents_page(v).encode("utf-8")
             if path == "/deliverables/file":
                 f = store.deliverable_path(conn, (self._query.get("task") or [""])[0],
                                            (self._query.get("path") or [""])[0])

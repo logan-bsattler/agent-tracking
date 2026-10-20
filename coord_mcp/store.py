@@ -1008,3 +1008,101 @@ def close_question(conn: sqlite3.Connection, question_id: Any) -> bool:
         return False
     return conn.execute("UPDATE questions SET closed_at=? WHERE id=? AND closed_at IS NULL",
                         (now(), qid)).rowcount == 1
+
+
+# The hourly-triage routine's per-run log: one markdown file a day, one
+# "- email ..." line per message it read and did not turn into an intent.
+TRIAGE_LOG = Path(__file__).resolve().parents[2] / "hourly" / "log"
+_LOG_EMAIL = re.compile(
+    r"^- email (?:(?P<date>\d{4}-\d{2}-\d{2}) )?(?P<time>\d{1,2}:\d{2})Z? (?P<sender>.+?) — (?P<client>.+?) — (?P<rest>.+)$")
+_LOG_SKIPPED = re.compile(r"^- skipped(?: automated)?:\s*(?:automated\s*)?(?P<n>\d+)\s*(?P<what>.*)$")
+_REPLY_OWED = re.compile(r"\bREPLY:|reply is Ben's|Ben to reply|Ben-only reply|reply owed", re.I)
+
+
+def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None = None,
+                  client: str | None = None) -> dict[str, Any]:
+    """Every email the triage routine reviewed, what it did, and what Ben owes.
+
+    Two sources, one list: email intents on the board (turned into tasks or
+    dismissed with a note), and the triage log's lines for mail it read and
+    only noted. Follow-up is what Ben owes: an open loose end addressed to him
+    on the intent's tasks or their children, or a reply the triage flagged.
+    """
+    import datetime as dt
+    log_dir = log_dir or TRIAGE_LOG
+    t = now()
+    cutoff = t - days * 86400
+    out: list[dict[str, Any]] = []
+
+    ben: dict[str, list[str]] = {}
+    for f in conn.execute("SELECT task_id, what FROM follow_ups WHERE state='open' AND lower(trim(who))='ben' ORDER BY idx"):
+        ben.setdefault(f["task_id"], []).append(f["what"])
+    intent_ids: set[str] = set()
+    for r in conn.execute("""SELECT id, summary, context, state, created_at, task_ids, note FROM intents
+                             WHERE source='email' AND created_at >= ? ORDER BY created_at DESC""", (cutoff,)):
+        intent_ids.add(r["id"])
+        ctx = r["context"] or ""
+        m = re.search(r"\bfrom ([^;(]+)", ctx)
+        recv = re.search(r"received (\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}Z?)", ctx)
+        head, _, rest = r["summary"].partition(":")
+        tids = json.loads(r["task_ids"] or "[]")
+        tasks = []
+        owed: list[str] = []
+        for tid in tids:
+            row = conn.execute("SELECT id, title, state, assigned_to FROM tasks WHERE id=?", (tid,)).fetchone()
+            if row is None:
+                continue
+            tasks.append({"id": row["id"], "title": row["title"], "state": row["state"]})
+            fam = [tid] + [c["id"] for c in conn.execute("SELECT id FROM tasks WHERE parent_id=?", (tid,))]
+            owed += [w for x in fam for w in ben.get(x, [])]
+        if _REPLY_OWED.search(ctx) or _REPLY_OWED.search(r["note"] or ""):
+            owed.insert(0, "Reply to the sender (triage flagged it as yours).")
+        out.append({
+            "at": r["created_at"], "received": recv.group(1) if recv else None,
+            "sender": m.group(1).strip() if m else "", "client": head.strip() if rest else "",
+            "summary": rest.strip() or r["summary"], "action": r["state"], "intent_id": r["id"],
+            "tasks": tasks, "note": r["note"], "owed": owed,
+        })
+
+    skipped: list[dict[str, Any]] = []
+    if log_dir.is_dir():
+        first = dt.date.fromtimestamp(cutoff)
+        for f in sorted(log_dir.glob("*.md")):
+            try:
+                day = dt.date.fromisoformat(f.stem)
+            except ValueError:
+                continue
+            if day < first:
+                continue
+            run = "00:00"
+            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("## "):
+                    hm = re.search(r"\d{1,2}:\d{2}", line)
+                    run = hm.group(0) if hm else run
+                    continue
+                if (s := _LOG_SKIPPED.match(line)) and int(s.group("n")):
+                    skipped.append({"day": f.stem, "run": run, "n": int(s.group("n")),
+                                    "what": s.group("what").strip(" .;:")})
+                    continue
+                e = _LOG_EMAIL.match(line)
+                if not e:
+                    continue
+                rest = e.group("rest")
+                ref = re.search(r"\bintent ([0-9a-f]{12})\b", rest)
+                if ref and ref.group(1) in intent_ids:
+                    continue  # the intent row already shows this email
+                hh, mm = run.split(":")
+                at = int(dt.datetime(day.year, day.month, day.day, int(hh), int(mm)).timestamp())
+                desc = re.sub(r"^REPLY:\s*", "", rest)
+                out.append({
+                    "at": at, "received": f'{e.group("date") or f.stem} {e.group("time")}',
+                    "sender": e.group("sender"), "client": e.group("client"), "summary": desc,
+                    "action": "intent" if ref else "noted", "intent_id": ref.group(1) if ref else None,
+                    "tasks": [], "note": None,
+                    "owed": ["Reply to the sender (triage flagged it as yours)."] if _REPLY_OWED.search(rest) else [],
+                })
+    if client:
+        k = client.lower()
+        out = [d for d in out if k in d["client"].lower()]
+    out.sort(key=lambda d: -d["at"])
+    return {"as_of": t, "days": days, "client": client, "emails": out, "skipped": skipped[::-1]}

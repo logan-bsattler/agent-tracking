@@ -571,3 +571,38 @@ def test_next_up_leads_with_masters_presented_question(conn):
     assert 'name="back" value="/board"' in nxt
     assert "Pick batch-only vs streamline" not in nxt  # not repeated behind itself
     assert "Older thing master did not pick" in nxt
+
+
+def test_intents_page_lists_reviewed_email_action_and_what_ben_owes(conn, tmp_path):
+    tid = _task(conn, "MAG", "explain xxfmcdsupl.p")
+    tasked = store.propose_intent(conn, "MAG: client asks what xxfmcdsupl.p does", "email",
+                                  context="msg X; from Esther V (Mark Anthony); received 2026-10-20 19:05Z",
+                                  origin="team", trust="trusted")["intent_id"]
+    store.resolve_intent(conn, tasked, task_ids=[tid])
+    conn.execute("INSERT INTO follow_ups(id, task_id, idx, who, what, state, created_at) "
+                 "VALUES ('f1', ?, 0, 'Ben', 'Paste the paragraph into your reply', 'open', ?)", (tid, now()))
+    gone = store.propose_intent(conn, "Cascade: quote V4", "email", origin="team", trust="trusted")["intent_id"]
+    store.resolve_intent(conn, gone, note="Duplicate of loose end abc")
+    log = tmp_path / "log"
+    log.mkdir()
+    import datetime as dt
+    (log / f"{dt.date.today().isoformat()}.md").write_text(
+        "## 08:09 run\n"
+        "- email 2026-10-20 13:01Z Creed Hensley (Logan) — LNK — REPLY: asks how to get components promoted\n"
+        "- email 12:34 Joe Setty (Logan) — MAG — FYI, no ask of Ben\n"
+        f"- email 12:00 Esther V — MAG — dup line — intent {tasked}\n"
+        "- skipped: automated 2 (QAD office hours; QSM update)\n", encoding="utf-8")
+    v = store.triage_emails(conn, log_dir=log)
+    by = {d["sender"] or d["summary"]: d for d in v["emails"]}
+    assert len(v["emails"]) == 4  # the log line naming a known intent is folded into it
+    esther = by["Esther V"]
+    assert esther["action"] == "converted" and esther["tasks"][0]["id"] == tid
+    assert esther["owed"] == ["Paste the paragraph into your reply"]
+    assert by["quote V4"]["action"] == "dismissed"
+    assert by["Creed Hensley (Logan)"]["owed"] and not by["Joe Setty (Logan)"]["owed"]
+    assert v["skipped"][0]["n"] == 2
+    v["owed"] = False
+    html = report.intents_page(v)
+    assert f"/board/task/{tid}" in html and "Dismissed" in html and "Noted, no task" in html
+    assert "2 with a follow-up for you" in html and "Skipped as automated" in html
+    assert len(store.triage_emails(conn, log_dir=log, client="LNK")["emails"]) == 1
