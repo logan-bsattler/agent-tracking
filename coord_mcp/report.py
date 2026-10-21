@@ -8,6 +8,7 @@ day it burns, then which projects and sessions did the spending.
 from __future__ import annotations
 
 import html
+from urllib.parse import quote
 import json
 import os
 import re
@@ -653,21 +654,6 @@ def _age(ts: int, t: int) -> str:
     return f"{m}m ago" if m < 60 else f"{m // 60}h ago" if m < 48 * 60 else f"{m // 1440}d ago"
 
 
-def _items(rows: list[dict[str, Any]], t: int, empty: str, client: bool = True) -> str:
-    if not rows:
-        return f'<p class="empty">{esc(empty)}</p>'
-    out = []
-    for d in rows:
-        tid = f" <code>{esc(d['id'][:8])}</code>" if d["id"] else ""
-        title = (f'<a class="drill" href="/board/task/{esc(d["id"])}">{esc(d["title"])}</a>' if d["id"]
-                 else esc(d["title"]))
-        note = f'<div class="note">{esc(d["note"][:220])}</div>' if d.get("note") else ""
-        who = f'<div class="client">{esc(d["client"])}</div>' if client else ""
-        out.append(f'<div class="item{"" if client else " bare"}">{who}'
-                   f'<div>{title}{tid}</div><div class="age">{_age(d["since"], t)}</div>{note}</div>')
-    return "".join(out)
-
-
 def _by_client(rows: list[dict[str, Any]], t: int, scope: str = "") -> str:
     """One collapsible line per client, so a busy Needs-you reads as a short
     list of names with counts and opens only where you drill in. The client is
@@ -759,31 +745,182 @@ def _button(action: str, label: str, task: str = "", primary: bool = False) -> s
             f'value="{esc(action)}">{hidden}<button{" class=primary" if primary else ""}>{esc(label)}</button></form>')
 
 
-def _actions(v: dict[str, Any]) -> str:
-    """Buttons that queue a prompt for the master (the master-console mod
-    submits it once the master is idle). One click, no typing."""
+# ---- command-center board -------------------------------------------------
+
+AGE_BUCKETS = ((86400, "fresh"), (3 * 86400, "day"), (7 * 86400, "week"))
+EVENT_WORDS = {"picked_up": "picked up", "parked": "parked", "completed": "done", "failed": "failed"}
+
+
+def _age_bucket(since: int, t: int) -> str:
+    gap = max(t - since, 0)
+    for limit, name in AGE_BUCKETS:
+        if gap <= limit:
+            return name
+    return "old"
+
+
+def _items(rows: list[dict[str, Any]], t: int, empty: str, client: bool = True, verb: str = "") -> str:
+    """One row per item. `verb` ("running", "waiting") prefixes the age."""
+    if not rows:
+        return f'<p class="empty">{esc(empty)}</p>'
+    out = []
+    for d in rows:
+        tid = f" <code>{esc(d['id'][:8])}</code>" if d["id"] else ""
+        title = (f'<a class="drill" href="/board/task/{esc(d["id"])}">{esc(d["title"])}</a>' if d["id"]
+                 else esc(d["title"]))
+        note = f'<div class="note">{esc(d["note"][:220])}</div>' if d.get("note") else ""
+        who = f'<div class="client">{esc(d["client"])}</div>' if client else ""
+        age = (verb + " " if verb else "") + _age(d["since"], t)
+        out.append(f'<div class="item{"" if client else " bare"}" data-since="{int(d["since"])}" '
+                   f'data-age="{_age_bucket(d["since"], t)}">{who}'
+                   f'<div>{title}{tid}</div><div class="age">{esc(age)}</div>{note}</div>')
+    return "".join(out)
+
+
+def _kpis(v: dict[str, Any], n_needs: int, n_done: int) -> str:
+    """Six numbers across the top, each a link to the lane it counts."""
+    parked = [d for d in v["master_owes"] if d.get("parked")]
+    failed = [d for d in v["needs_you"] if d.get("failed")]
+    tiles = (
+        ("#flight", "Running", len(v["running"]), "k-run", "agents working now"),
+        ("#flight", "Waiting", len(v["waiting"]), "k-wait", "created, not picked up"),
+        ("#flight", "Parked", len(parked), "k-park", "owed a re-dispatch"),
+        ("#needs", "Failed", len(failed), "k-fail", "needs a fix or a ruling"),
+        ("#needs", "Waiting on you", n_needs, "k-you", "last 7 days"),
+        ("#done", "Done today", n_done, "k-done", "last 24h"),
+    )
+    return '<div class="kpis">' + "".join(
+        f'<a class="kpi {cls}{" zero" if not n else ""}" href="{href}"><span class="n">{n}</span>'
+        f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></a>'
+        for href, label, n, cls, hint in tiles) + "</div>"
+
+
+def _fleet(rows: list[dict[str, Any]], t: int, selected: str | None) -> str:
+    """One tile per client: a status light, what it is on, and what it owes.
+    A click narrows the page to that client; a second click widens it again."""
+    if not rows:
+        return ""
+    tiles = []
+    for r in rows:
+        bits = []
+        if r["running"]:
+            bits.append(f'<b class="c-run">{r["running"]} running</b>')
+        if r["parked"]:
+            bits.append(f'<b class="c-park">{r["parked"]} parked</b>')
+        if r["waiting"]:
+            bits.append(f'<span class="c-wait">{r["waiting"]} waiting</span>')
+        if r["failed"]:
+            bits.append(f'<b class="c-fail">{r["failed"]} failed</b>')
+        if r["needs"]:
+            bits.append(f'<span class="c-you">{r["needs"]} for you</span>')
+        if r["done"]:
+            bits.append(f'<span class="c-done">{r["done"]} done</span>')
+        last = f'last activity {_age(r["last"], t)}' if r["last"] else "no activity yet"
+        task = f'<div class="doing">{esc(r["task"][:70])}</div>' if r["task"] else ""
+        href = "/board" if selected == r["client"] else f'/board?client={quote(r["client"])}'
+        tiles.append(
+            f'<a class="fleet-tile st-{r["state"]}{" selected" if selected == r["client"] else ""}" href="{href}">'
+            f'<div class="head"><i class="light"></i><span class="name">{esc(r["client"])}</span>'
+            f'<span class="state-word">{esc(r["state"])}</span></div>{task}'
+            f'<div class="bits">{" · ".join(bits) if bits else "<span class=muted>quiet</span>"}</div>'
+            f'<div class="last">{esc(last)}</div></a>')
+    return f'<div class="fleet">{"".join(tiles)}</div>'
+
+
+def _in_flight(v: dict[str, Any], t: int) -> str:
+    """Running, not picked up, and parked (with its Re-dispatch button)."""
     parked = v.get("parked", [])
-    rows = "".join(
-        f'<li>{_button("redispatch", "Re-dispatch", d["id"])} <b>{esc(d["client"])}</b> '
-        f'<a class="drill" href="/board/task/{esc(d["id"])}">{esc(d["title"])}</a> '
-        f'<span class="age">parked {d["parks"]}x · {_age(d["parked_at"], v["as_of"])}</span></li>'
+    parked_rows = "".join(
+        f'<div class="item parked-row" data-since="{d["parked_at"]}" data-age="{_age_bucket(d["parked_at"], t)}">'
+        f'<div class="client">{esc(d["client"])}</div>'
+        f'<div><a class="drill" href="/board/task/{esc(d["id"])}">{esc(d["title"])}</a> '
+        f'<code>{esc(d["id"][:8])}</code></div>'
+        f'<div class="age">parked {d["parks"]}x · {_age(d["parked_at"], t)}</div>'
+        f'<div class="note">{_button("redispatch", "Re-dispatch", d["id"], primary=True)}</div></div>'
         for d in parked)
-    queued = v.get("queued", 0)
-    note = (f'<span class="age">{queued} queued for master</span>' if queued
-            else '<span class="age">sent to master when it is idle</span>')
-    return (f'<div class="card actions"><h2>Ask master</h2><div class="btns">'
-            f'{_button("next", "Next question", primary=True)}{_button("board", "Board check")}{note}</div>'
-            + (f'<ul class="parked">{rows}</ul>' if rows else "") + "</div>")
+    return (f'<div class="card lane" id="flight"><h2>In flight<span class="count">'
+            f'{len(v["running"]) + len(v["waiting"]) + len(parked)}</span></h2>'
+            f'<h3 class="type">Running<span class="count">{len(v["running"])}</span></h3>'
+            f'{_items(v["running"], t, "Nothing picked up and in progress.", verb="running")}'
+            f'<h3 class="type">Not picked up<span class="count">{len(v["waiting"])}</span></h3>'
+            f'{_items(v["waiting"], t, "Every open task has been picked up.", verb="waiting")}'
+            f'<h3 class="type">Parked<span class="count">{len(parked)}</span></h3>'
+            f'{parked_rows or "<p class=empty>No parked tasks.</p>"}</div>')
 
 
-def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
-    """Operator view of the coord board: what needs you first, then the rest."""
+def _day_label(day, today) -> str:
+    gap = (today - day).days
+    return "Today" if gap == 0 else "Yesterday" if gap == 1 else day.strftime("%a %b %d")
+
+
+def _done(rows: list[dict[str, Any]], t: int) -> str:
+    """Finished tasks grouped by day, newest first, each with its one-line gist."""
+    if not rows:
+        return '<p class="empty">Nothing finished recently.</p>'
+    today = datetime.fromtimestamp(t).date()
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for d in sorted(rows, key=lambda d: -d["since"]):
+        groups.setdefault(_day_label(datetime.fromtimestamp(d["since"]).date(), today), []).append(d)
+    return "".join(f'<h3 class="type">{esc(k)}<span class="count">{len(g)}</span></h3>{_items(g, t, "")}'
+                   for k, g in groups.items())
+
+
+def _timeline(events: list[dict[str, Any]], t: int, hours: int, cap: int = 80) -> str:
+    """Every board event of the last day as one line: when, what, which task."""
+    if not events:
+        return f'<p class="empty">No agent activity in the last {hours}h.</p>'
+    shown, more = events[:cap], max(len(events) - cap, 0)
+    today = datetime.fromtimestamp(t).date()
+    out, day_shown = [], None
+    for e in shown:
+        at = datetime.fromtimestamp(e["ts"])
+        if at.date() != day_shown:
+            day_shown = at.date()
+            out.append(f'<div class="tl-day">{esc(_day_label(day_shown, today))}</div>')
+        note = f' <span class="tl-note">{esc(e["note"][:140])}</span>' if e.get("note") else ""
+        out.append(f'<div class="tl ev-{esc(e["event"])}" data-since="{e["ts"]}"><span class="tl-time">{at.strftime("%H:%M")}</span>'
+                   f'<i class="tl-dot"></i><span class="tl-word">{esc(EVENT_WORDS.get(e["event"], e["event"]))}</span>'
+                   f'<b class="tl-client">{esc(e["client"])}</b>'
+                   f'<span class="tl-what"><a class="drill" href="/board/task/{esc(e["id"])}">{esc(e["title"])}</a>{note}</span></div>')
+    if more:
+        out.append(f'<p class="muted">and {more} earlier events</p>')
+    return f'<div class="timeline">{"".join(out)}</div>'
+
+
+# "new" marks what arrived since Ben last pressed Mark seen. The timestamp
+# lives in localStorage, so the 30-second refresh does not wipe it.
+SEEN_JS = """<script>
+try { const key = "coord-seen", seen = Number(localStorage.getItem(key) || 0); let n = 0;
+  const hhmm = s => new Date(s * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  document.querySelectorAll("[data-since]").forEach(el => {
+    if (seen && Number(el.dataset.since) > seen) { el.classList.add("new"); n++; } });
+  const b = document.getElementById("seen"), c = document.getElementById("newcount");
+  if (c) c.textContent = !seen ? "press Mark seen to track what is new"
+    : n ? n + " new since " + hhmm(seen) : "nothing new since " + hhmm(seen);
+  if (b) b.addEventListener("click", () => {
+    try { localStorage.setItem(key, String(Math.floor(Date.now() / 1000))); } catch (e) {}
+    location.reload(); });
+} catch (e) {}
+</script>"""
+
+
+def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None = None) -> str:
+    """Operator command center: the fleet, what is in flight, what finished,
+    what waits on Ben, and a timeline of what happened. `client` narrows every
+    list to one client; the fleet strip stays whole so the way back is a click."""
     t = v["as_of"]
+    fleet_rows = v.get("fleet", [])
+    if client:
+        v = {**v, **{k: [d for d in v[k] if d.get("client") == client]
+                     for k in ("needs_you", "master_owes", "loose_ends", "running", "waiting",
+                               "recent", "deferred", "acknowledged") if k in v}}
+        v["parked"] = [d for d in v.get("parked", []) if d.get("client") == client]
+        v["activity"] = [e for e in v.get("activity", []) if e.get("client") == client]
     fresh = [d for d in v["needs_you"] if t - d["since"] <= STALE_DAYS * 86400]
     stale = [d for d in v["needs_you"] if t - d["since"] > STALE_DAYS * 86400]
     n = len(fresh)
     typed: dict[str, list[dict[str, Any]]] = {}
-    for d in fresh:
+    for d in sorted(fresh, key=lambda d: (not d.get("failed"), -d["since"])):
         typed.setdefault(need_type(d), []).append(d)
     needs = "".join(
         f'<h3 class="type">{esc(k)}<span class="count">{len(typed[k])}</span></h3>{_by_client(typed[k], t, k + "|")}'
@@ -792,7 +929,13 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
         needs = '<p class="clear">Nothing needs you.</p>'
     elif not fresh:
         needs = f'<p class="empty">Nothing from the last {STALE_DAYS} days; the rest is under Stale.</p>'
+    done_24h = [d for d in v["recent"] if t - d["since"] <= 86400]
     meta_refresh = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    queued = v.get("queued", 0)
+    queued_note = (f'<span class="age">{queued} queued for master</span>' if queued
+                   else '<span class="age">sent to master when idle</span>')
+    scope = (f'<span class="scope">showing <b>{esc(client)}</b> · <a href="/board">all clients</a></span>'
+             if client else "")
     def grp(title: str, rows: list, empty: str, cls: str = "", shut: bool = False) -> str:
         fold = ' data-fold="closed"' if shut else ""
         return (f'<div class="card grp {cls}"{fold}><h2>{esc(title)}<span class="count">{len(rows)}</span></h2>'
@@ -803,13 +946,25 @@ def board_page(v: dict[str, Any], refresh: int | None = 30) -> str:
                 f"{body}</div>")
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{'(' + str(n) + ') ' if n else ''}Coord board</title>
-<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}</style></head><body><main>
+<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}{CENTER_CSS}</style></head><body class="wide"><main>
 <nav><a href="/">Usage</a> · <b>Board</b> · <a href="/hours">Hours</a> · <a href="/deliverables">Deliverables</a> · <a href="/intents">Intents</a></nav>
-<h1>Coord board</h1>
-<p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · read straight from ~/.coord/coord.db, so it stays true when the master is cleared</p>
-{_actions(v)}
+<div class="topbar"><div><h1>Command center</h1>
+<p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · straight from ~/.coord/coord.db {scope}</p></div>
+<div class="btns">{_button("next", "Next question", primary=True)}{_button("board", "Board check")}{queued_note}
+<span class="seenbox"><span id="newcount" class="age"></span><button id="seen" type="button">Mark seen</button></span></div></div>
+{_kpis(v, n, len(done_24h))}
+{_fleet(fleet_rows, t, client)}
 {_next_up(fresh, t, v.get("question"))}
-<div class="card grp {'alert' if n else ''}"><h2>Needs you<span class="count">{n}</span></h2>{needs}</div>
+<div class="lanes">
+<div class="col">
+<div class="card grp lane {'alert' if n else ''}" id="needs"><h2>Needs you<span class="count">{n}</span></h2>{needs}</div>
+</div>
+<div class="col">
+{_in_flight(v, t)}
+<div class="card lane" id="done"><h2>Done, last {v['recent_h']}h<span class="count">{len(v['recent'])}</span></h2>{_done(v["recent"], t)}</div>
+</div>
+</div>
+<div class="card lane" id="activity"><h2>Activity, last 24h<span class="count">{len(v.get("activity", []))}</span></h2>{_timeline(v.get("activity", []), t, 24)}</div>
 <script>/* the page auto-refreshes, so keep drilled-in clients open across reloads */
 try {{ const k = "coord-open", o = new Set(JSON.parse(localStorage.getItem(k) || "[]"));
   document.querySelectorAll("details.client").forEach(d => {{
@@ -817,16 +972,72 @@ try {{ const k = "coord-open", o = new Set(JSON.parse(localStorage.getItem(k) ||
     d.addEventListener("toggle", () => {{ d.open ? o.add(d.dataset.client) : o.delete(d.dataset.client);
       try {{ localStorage.setItem(k, JSON.stringify([...o])); }} catch (e) {{}} }}); }}); }} catch (e) {{}}
 </script>
-{grp("Master owes", v["master_owes"], "Nothing: no parked tasks, no open intents, no follow-ups.")}
-{grp("Others owe", v["loose_ends"], "No follow-ups waiting on clients or colleagues.")}
-{grp("Running", v["running"], "Nothing picked up and in progress.")}
-{grp("Not picked up", v["waiting"], "Every open task has been picked up.")}
-{grp(f"Done, last {v['recent_h']}h", v["recent"], "Nothing finished recently.")}
+<div class="lanes">
+<div class="col">{grp("Master owes", v["master_owes"], "Nothing: no parked tasks, no open intents, no follow-ups.")}</div>
+<div class="col">{grp("Others owe", v["loose_ends"], "No follow-ups waiting on clients or colleagues.")}</div>
+</div>
 {by_client_grp(f"Stale, over {STALE_DAYS} days", stale, "Nothing of yours is older than a week.")}
 {by_client_grp("Deferred", v.get("deferred", []), "Nothing deferred.")}
 {grp("Acknowledged failures", v.get("acknowledged", []), "No failures on record.", shut=True)}
-{COLLAPSE_JS}
+{COLLAPSE_JS}{SEEN_JS}
 </main></body></html>"""
+
+
+CENTER_CSS = """
+body.wide main { max-width:1500px; }
+.topbar { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; gap:12px 24px; margin-bottom:16px; }
+.topbar .sub { margin:0; } .topbar .btns { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.topbar .scope { margin-left:8px; } .topbar .scope a { color:var(--s1); }
+.seenbox { display:inline-flex; gap:8px; align-items:center; margin-left:12px; padding-left:12px; border-left:1px solid var(--grid); }
+.seenbox button { font:inherit; font-size:13px; padding:5px 12px; border-radius:6px; cursor:pointer;
+  border:1px solid var(--axis); background:var(--surface); color:var(--ink); }
+.kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }
+.kpi { display:block; background:var(--surface); border:1px solid var(--border); border-left:5px solid var(--k); border-radius:10px;
+  padding:10px 14px; text-decoration:none; color:var(--ink); }
+.kpi .n { display:block; font-size:30px; font-weight:700; line-height:1.1; color:var(--k); font-variant-numeric:tabular-nums; }
+.kpi .label { display:block; font-size:13px; font-weight:600; margin-top:2px; }
+.kpi .hint { display:block; font-size:11px; color:var(--muted); }
+.kpi.zero .n { color:var(--muted); } .kpi.zero { border-left-color:var(--grid); }
+.k-run { --k:var(--s1); } .k-wait { --k:var(--s4); } .k-park { --k:var(--serious); } .k-fail { --k:var(--critical); }
+.k-you { --k:var(--critical); } .k-done { --k:var(--good); }
+.fleet { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:8px; margin-bottom:16px; }
+.fleet-tile { display:block; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:9px 11px;
+  text-decoration:none; color:var(--ink); font-size:12px; min-height:92px; --l:var(--muted); }
+.fleet-tile:hover { border-color:var(--s1); } .fleet-tile.selected { outline:2px solid var(--s1); }
+.fleet-tile .head { display:flex; align-items:center; gap:7px; }
+.fleet-tile .name { font-weight:700; font-size:14px; } .fleet-tile .state-word { margin-left:auto; color:var(--l); font-weight:600; }
+.fleet-tile .light { width:10px; height:10px; border-radius:50%; background:var(--l); flex:none; }
+.fleet-tile.st-running { --l:var(--s1); }
+.fleet-tile.st-running .light { box-shadow:0 0 0 3px color-mix(in srgb, var(--s1) 25%, transparent); animation:pulse 1.6s ease-in-out infinite; }
+.fleet-tile.st-parked { --l:var(--serious); } .fleet-tile.st-failed { --l:var(--critical); }
+.fleet-tile.st-waiting { --l:var(--s4); } .fleet-tile.st-idle { --l:var(--muted); }
+.fleet-tile.st-idle .name { color:var(--ink2); }
+@keyframes pulse { 50% { box-shadow:0 0 0 6px color-mix(in srgb, var(--s1) 10%, transparent); } }
+.fleet-tile .doing { color:var(--ink2); margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.fleet-tile .bits { margin-top:5px; line-height:1.5; } .fleet-tile .last { color:var(--muted); font-size:11px; margin-top:3px; }
+.c-run { color:var(--s1); } .c-park { color:var(--serious); } .c-fail { color:var(--critical); } .c-wait { color:var(--s4); }
+.c-you { color:var(--critical); font-weight:600; } .c-done { color:var(--good); }
+.lanes { display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:start; }
+.lanes .col { min-width:0; }
+@media (max-width: 900px) { .lanes { grid-template-columns:1fr; } }
+.lane .item { border-left:4px solid var(--grid); padding-left:10px; margin-left:-10px; }
+.lane .item[data-age="fresh"] { border-left-color:var(--s1); }
+.lane .item[data-age="day"] { border-left-color:var(--s4); }
+.lane .item[data-age="week"] { border-left-color:var(--serious); }
+.lane .item[data-age="old"] { border-left-color:var(--critical); }
+.item.new { background:color-mix(in srgb, var(--s2) 8%, transparent); }
+.item.new .age::after, .tl.new .tl-time::after { content:"new"; color:var(--s2); font-weight:700; font-size:11px; margin-left:6px; }
+.parked-row .note form.act button { margin-top:2px; }
+.timeline { max-height:480px; overflow:auto; }
+.tl-day { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink2); margin:10px 0 4px; font-weight:600; }
+.tl { display:grid; grid-template-columns:52px 14px 72px 72px 1fr; gap:0 8px; align-items:baseline; padding:3px 0; font-size:13px; }
+.tl-time { color:var(--muted); font-variant-numeric:tabular-nums; font-size:12px; white-space:nowrap; }
+.tl-dot { width:9px; height:9px; border-radius:50%; background:var(--e); display:inline-block; vertical-align:-1px; }
+.tl-word { color:var(--e); font-weight:600; font-size:12px; } .tl-client { font-weight:600; }
+.tl-note { color:var(--muted); font-size:12px; } .tl-what { overflow-wrap:anywhere; }
+.ev-picked_up { --e:var(--s1); } .ev-completed { --e:var(--good); } .ev-failed { --e:var(--critical); } .ev-parked { --e:var(--serious); }
+.next { border-left:5px solid var(--s1); }
+"""
 
 
 def _val(v: Any, text=esc) -> str:
@@ -1483,7 +1694,10 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v["parked"] = store.parked_tasks(conn)
                 v["queued"] = store.queued_operator_prompts(conn)
                 v["question"] = store.current_question(conn)
-                return board_page(v).encode("utf-8")
+                v["fleet"] = store.fleet(conn, v, hours.CLIENTS)
+                v["activity"] = store.activity(conn)
+                client = (self._query.get("client") or [""])[0].strip() or None
+                return board_page(v, client=client).encode("utf-8")
             if path.startswith("/board/task/"):
                 tid = path.rsplit("/", 1)[1]
                 return task_page(store.task_detail(conn, tid), tid,

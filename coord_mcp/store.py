@@ -505,6 +505,7 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
             status = _open_status(r["last_park"], r["picked_up_at"])
             if status == "parked":
                 d["note"] = f"parked {r['parks']}x, awaiting re-dispatch"
+                d["parked"] = True
                 master_owes.append(d)
             elif status == "running":
                 d["since"] = r["picked_up_at"]
@@ -544,6 +545,57 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
     return {"needs_you": needs_you, "master_owes": master_owes, "loose_ends": loose_ends,
             "deferred": deferred, "acknowledged": acknowledged,
             "running": running, "waiting": waiting, "recent": recent, "recent_h": recent_h, "as_of": t}
+
+
+# A client's standing on the fleet strip, worst first. Running beats parked:
+# a client with one task going and one parked shows as working.
+FLEET_STATES = ("running", "parked", "failed", "waiting", "idle")
+
+
+def activity(conn: sqlite3.Connection, hours: int = 24, limit: int = 200) -> list[dict[str, Any]]:
+    """Task events of the last `hours`, newest first: picked up, parked,
+    completed, failed. The operator's timeline of what happened while they
+    were not watching the master's stream."""
+    out = []
+    for r in conn.execute(
+        """SELECT e.event, e.ts, e.client, e.task_id, t.title, t.kind, t.result
+           FROM task_events e JOIN tasks t ON t.id = e.task_id
+           WHERE e.ts >= ? ORDER BY e.ts DESC LIMIT ?""",
+        (now() - hours * 3600, limit),
+    ):
+        d = {"event": r["event"], "ts": r["ts"], "client": r["client"] or "—", "id": r["task_id"],
+             "title": r["title"], "kind": r["kind"], "note": ""}
+        if r["event"] in ("completed", "failed"):
+            d["note"] = _gist(r["result"])
+        out.append(d)
+    return out
+
+
+def fleet(conn: sqlite3.Connection, v: dict[str, Any], clients: tuple[str, ...] = (),
+          hours: int = 24) -> list[dict[str, Any]]:
+    """One row per client for the fleet strip: what it is doing now, what it
+    owes the operator, and when it last did anything. `clients` fixes the
+    order; any assignee the board knows that is not in it is appended."""
+    t = v["as_of"]
+    known = [r["assigned_to"] for r in conn.execute(
+        "SELECT DISTINCT assigned_to FROM tasks WHERE assigned_to IS NOT NULL ORDER BY assigned_to")]
+    names = list(clients) + [c for c in known if c not in clients]
+    last = {r["client"]: r["ts"] for r in conn.execute(
+        "SELECT client, MAX(ts) ts FROM task_events WHERE client IS NOT NULL GROUP BY client")}
+    rows = []
+    for c in names:
+        mine = lambda key: [d for d in v.get(key, []) if d.get("client") == c]  # noqa: E731
+        parked = [d for d in mine("master_owes") if d.get("parked")]
+        failed = [d for d in mine("needs_you") if d.get("failed")]
+        needs = [d for d in mine("needs_you") if t - d["since"] <= 7 * 86400]
+        done = [d for d in mine("recent") if t - d["since"] <= hours * 3600]
+        running, waiting = mine("running"), mine("waiting")
+        state = ("running" if running else "parked" if parked else "failed" if failed
+                 else "waiting" if waiting else "idle")
+        rows.append({"client": c, "state": state, "running": len(running), "waiting": len(waiting),
+                     "parked": len(parked), "failed": len(failed), "needs": len(needs), "done": len(done),
+                     "last": last.get(c), "task": (running or parked or waiting or [{}])[0].get("title", "")})
+    return rows
 
 
 # ------------------------------------------------------------ deliverables
