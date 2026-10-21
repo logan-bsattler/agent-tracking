@@ -206,6 +206,30 @@ python -m coord_mcp.guard pause 30      # minutes; `resume` to end early
 or `COORD_GUARD=off` in the environment. `python -m coord_mcp.guard check
 <transcript.jsonl>` shows what the guard would decide for a session.
 
+### The board and the master console
+
+`serve` also hosts the coord board at `/board` (port 8765): a command center
+over `~/.coord/coord.db`, per client, with a task page per task. Its buttons
+queue fixed prompts for the master session (`store.OPERATOR_ACTIONS`), which
+the `master-console` mod submits as the operator's own prompt once master is
+idle: **Next question**, **Board check**, **Re-dispatch** on a parked task,
+**Go** on a task or intent, and one button per option of the question master
+is currently asking. A page never writes prompt text; it picks an action and
+the text is built from stored rows.
+
+**The master-minder** uses the same queue without a click. Each ingest pass
+(`store.minder_check`) looks for work master owes and is not acting on: a
+task parked and awaiting re-dispatch (10 min), one created and never
+delivered (15 min), a result no lead read has touched (10 min, stamped by
+`coord_get_task_result` from the master's session), a client loose end with
+no child task (30 min), an open intent (15 min). When any is past its
+threshold it queues `Minder HH:MM: master owes work -- ...` with the ids, at
+most one per 30 minutes and never while another prompt is queued. Thresholds
+are minutes in `COORD_MINDER_PARKED`, `_UNDELIVERED`, `_UNREAD`, `_LOOSE`,
+`_INTENTS` and `_EVERY`; `COORD_MINDER=off` disables it. `/board` shows when
+it last fired and when it is next eligible; `/api/parked` carries the same
+under `minder`.
+
 ### Installing on another machine or account
 
 Nothing here is tied to this machine. On the second machine:

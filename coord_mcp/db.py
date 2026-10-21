@@ -14,7 +14,7 @@ from pathlib import Path
 # Bump this whenever DDL or _migrate changes. connect() skips both entirely
 # when the file already reports this version, so a new table or column that
 # ships without a bump will not be created.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 def default_db_path() -> Path:
     """COORD_DB if set, else ~/.coord/coord.db -- read on every call, not at import.
@@ -51,7 +51,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- it was never picked up; a park after it means it is waiting on the master.
   picked_up_at   INTEGER,
   -- SharePoint pipeline item this task bills to. Hours roll up by it.
-  pipeline_task_id TEXT
+  pipeline_task_id TEXT,
+  -- Last time the lead read this task's result (coord_get_task_result from
+  -- a session that is not a client). Null, or earlier than completed_at,
+  -- means the result is sitting unread; the minder wakes the master for it.
+  result_read_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, created_at);
 CREATE INDEX IF NOT EXISTS tasks_kind ON tasks(kind, state);
@@ -265,6 +269,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN picked_up_at INTEGER")
     if "pipeline_task_id" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN pipeline_task_id TEXT")
+    if "result_read_at" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN result_read_at INTEGER")
+        # No read was recorded before this column existed, so every result on
+        # file would count as unread and the first minder prompt would list
+        # the whole history. Treat what was finished before now as read.
+        conn.execute("UPDATE tasks SET result_read_at = completed_at WHERE completed_at IS NOT NULL")
     # v8 added 'deferred' to follow_ups.state. SQLite cannot alter a CHECK, so
     # rebuild the table from the current DDL and copy the rows across.
     fu_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='follow_ups'").fetchone()

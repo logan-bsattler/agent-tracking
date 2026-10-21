@@ -912,6 +912,25 @@ try { const key = "coord-seen", seen = Number(localStorage.getItem(key) || 0); l
 </script>"""
 
 
+MINDER_TITLE = ("Master-minder: the dashboard queues a wake prompt to master when the board shows work "
+                "it owes and is not acting on (parked, never delivered, result unread, client loose end "
+                "untasked, open intent). At most one per rate window; off with COORD_MINDER=off.")
+
+
+def minder_line(m: dict[str, Any] | None, t: int) -> str:
+    """'Minder: last 14:05, next 14:35' or the reason there is none to show."""
+    if not m:
+        return "Minder: unknown"
+    if not m.get("enabled"):
+        return "Minder: off"
+    last = m.get("last_fired")
+    nxt = m.get("next_eligible") or t
+    if not last:
+        return "Minder: never fired, eligible now"
+    return (f"Minder: last {when(last)} ({_age(last, t)}), "
+            + ("eligible now" if nxt <= t else f"next {when(nxt)}"))
+
+
 def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None = None) -> str:
     """Operator command center: the fleet, what is in flight, what finished,
     what waits on Ben, and a timeline of what happened. `client` narrows every
@@ -941,6 +960,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
     queued = v.get("queued", 0)
     queued_note = (f'<span class="age">{queued} queued for master</span>' if queued
                    else '<span class="age">sent to master when idle</span>')
+    minder_note = f'<span class="age minder" title="{esc(MINDER_TITLE)}">{esc(minder_line(v.get("minder"), t))}</span>'
     scope = (f'<span class="scope">showing <b>{esc(client)}</b> · <a href="/board">all clients</a></span>'
              if client else "")
     def grp(title: str, rows: list, empty: str, cls: str = "", shut: bool = False) -> str:
@@ -952,7 +972,8 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
         return (f'<div class="card grp" data-fold="closed"><h2>{esc(title)}<span class="count">{len(rows)}</span></h2>'
                 f"{body}</div>")
     sub = f"as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · straight from ~/.coord/coord.db {scope}"
-    actions = f'{_button("next", "Next question", primary=True)}{_button("board", "Board check")}{queued_note}{SEEN_BOX}'
+    actions = (f'{_button("next", "Next question", primary=True)}{_button("board", "Board check")}'
+               f'{queued_note}{minder_note}{SEEN_BOX}')
     body = f"""{_kpis(v, n, len(done_24h))}
 {_fleet(fleet_rows, t, client)}
 {_next_up(fresh, t, v.get("question"))}
@@ -1693,6 +1714,14 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         usage.ingest(conn)
                     finally:
                         build_home(conn)
+                    # The minder (store.minder_check) rides this pass: it
+                    # reads the board and, when master owes work it is not
+                    # acting on, queues one wake prompt. Its own try, so a
+                    # failure there never costs an ingest.
+                    try:
+                        store.minder_check(conn)
+                    except Exception:
+                        pass
                 finally:
                     conn.close()
             except Exception:  # a locked db or a vanished file: the next pass gets it
@@ -1811,13 +1840,16 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 return json.dumps({"parked": store.parked_tasks(conn),
                                    "queued": store.queued_operator_prompts(conn),
                                    "question": store.current_question(conn),
+                                   "minder": store.minder_state(conn),
                                    "actions": {k: v for k, v in store.OPERATOR_ACTIONS.items()
-                                               if k != "redispatch"}}).encode("utf-8")
+                                               if k in store.PAGE_ACTIONS and k != "redispatch"}}
+                                  ).encode("utf-8")
             if path == "/board":
                 v = store.operator_view(conn)
                 v["parked"] = store.parked_tasks(conn)
                 v["queued"] = store.queued_operator_prompts(conn)
                 v["question"] = store.current_question(conn)
+                v["minder"] = store.minder_state(conn)
                 v["fleet"] = store.fleet(conn, v, hours.CLIENTS)
                 v["activity"] = store.activity(conn)
                 client = (self._query.get("client") or [""])[0].strip() or None

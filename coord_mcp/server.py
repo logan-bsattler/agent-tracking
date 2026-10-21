@@ -298,9 +298,12 @@ async def coord_get_task_result(params: ResultInput) -> str:
 
     Returns JSON: {task_id, kind, state, result}, plus {unknown_fields,
     available_fields} if you named a field the result does not have.
+
+    From the lead's session this read also marks the result as read, which
+    is what stops the minder listing it as "result unread".
     """
     try:
-        return _ok(store.get_task_result(db(), params.task_id, params.fields))
+        return _ok(store.get_task_result(db(), params.task_id, params.fields, reader=READER))
     except Exception as e:
         return _err(e)
 

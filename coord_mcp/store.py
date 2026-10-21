@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import uuid
@@ -202,11 +203,22 @@ def _project(result: dict[str, Any], fields: list[str] | None) -> tuple[dict[str
 
 
 def get_task_result(
-    conn: sqlite3.Connection, task_id: str, fields: list[str] | None = None
+    conn: sqlite3.Connection, task_id: str, fields: list[str] | None = None,
+    reader: str | None = None,
 ) -> dict[str, Any]:
+    """The result, projected to `fields`.
+
+    reader is the calling session's client key, as get_task takes it. When it
+    is the lead (a session that is not a client), the read is recorded as
+    result_read_at: that is the signal the minder uses for "result unread".
+    A client reading a result is not the master acting on it, so it leaves
+    the stamp alone.
+    """
     row = conn.execute("SELECT id, kind, state, result FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         raise KeyError(f"unknown task '{task_id}'")
+    if row["state"] != "open" and is_lead(conn, reader):
+        conn.execute("UPDATE tasks SET result_read_at=? WHERE id=?", (now(), task_id))
     out: dict[str, Any] = {"task_id": row["id"], "kind": row["kind"], "state": row["state"]}
     if row["result"]:
         result = json.loads(row["result"])
@@ -229,6 +241,22 @@ def _open_status(last_park: int | None, picked_up_at: int | None) -> str:
     if last_park is not None and (picked_up_at is None or last_park >= picked_up_at):
         return "parked"
     return "running" if picked_up_at is not None else "open"
+
+
+def client_keys(conn: sqlite3.Connection) -> set[str]:
+    """Casefolded client keys: the wired list plus every assignee on the board."""
+    from . import hours  # hours imports nothing of store's; keep it that way
+    keys = {c.casefold() for c in hours.CLIENTS}
+    keys.update(r[0].casefold() for r in conn.execute(
+        "SELECT DISTINCT assigned_to FROM tasks WHERE assigned_to IS NOT NULL"))
+    return keys
+
+
+def is_lead(conn: sqlite3.Connection, reader: str | None) -> bool:
+    """A named reader that is not a client is the lead (master). The reader
+    is the session's folder name or COORD_CLIENT; the master's is neither a
+    client key nor an assignee. An unnamed reader is nobody."""
+    return bool(reader) and reader.strip().casefold() not in client_keys(conn)
 
 
 def board(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -919,7 +947,13 @@ OPERATOR_ACTIONS = {
     "intent": ("Go on intent {intent_id} ({summary}): decide what work it warrants -- write the spec, "
                "create and dispatch the task(s) and coord_resolve_intent with their ids, or dismiss it "
                "with a note -- then reply Done / Next for you."),
+    # Queued by the minder (minder_check), never by a page: {owed} is built
+    # from board rows in minder_text.
+    "minder": ("Minder {hhmm}: master owes work -- {owed}. Run the Board check procedure for these "
+               "ids only, then reply Done / Next for you."),
 }
+# Actions a page or the band may queue. The rest are the watcher's.
+PAGE_ACTIONS = frozenset(k for k in OPERATOR_ACTIONS if k != "minder")
 COMMENT_MAX = 2000
 PROMPT_TTL = 30 * 60  # an untaken click older than this is stale, not owed
 
@@ -983,7 +1017,7 @@ def queue_operator_prompt(conn: sqlite3.Connection, action: str, task_id: str | 
     `intent` takes an intent id, or the email fields of a noted one (see
     intent_for_go); the result names the intent it landed on.
     """
-    if action not in OPERATOR_ACTIONS:
+    if action not in PAGE_ACTIONS:
         raise ValueError(f"unknown action {action!r}")
     comment = (comment or "").strip()
     if len(comment) > COMMENT_MAX:
@@ -1010,16 +1044,22 @@ def queue_operator_prompt(conn: sqlite3.Connection, action: str, task_id: str | 
         task_id, text = None, OPERATOR_ACTIONS[action]
     if comment:
         text += "\n\nBen's direction: " + comment
-    t = now()
+    extra = {"intent_id": intent_id} if action == "intent" else {}
+    return {**_enqueue(conn, action, task_id, text), **extra}
+
+
+def _enqueue(conn: sqlite3.Connection, action: str, task_id: str | None, text: str,
+             t: int | None = None) -> dict[str, Any]:
+    """Insert one prompt row, unless the same text is already queued live."""
+    t = now() if t is None else t
     dup = conn.execute(
         "SELECT id FROM operator_prompts WHERE taken_at IS NULL AND text = ? AND created_at >= ?",
         (text, t - PROMPT_TTL)).fetchone()
-    extra = {"intent_id": intent_id} if action == "intent" else {}
     if dup:
-        return {"ok": True, "id": dup["id"], "duplicate": True, **extra}
+        return {"ok": True, "id": dup["id"], "duplicate": True}
     cur = conn.execute("INSERT INTO operator_prompts(action, task_id, text, created_at) VALUES (?,?,?,?)",
                        (action, task_id, text, t))
-    return {"ok": True, "id": cur.lastrowid, "duplicate": False, **extra}
+    return {"ok": True, "id": cur.lastrowid, "duplicate": False}
 
 
 def take_operator_prompt(conn: sqlite3.Connection) -> dict[str, Any] | None:
@@ -1040,6 +1080,129 @@ def take_operator_prompt(conn: sqlite3.Connection) -> dict[str, Any] | None:
 def queued_operator_prompts(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) n FROM operator_prompts WHERE taken_at IS NULL AND created_at >= ?",
                         (now() - PROMPT_TTL,)).fetchone()["n"]
+
+
+# ------------------------------------------------------------------ minder
+#
+# Master only acts when a prompt reaches it, and the board fills with work it
+# owes while no prompt comes: a park whose re-dispatch it forgot, a task it
+# created and never delivered, a result whose announcement was lost, a client
+# loose end nobody tasked, an intent nobody triaged. The minder runs inside the
+# dashboard's ingest pass and, when any of those has sat past its threshold,
+# queues one "Minder HH:MM" prompt through the operator queue. It is a wake-up
+# with ids in it, not a routine: the mod submits it only when master is idle,
+# so it never interrupts a turn, and it is built here from rows, never from a
+# request.
+
+
+def _env_minutes(name: str, default: int) -> int:
+    """Minutes from COORD_MINDER_<name>, else the default."""
+    try:
+        return int(os.environ.get(f"COORD_MINDER_{name}", default))
+    except ValueError:
+        return default
+
+
+MINDER_ENABLED = os.environ.get("COORD_MINDER", "on").strip().lower() not in ("off", "0", "false", "no")
+MINDER_PARKED = _env_minutes("PARKED", 10)            # parked, awaiting re-dispatch
+MINDER_UNDELIVERED = _env_minutes("UNDELIVERED", 15)  # open, never picked up, never parked
+MINDER_UNREAD = _env_minutes("UNREAD", 10)            # done or failed, no lead read since
+MINDER_LOOSE = _env_minutes("LOOSE", 30)              # open client follow-up with no child task
+MINDER_INTENTS = _env_minutes("INTENTS", 15)          # open intent
+MINDER_EVERY = _env_minutes("EVERY", 30)              # at most one minder prompt per this
+MINDER_IDS = 5                                        # ids listed per condition; the rest is a count
+
+
+def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
+    """Ids per condition, each past its threshold. Empty lists mean nothing owed."""
+    parked = [d["id"] for d in parked_tasks(conn) if d["parked_at"] <= now_ts - MINDER_PARKED * 60]
+    undelivered = [r["id"] for r in conn.execute(
+        """SELECT t.id FROM tasks t
+           WHERE t.state='open' AND t.picked_up_at IS NULL AND t.created_at <= ?
+             AND NOT EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id)
+           ORDER BY t.created_at""", (now_ts - MINDER_UNDELIVERED * 60,))]
+    # A decision on the task or a child task since it finished is the master
+    # acting on the result, whether or not it fetched the result itself.
+    unread = [r["id"] for r in conn.execute(
+        """SELECT t.id FROM tasks t
+           WHERE t.state IN ('done','failed') AND t.completed_at <= ?
+             AND (t.result_read_at IS NULL OR t.result_read_at < t.completed_at)
+             AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.task_id = t.id AND d.created_at >= t.completed_at)
+             AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id AND c.created_at >= t.completed_at)
+           ORDER BY t.completed_at""", (now_ts - MINDER_UNREAD * 60,))]
+    clients = client_keys(conn)
+    loose = [r["id"] for r in conn.execute(
+        """SELECT f.id, f.who FROM follow_ups f
+           WHERE f.state='open' AND f.created_at <= ?
+             AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = f.task_id)
+           ORDER BY f.created_at, f.idx""", (now_ts - MINDER_LOOSE * 60,))
+        if r["who"].strip().casefold() in clients]
+    intents = [r["id"] for r in conn.execute(
+        "SELECT id FROM intents WHERE state='open' AND created_at <= ? ORDER BY created_at",
+        (now_ts - MINDER_INTENTS * 60,))]
+    return {"parked": parked, "undelivered": undelivered, "unread": unread, "loose": loose, "intents": intents}
+
+
+_MINDER_LABELS = (("parked", "parked awaiting re-dispatch"), ("undelivered", "never delivered"),
+                  ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids)"),
+                  ("intents", "open intents"))
+
+
+def minder_text(owed: dict[str, list[str]], now_ts: int) -> str:
+    """The prompt for what is owed: a count per condition and up to MINDER_IDS ids each."""
+    from datetime import datetime
+    parts = []
+    for key, label in _MINDER_LABELS:
+        ids = owed.get(key) or []
+        if not ids:
+            parts.append(f"0 {label.split(' (')[0]}")
+            continue
+        shown = ", ".join(ids[:MINDER_IDS]) + (f", +{len(ids) - MINDER_IDS} more" if len(ids) > MINDER_IDS else "")
+        parts.append(f"{len(ids)} {label} ({shown})")
+    return OPERATOR_ACTIONS["minder"].format(hhmm=datetime.fromtimestamp(now_ts).strftime("%H:%M"),
+                                             owed=", ".join(parts))
+
+
+def minder_last(conn: sqlite3.Connection) -> int | None:
+    """When the minder last queued a prompt, taken or not."""
+    return conn.execute("SELECT MAX(created_at) t FROM operator_prompts WHERE action='minder'").fetchone()["t"]
+
+
+def minder_state(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any]:
+    """One line's worth for the board: enabled, last fired, next eligible."""
+    now_ts = now() if now_ts is None else now_ts
+    last = minder_last(conn)
+    nxt = (last + MINDER_EVERY * 60) if last else now_ts
+    return {"enabled": MINDER_ENABLED, "last_fired": last, "next_eligible": max(nxt, now_ts),
+            "every_min": MINDER_EVERY}
+
+
+def minder_check(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any]:
+    """One pass: queue a minder prompt if work is owed and nothing stands in the way.
+
+    Silent when disabled (COORD_MINDER=off), when nothing is past its
+    threshold, when any operator prompt is already queued (master is about to
+    be woken anyway), or within MINDER_EVERY of the last minder prompt. The
+    text dedup in _enqueue applies on top.
+
+    Returns {fired, reason, owed, ...} for the caller's log or page; nothing
+    here raises for an empty board.
+    """
+    now_ts = now() if now_ts is None else now_ts
+    state = minder_state(conn, now_ts)
+    if not MINDER_ENABLED:
+        return {"fired": False, "reason": "disabled", "owed": {}, **state}
+    owed = minder_owed(conn, now_ts)
+    if not any(owed.values()):
+        return {"fired": False, "reason": "nothing owed", "owed": owed, **state}
+    if state["last_fired"] and now_ts - state["last_fired"] < MINDER_EVERY * 60:
+        return {"fired": False, "reason": "rate limit", "owed": owed, **state}
+    if queued_operator_prompts(conn):
+        return {"fired": False, "reason": "a prompt is already queued", "owed": owed, **state}
+    r = _enqueue(conn, "minder", None, minder_text(owed, now_ts), t=now_ts)
+    fired = not r["duplicate"]
+    return {"fired": fired, "reason": "queued" if fired else "duplicate", "owed": owed,
+            "prompt_id": r["id"], **minder_state(conn, now_ts)}
 
 
 # ------------------------------------------------------------------ questions
