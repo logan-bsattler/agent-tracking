@@ -94,3 +94,31 @@ def test_task_page_has_go_form(conn):
     page = report.task_page(store.task_detail(conn, tid), tid)
     assert 'value="go"' in page and 'name="comment"' in page and f'value="/board/task/{tid}"' in page
     assert "Sent." in report.task_page(store.task_detail(conn, tid), tid, queued=True)
+
+
+def test_task_page_walks_to_clients_next_task(conn):
+    a = store.create_task(conn, "investigation", "first", {"q": "x"}, assigned_to="LNK")["task_id"]
+    b = store.create_task(conn, "investigation", "second", {"q": "x"}, assigned_to="LNK")["task_id"]
+    c = store.create_task(conn, "investigation", "third", {"q": "x"}, assigned_to="LNK")["task_id"]
+    store.create_task(conn, "investigation", "elsewhere", {"q": "x"}, assigned_to="Moog")
+    # From a: next is b, 2 of 3. From c: wraps to a, 1 of 3. Never another client's.
+    n = store.task_detail(conn, a)["next_for_client"]
+    assert n["id"] == b and (n["pos"], n["of"]) == (2, 3)
+    n = store.task_detail(conn, c)["next_for_client"]
+    assert n["id"] == a and (n["pos"], n["of"]) == (1, 3)
+    page = report.task_page(store.task_detail(conn, a), a)
+    assert f'href="/board/task/{b}"' in page and "Next for LNK: second" in page
+    assert 'next-task primary' not in page
+    assert 'next-task primary' in report.task_page(store.task_detail(conn, a), a, queued=True)
+    # A done task with nothing owed drops out of the walk; one with an open loose end stays.
+    store.get_task(conn, b)
+    inv = {"done": True, "verdict": "v", "confidence": "high", "evidence": ["e"]}
+    store.complete_task(conn, b, inv)
+    assert store.task_detail(conn, a)["next_for_client"]["id"] == c
+    store.get_task(conn, c)
+    store.complete_task(conn, c, {**inv, "follow_ups": [{"who": "Ben", "what": "decide"}]})
+    assert store.task_detail(conn, a)["next_for_client"]["id"] == c
+    # Alone, there is nowhere to go.
+    solo = store.create_task(conn, "investigation", "solo", {"q": "x"}, assigned_to="TS Tech")["task_id"]
+    assert store.task_detail(conn, solo)["next_for_client"] is None
+    assert "Next for TS Tech" not in report.task_page(store.task_detail(conn, solo), solo)

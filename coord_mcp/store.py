@@ -827,7 +827,34 @@ def task_detail(conn: sqlite3.Connection, task_id: str, root: Path | None = None
         "SELECT id, title, state, assigned_to FROM tasks WHERE parent_id=? ORDER BY created_at", (task_id,))]
     d["question"] = current_question(conn, task_id)
     d["files"] = task_files(conn, task_id, root)
+    d["next_for_client"] = next_for_client(conn, d)
     return d
+
+
+def client_walk(conn: sqlite3.Connection, client: str | None) -> list[dict[str, Any]]:
+    """The client's tasks that still want a Go, oldest first: every task not
+    done, plus done ones with a loose end still open."""
+    if not client:
+        return []
+    return [dict(r) for r in conn.execute(
+        """SELECT t.id, t.title, t.state, t.created_at, t.rowid seq FROM tasks t
+           WHERE t.assigned_to = ? AND (t.state != 'done'
+                 OR EXISTS (SELECT 1 FROM follow_ups f WHERE f.task_id = t.id AND f.state = 'open'))
+           ORDER BY t.rowid""", (client,))]
+
+
+def next_for_client(conn: sqlite3.Connection, d: dict[str, Any]) -> dict[str, Any] | None:
+    """The task Ben moves to after this one: the next in the client's walk,
+    wrapping to its start, with his place in it. None when nothing else waits."""
+    walk = client_walk(conn, d.get("assigned_to"))
+    others = [t for t in walk if t["id"] != d["id"]]
+    if not others:
+        return None
+    here = conn.execute("SELECT rowid FROM tasks WHERE id=?", (d["id"],)).fetchone()[0]
+    after = [t for t in others if t["seq"] > here]
+    nxt = dict((after or others)[0])
+    nxt["pos"], nxt["of"] = [t["id"] for t in walk].index(nxt["id"]) + 1, len(walk)
+    return nxt
 
 
 def resolve_follow_up(

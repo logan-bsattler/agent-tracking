@@ -1053,6 +1053,8 @@ a.kpi:hover { border-color:var(--s1); }
 .topbar form.go textarea { width:min(48ch, 70vw); font-size:13px; padding:6px 8px; }
 .topbar form.go .btns { margin-top:0; flex-direction:column; align-items:flex-start; gap:4px; }
 .topbar form.go .btns .muted { font-size:12px; }
+.topbar form.go .btns .next-task { font-size:13px; }
+.topbar form.go .btns .next-task.primary { font-weight:600; }
 .item .what { min-width:0; overflow-wrap:anywhere; }
 .item .path { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
 .item .size { color:var(--muted); font-size:12px; margin-right:8px; }
@@ -1234,7 +1236,7 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
           f'<div class="btns"><button class="primary">Go</button>'
           + ('<b class="st-done">Sent. Master picks it up when idle.</b>' if queued else
              '<span class="muted">queued for master; runs when master is idle</span>')
-          + '</div></form>')
+          + _next_link(d, queued) + '</div></form>')
     head = ""
     q = d.get("question")
     if q:
@@ -1244,6 +1246,18 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
                  f'&quot;Answer on {esc(q["ref"])}: &lt;option&gt;&quot; when it is idle.</p></div>')
     return page("Board", f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', h1, sub, head + "".join(cards),
                 actions=go, tail=FILE_JS)
+
+
+def _next_link(d: dict[str, Any], queued: bool) -> str:
+    """Where Ben goes after Go: the client's next task that still wants one.
+    Bold once this one is sent, so the walk reads Go, next, Go, next."""
+    n = d.get("next_for_client")
+    if not n:
+        return ""
+    label = f'Next for {esc(d["assigned_to"])}: {esc(n["title"][:50])}'
+    note = f'<span class="muted">{n["pos"]} of {n["of"]}</span>'
+    cls = "drill next-task primary" if queued else "drill next-task"
+    return f'<a class="{cls}" href="/board/task/{esc(n["id"])}">{label} →</a> {note}'
 
 
 def _size(n: int | None) -> str:
