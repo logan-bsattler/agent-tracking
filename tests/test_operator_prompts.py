@@ -122,3 +122,72 @@ def test_task_page_walks_to_clients_next_task(conn):
     solo = store.create_task(conn, "investigation", "solo", {"q": "x"}, assigned_to="TS Tech")["task_id"]
     assert store.task_detail(conn, solo)["next_for_client"] is None
     assert "Next for TS Tech" not in report.task_page(store.task_detail(conn, solo), solo)
+
+
+def test_go_on_an_intent(conn):
+    iid = store.propose_intent(conn, "LNK: asks for a promotion checklist", "email",
+                               context="from Creed; received 2026-10-20 13:01Z", origin="team",
+                               trust="trusted")["intent_id"]
+    r = store.queue_operator_prompt(conn, "intent", intent_id=iid, comment="spec it for LNK, small")
+    assert r["ok"] and r["intent_id"] == iid
+    text = store.take_operator_prompt(conn)["text"]
+    assert f"Go on intent {iid}" in text and "promotion checklist" in text
+    assert text.endswith("Ben's direction: spec it for LNK, small")
+    # A dismissed one is reopened for master; a tasked one is refused.
+    store.resolve_intent(conn, iid, note="nothing to do")
+    store.queue_operator_prompt(conn, "intent", intent_id=iid)
+    row = conn.execute("SELECT state, note FROM intents WHERE id=?", (iid,)).fetchone()
+    assert row["state"] == "open" and row["note"].startswith("reopened by Ben") and "nothing to do" in row["note"]
+    tid = store.create_task(conn, "investigation", "t", {"q": "x"}, assigned_to="LNK")["task_id"]
+    store.resolve_intent(conn, iid, task_ids=[tid])
+    with pytest.raises(ValueError):
+        store.queue_operator_prompt(conn, "intent", intent_id=iid)
+    with pytest.raises(ValueError):
+        store.queue_operator_prompt(conn, "intent", intent_id="000000000000")
+    with pytest.raises(ValueError):
+        store.queue_operator_prompt(conn, "intent", email={"client": "MAG"})
+
+
+def test_go_on_a_noted_email_raises_an_intent_first(conn, tmp_path):
+    import datetime as dt
+    log = tmp_path / "log"
+    log.mkdir()
+    (log / f"{dt.date.today().isoformat()}.md").write_text(
+        "## 08:09 run\n- email 12:34 Joe Setty (Logan) — MAG — FYI on the Kiro dry run\n", encoding="utf-8")
+    [row] = store.triage_emails(conn, log_dir=log)["emails"]
+    assert row["action"] == "noted" and row["intent_id"] is None
+    r = store.queue_operator_prompt(conn, "intent", email={k: row[k] or "" for k in
+                                                           ("client", "sender", "summary", "received")})
+    it = conn.execute("SELECT * FROM intents WHERE id=?", (r["intent_id"],)).fetchone()
+    assert it["summary"] == "MAG: FYI on the Kiro dry run" and it["trust"] == "untrusted"
+    assert it["origin"] == "dashboard" and "from Joe Setty (Logan)" in it["context"]
+    assert r["intent_id"] in store.take_operator_prompt(conn)["text"]
+    # The page now shows the intent row for that email, not the log line too.
+    [row] = store.triage_emails(conn, log_dir=log)["emails"]
+    assert row["action"] == "open" and row["intent_id"] == it["id"] and row["sender"] == "Joe Setty"
+
+
+def test_intents_page_has_go_per_email(conn, tmp_path):
+    import datetime as dt
+    open_ = store.propose_intent(conn, "LNK: asks for a checklist", "email", origin="team", trust="trusted")["intent_id"]
+    gone = store.propose_intent(conn, "Cascade: quote V4", "email", origin="team", trust="trusted")["intent_id"]
+    store.resolve_intent(conn, gone, note="dup")
+    tid = store.create_task(conn, "investigation", "t", {"q": "x"}, assigned_to="MAG")["task_id"]
+    tasked = store.propose_intent(conn, "MAG: explain", "email", origin="team", trust="trusted")["intent_id"]
+    store.resolve_intent(conn, tasked, task_ids=[tid])
+    log = tmp_path / "log"
+    log.mkdir()
+    (log / f"{dt.date.today().isoformat()}.md").write_text(
+        "## 08:09 run\n- email 12:34 Joe Setty (Logan) — MAG — FYI only\n", encoding="utf-8")
+    v = store.triage_emails(conn, log_dir=log)
+    v["owed"], v["queued"] = False, ""
+    html = report.intents_page(v)
+    assert html.count('value="intent"') == 3  # open, dismissed, noted; never the tasked one
+    assert f'name="intent" value="{open_}"' in html and f'name="intent" value="{gone}"' in html
+    assert f'name="intent" value="{tasked}"' not in html
+    assert 'name="summary" value="FYI only"' in html and 'name="sender" value="Joe Setty (Logan)"' in html
+    assert "reopens it" in html and "makes it an intent" in html
+    assert 'name="back" value="/intents?days=7&amp;client="' in html
+    v["queued"] = open_
+    html = report.intents_page(v)
+    assert "Sent. Master picks it up" in html and html.count('value="intent"') == 2

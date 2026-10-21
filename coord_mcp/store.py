@@ -916,6 +916,9 @@ OPERATOR_ACTIONS = {
     "go": ("Go on task {task_id} ({client}: {title}): take the next step it needs now -- dispatch or "
            "re-dispatch it, task its open loose ends, or decide what is owed -- then reply Done / Next for you."),
     "answer": "Answer on {ref}: {option}\n\n(Your question: {question})",
+    "intent": ("Go on intent {intent_id} ({summary}): decide what work it warrants -- write the spec, "
+               "create and dispatch the task(s) and coord_resolve_intent with their ids, or dismiss it "
+               "with a note -- then reply Done / Next for you."),
 }
 COMMENT_MAX = 2000
 PROMPT_TTL = 30 * 60  # an untaken click older than this is stale, not owed
@@ -938,14 +941,47 @@ def parked_tasks(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return out
 
 
+def intent_for_go(conn: sqlite3.Connection, intent_id: str | None,
+                  email: dict[str, str] | None = None) -> sqlite3.Row:
+    """The intent a Go from /intents lands on. An open one as it is; a
+    dismissed one reopened (Ben overrules the triage); a tasked one refused,
+    since its tasks carry their own Go. With no id, an email the triage only
+    noted becomes an untrusted intent first, so master has a board row to
+    resolve or dismiss."""
+    if intent_id:
+        r = conn.execute("SELECT id, summary, state, note FROM intents WHERE id=?", (intent_id,)).fetchone()
+        if r is None:
+            raise ValueError(f"no intent {intent_id!r}")
+        if r["state"] == "converted":
+            raise ValueError(f"intent {intent_id!r} is already tasked; Go on its task instead")
+        if r["state"] == "dismissed":
+            was = f"; was: {r['note']}" if r["note"] else ""
+            conn.execute("UPDATE intents SET state='open', resolved_at=NULL, task_ids=NULL, note=? WHERE id=?",
+                         (f"reopened by Ben from /intents{was}", intent_id))
+        return r
+    e = {k: (email or {}).get(k, "").strip() for k in ("client", "sender", "summary", "received")}
+    if not e["summary"]:
+        raise ValueError("an intent id or the email's summary is needed")
+    summary = (f'{e["client"]}: {e["summary"]}' if e["client"] else e["summary"])[:200]
+    ctx = "; ".join(x for x in (f'from {e["sender"]}' if e["sender"] else "",
+                                f'received {e["received"]}' if e["received"] else "",
+                                "triage noted it without a task; Ben raised it from /intents") if x)
+    iid = propose_intent(conn, summary, "email", context=ctx[:1000], origin="dashboard",
+                         trust="untrusted")["intent_id"]
+    return conn.execute("SELECT id, summary, state, note FROM intents WHERE id=?", (iid,)).fetchone()
+
+
 def queue_operator_prompt(conn: sqlite3.Connection, action: str, task_id: str | None = None,
                           comment: str | None = None, question_id: Any = None,
-                          option: Any = None) -> dict[str, Any]:
+                          option: Any = None, intent_id: str | None = None,
+                          email: dict[str, str] | None = None) -> dict[str, Any]:
     """Queue one of OPERATOR_ACTIONS for the master. Refuses anything else.
 
     `comment` is Ben's own direction from the task page, appended verbatim.
     `answer` takes a question id and an option index, never the option text:
     the text comes from what master stored with coord_present_question.
+    `intent` takes an intent id, or the email fields of a noted one (see
+    intent_for_go); the result names the intent it landed on.
     """
     if action not in OPERATOR_ACTIONS:
         raise ValueError(f"unknown action {action!r}")
@@ -955,6 +991,10 @@ def queue_operator_prompt(conn: sqlite3.Connection, action: str, task_id: str | 
     if action == "answer":
         text, task_id = answer_prompt(conn, question_id, option)
         close_question(conn, question_id)
+    elif action == "intent":
+        r = intent_for_go(conn, intent_id, email)
+        intent_id, task_id = r["id"], None
+        text = OPERATOR_ACTIONS["intent"].format(intent_id=r["id"], summary=r["summary"][:120])
     elif action == "go":
         r = conn.execute("SELECT id, title, assigned_to FROM tasks WHERE id=?", (task_id or "",)).fetchone()
         if r is None:
@@ -974,11 +1014,12 @@ def queue_operator_prompt(conn: sqlite3.Connection, action: str, task_id: str | 
     dup = conn.execute(
         "SELECT id FROM operator_prompts WHERE taken_at IS NULL AND text = ? AND created_at >= ?",
         (text, t - PROMPT_TTL)).fetchone()
+    extra = {"intent_id": intent_id} if action == "intent" else {}
     if dup:
-        return {"ok": True, "id": dup["id"], "duplicate": True}
+        return {"ok": True, "id": dup["id"], "duplicate": True, **extra}
     cur = conn.execute("INSERT INTO operator_prompts(action, task_id, text, created_at) VALUES (?,?,?,?)",
                        (action, task_id, text, t))
-    return {"ok": True, "id": cur.lastrowid, "duplicate": False}
+    return {"ok": True, "id": cur.lastrowid, "duplicate": False, **extra}
 
 
 def take_operator_prompt(conn: sqlite3.Connection) -> dict[str, Any] | None:
@@ -1117,9 +1158,12 @@ def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None 
     for f in conn.execute("SELECT task_id, what FROM follow_ups WHERE state='open' AND lower(trim(who))='ben' ORDER BY idx"):
         ben.setdefault(f["task_id"], []).append(f["what"])
     intent_ids: set[str] = set()
+    raised: set[str] = set()  # summaries of intents Ben raised from noted log lines
     for r in conn.execute("""SELECT id, summary, context, state, created_at, task_ids, note FROM intents
                              WHERE source='email' AND created_at >= ? ORDER BY created_at DESC""", (cutoff,)):
         intent_ids.add(r["id"])
+        if "raised it from /intents" in (r["context"] or ""):
+            raised.add(r["summary"].lower())
         ctx = r["context"] or ""
         m = re.search(r"\bfrom ([^;(]+)", ctx)
         recv = re.search(r"received (\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}Z?)", ctx)
@@ -1173,6 +1217,8 @@ def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None 
                 hh, mm = run.split(":")
                 at = int(dt.datetime(day.year, day.month, day.day, int(hh), int(mm)).timestamp())
                 desc = re.sub(r"^REPLY:\s*", "", rest)
+                if f'{e.group("client")}: {desc}'.lower() in raised:
+                    continue  # Ben raised an intent from this line; its row shows the email
                 out.append({
                     "at": at, "received": f'{e.group("date") or f.stem} {e.group("time")}',
                     "sender": e.group("sender"), "client": e.group("client"), "summary": desc,

@@ -608,6 +608,10 @@ details.client summary .count { margin-left:8px; }
 .client { font-weight:600; }
 .item .note { grid-column:2 / 4; color:var(--ink2); font-size:13px; }
 .item.bare { grid-template-columns:1fr auto; } .item.bare .note { grid-column:1 / 3; }
+.item form.go { grid-column:2 / 4; display:flex; gap:6px; align-items:center; margin-top:2px; }
+.item form.go input[name=comment] { flex:1; max-width:52ch; font:inherit; font-size:13px; padding:4px 8px;
+  border:1px solid var(--axis); border-radius:6px; background:var(--page); color:var(--ink); }
+.item form.go button { font-size:13px; padding:4px 12px; } .item form.go .muted { font-size:12px; }
 h3.type { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink2); margin:14px 0 2px; }
 h3.type .count { color:var(--muted); font-weight:400; margin-left:6px; }
 .next .head { font-size:16px; } .next .head .item { border-bottom:2px solid var(--s1); }
@@ -1370,6 +1374,7 @@ def intents_page(v: dict[str, Any]) -> str:
         else:
             act = '<span class="muted">Noted, no task</span>'
         fu = "".join(f'<div class="note">Ben: {esc(w[:240])}</div>' for w in d["owed"])
+        fu += _intent_go(d, v)
         hay = " ".join([d["sender"], d["client"], d["summary"], d["note"] or "", *d["owed"],
                         *(k["title"] for k in d["tasks"])]).lower()
         items.append(f'<div class="item em{" owes" if d["owed"] else ""}" data-s="{esc(hay)}" '
@@ -1391,6 +1396,30 @@ def intents_page(v: dict[str, Any]) -> str:
     none = '<p class="empty" id="in-none" hidden>Nothing matches.</p>'
     return page("Intents", f"Intents ({owed} owed)", "Intents", sub, f'{kpi}{none}{table}{skipped}',
                 actions=form + SEEN_BOX, tail=INTENTS_JS)
+
+
+def _intent_go(d: dict[str, Any], v: dict[str, Any]) -> str:
+    """Go for one email on /intents: Ben decided it needs following up. An
+    open intent goes to master as it is, a dismissed one is reopened, a noted
+    email becomes an intent first. A tasked one has no Go here: its tasks do."""
+    from urllib.parse import urlencode
+    if d["action"] == "converted":
+        return ""
+    back = "/intents?" + urlencode({"days": v["days"], "client": v["client"] or ""})
+    iid = d.get("intent_id")
+    if iid and v.get("queued") == iid:
+        return '<div class="note"><b class="st-done">Sent. Master picks it up when idle.</b></div>'
+    if iid:
+        ident = f'<input type="hidden" name="intent" value="{esc(iid)}">'
+    else:
+        ident = "".join(f'<input type="hidden" name="{k}" value="{esc(d.get(k) or "")}">'
+                        for k in ("client", "sender", "summary", "received"))
+    hint = (' <span class="muted">reopens it</span>' if d["action"] == "dismissed" else
+            ' <span class="muted">makes it an intent</span>' if d["action"] == "noted" else "")
+    return (f'<form class="go" method="post" action="/api/prompt"><input type="hidden" name="action" value="intent">'
+            f'{ident}<input type="hidden" name="back" value="{esc(back)}">'
+            f'<input name="comment" maxlength="{store.COMMENT_MAX}" placeholder="Tell master what it needs, optional">'
+            f'<button class="primary">Go</button>{hint}</form>')
 
 
 # Live filter, as on Deliverables, plus the "only what I owe" toggle.
@@ -1732,11 +1761,12 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             try:
                 if path == "/api/prompt":
                     try:
-                        r = store.queue_operator_prompt(conn, (form.get("action") or [""])[0],
-                                                        (form.get("task") or [None])[0],
-                                                        (form.get("comment") or [""])[0],
-                                                        (form.get("question") or [None])[0],
-                                                        (form.get("option") or [None])[0])
+                        one = lambda k: (form.get(k) or [""])[0]  # noqa: E731
+                        r = store.queue_operator_prompt(conn, one("action"), one("task") or None, one("comment"),
+                                                        one("question") or None, one("option") or None,
+                                                        intent_id=one("intent") or None,
+                                                        email={k: one(k) for k in
+                                                               ("client", "sender", "summary", "received")})
                     except ValueError as e:
                         self._json(400, {"ok": False, "error": str(e)})
                         return
@@ -1745,8 +1775,10 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         return
                     self.send_response(303)
                     back = (form.get("back") or ["/board"])[0]
-                    back = back if re.fullmatch(r"/board(/task/[0-9a-f]{12})?", back) else "/board"
-                    self.send_header("Location", back + "?queued=1")
+                    if not re.fullmatch(r"(/board(/task/[0-9a-f]{12})?|/intents(\?[\w=&%+.-]*)?)", back):
+                        back = "/board"
+                    sent = r.get("intent_id") or "1"
+                    self.send_header("Location", back + ("&" if "?" in back else "?") + f"queued={sent}")
                     self.end_headers()
                     return
                 if path == "/api/open":  # a file link on a task or deliverables page
@@ -1806,6 +1838,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 client = (self._query.get("client") or [""])[0].strip() or None
                 v = store.triage_emails(conn, days=max(1, min(window, 90)), client=client)
                 v["owed"] = "owed" in self._query
+                v["queued"] = (self._query.get("queued") or [""])[0]
                 return intents_page(v).encode("utf-8")
             if path == "/deliverables/file":
                 f = store.deliverable_path(conn, (self._query.get("task") or [""])[0],
