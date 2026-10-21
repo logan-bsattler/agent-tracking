@@ -115,10 +115,17 @@ def band(p: float | None, warn: float, drain: float) -> str:
     return "band-drain" if p >= drain else "band-warn" if p >= warn else "band-ok"
 
 
-def _tile(label: str, value: str, delta: str = "", bar: tuple[float, str] | None = None) -> str:
+BAND_KPI = {"band-ok": "k-ok", "band-warn": "k-warn", "band-drain": "k-fail"}
+
+
+def _tile(label: str, value: str, delta: str = "", bar: tuple[float, str] | None = None, cls: str = "k-info") -> str:
+    """A usage number in the same tile the board's KPIs use: number, label,
+    hint, and for a limit a bar coloured by how close it is."""
     b = f'<div class="bar {bar[1]}"><i style="width:{min(bar[0], 100):.0f}%"></i></div>' if bar else ""
-    return (f'<div class="tile"><div class="label">{esc(label)}</div><div class="value">{esc(value)}</div>'
-            f'<div class="delta">{esc(delta)}</div>{b}</div>')
+    if bar:
+        cls = BAND_KPI.get(bar[1], cls)
+    return (f'<div class="kpi {cls}"><span class="n">{esc(value)}</span><span class="label">{esc(label)}</span>'
+            f'<span class="hint">{esc(delta)}</span>{b}</div>')
 
 
 def kpis(s: dict[str, Any]) -> str:
@@ -135,9 +142,10 @@ def kpis(s: dict[str, Any]) -> str:
                              f"resets {when(qv[rk])}" if qv.get(rk) else f"read {age}m ago",
                              (qv[pk], band(qv[pk], warn, hard))))
     elif usage.hook_wired():
-        out.append(_tile("Limits", "pending", "hook is wired; a session started since then will report on its next prompt"))
+        out.append(_tile("Limits", "pending", "hook is wired; a session started since then will report on its next prompt",
+                         cls="k-plain"))
     else:
-        out.append(_tile("Limits", "n/a", "run: python -m coord_mcp.usage setup"))
+        out.append(_tile("Limits", "n/a", "run: python -m coord_mcp.usage setup", cls="k-plain"))
     prev = s["prev_cost"]
     delta = f"vs {money(prev)} previous {s['days']}d" if prev else "no previous period"
     out.append(_tile(f"Spend, last {s['days']} days", money(t["cost"]), delta))
@@ -145,19 +153,19 @@ def kpis(s: dict[str, Any]) -> str:
         p30 = s["prev_cost_30d"]
         out.append(_tile("Spend, last 30 days", money(s["cost_30d"]),
                          f"vs {money(p30)} previous 30d" if p30 else "no previous period"))
-    out.append(_tile("Requests", f"{t['requests']:,}", f"{t['sessions']} sessions"))
+    out.append(_tile("Requests", f"{t['requests']:,}", f"{t['sessions']} sessions", cls="k-alt"))
     total_in = t["cache_read"] + t["input_tokens"] + t["cache_write"]
     hit = (t["cache_read"] / total_in * 100) if total_in else 0
-    out.append(_tile("Cache hit rate", f"{hit:.0f}%", f"{tokens(t['cache_write'])} tokens written to cache"))
+    out.append(_tile("Cache hit rate", f"{hit:.0f}%", f"{tokens(t['cache_write'])} tokens written to cache", cls="k-alt"))
     sub = (t["subagent_cost"] / t["cost"] * 100) if t["cost"] else 0
-    out.append(_tile("Output tokens", tokens(t["output_tokens"]), f"{sub:.0f}% of spend in subagents"))
+    out.append(_tile("Output tokens", tokens(t["output_tokens"]), f"{sub:.0f}% of spend in subagents", cls="k-alt"))
     a = s["attribution"]
     if a["claude_code_share"] is not None:
         share = a["claude_code_share"] * 100
         out.append(_tile("Limit used by Claude Code", f"{share:.0f}%",
                          f"{100 - share:.0f}% went to chat, Desktop or another machine",
                          (share, "band-ok")))
-    return '<div class="row">' + "".join(out) + "</div>"
+    return '<div class="kpis">' + "".join(out) + "</div>"
 
 
 # ------------------------------------------------------------------ charts
@@ -567,17 +575,12 @@ def session_table(s: dict[str, Any]) -> str:
 
 def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | None = None) -> str:
     period = f"{datetime.fromtimestamp(s['start']).strftime('%d %b')} to {datetime.fromtimestamp(s['end']).strftime('%d %b %Y')}"
-    meta_refresh = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     now_card = f'<div class="card"><h2>Right now: the current 5-hour window</h2>{now_section(v)}</div>' if v else ""
     week = runway_chart(v, "weekly", 7 * 24) if v else ""
     week_card = f'<div class="card"><h2>This week: the weekly window</h2>{week}</div>' if week else ""
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude usage</title>
-<style>{CSS}</style></head><body><main>
-<nav><b>Usage</b> · <a href="/board">Board</a> · <a href="/hours">Hours</a> · <a href="/deliverables">Deliverables</a> · <a href="/intents">Intents</a></nav>
-<h1>Claude usage</h1>
-<p class="sub">{esc(period)} · generated {when(s['generated'])}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · spend is API-equivalent, the same figure as <code>/cost</code></p>
-{kpis(s)}
+    sub = (f"{esc(period)} · generated {when(s['generated'])}{' · refreshes every ' + str(refresh) + 's' if refresh else ''}"
+           " · spend is API-equivalent, the same figure as <code>/cost</code>")
+    body = f"""{kpis(s)}
 {now_card}
 {week_card}
 <div class="card"><h2>Limits over time</h2>{quota_chart(s)}</div>
@@ -587,8 +590,9 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
 <div class="card"><h2>By model</h2>{model_table(s)}</div>
 <div class="card"><h2>By project</h2>{project_table(s)}</div>
 <div class="card"><h2>Sessions, most expensive first</h2>{session_table(s)}</div>
-<p class="sub">Spend and sessions come from Claude Code transcripts under ~/.claude/projects, so they cover Claude Code only. Limit percentages are the shared subscription pool, read from the statusLine hook and from Claude Desktop's plan-usage history, so they also move for claude.ai chat, the Desktop app and mobile. Cache reads are priced at the cached rate; 1-hour cache writes at 2x input.</p>
-</main><div id="tip"></div><script>{JS}</script></body></html>"""
+<p class="sub">Spend and sessions come from Claude Code transcripts under ~/.claude/projects, so they cover Claude Code only. Limit percentages are the shared subscription pool, read from the statusLine hook and from Claude Desktop's plan-usage history, so they also move for claude.ai chat, the Desktop app and mobile. Cache reads are priced at the cached rate; 1-hour cache writes at 2x input.</p>"""
+    return page("Usage", "Claude usage", "Claude usage", sub, body, refresh=refresh,
+                tail=f'<div id="tip"></div><script>{JS}</script>')
 
 
 BOARD_CSS = """
@@ -930,7 +934,6 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
     elif not fresh:
         needs = f'<p class="empty">Nothing from the last {STALE_DAYS} days; the rest is under Stale.</p>'
     done_24h = [d for d in v["recent"] if t - d["since"] <= 86400]
-    meta_refresh = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     queued = v.get("queued", 0)
     queued_note = (f'<span class="age">{queued} queued for master</span>' if queued
                    else '<span class="age">sent to master when idle</span>')
@@ -944,15 +947,9 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
         body = _by_client(rows, t, title + "|") if rows else f'<p class="empty">{esc(empty)}</p>'
         return (f'<div class="card grp" data-fold="closed"><h2>{esc(title)}<span class="count">{len(rows)}</span></h2>'
                 f"{body}</div>")
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta_refresh}
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>{'(' + str(n) + ') ' if n else ''}Coord board</title>
-<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}{CENTER_CSS}</style></head><body class="wide"><main>
-<nav><a href="/">Usage</a> · <b>Board</b> · <a href="/hours">Hours</a> · <a href="/deliverables">Deliverables</a> · <a href="/intents">Intents</a></nav>
-<div class="topbar"><div><h1>Command center</h1>
-<p class="sub">as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · straight from ~/.coord/coord.db {scope}</p></div>
-<div class="btns">{_button("next", "Next question", primary=True)}{_button("board", "Board check")}{queued_note}
-<span class="seenbox"><span id="newcount" class="age"></span><button id="seen" type="button">Mark seen</button></span></div></div>
-{_kpis(v, n, len(done_24h))}
+    sub = f"as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · straight from ~/.coord/coord.db {scope}"
+    actions = f'{_button("next", "Next question", primary=True)}{_button("board", "Board check")}{queued_note}{SEEN_BOX}'
+    body = f"""{_kpis(v, n, len(done_24h))}
 {_fleet(fleet_rows, t, client)}
 {_next_up(fresh, t, v.get("question"))}
 <div class="lanes">
@@ -978,9 +975,9 @@ try {{ const k = "coord-open", o = new Set(JSON.parse(localStorage.getItem(k) ||
 </div>
 {by_client_grp(f"Stale, over {STALE_DAYS} days", stale, "Nothing of yours is older than a week.")}
 {by_client_grp("Deferred", v.get("deferred", []), "Nothing deferred.")}
-{grp("Acknowledged failures", v.get("acknowledged", []), "No failures on record.", shut=True)}
-{COLLAPSE_JS}{SEEN_JS}
-</main></body></html>"""
+{grp("Acknowledged failures", v.get("acknowledged", []), "No failures on record.", shut=True)}"""
+    return page("Board", f"{'(' + str(n) + ') ' if n else ''}Coord board", "Command center", sub, body,
+                actions=actions, refresh=refresh)
 
 
 CENTER_CSS = """
@@ -1037,7 +1034,58 @@ body.wide main { max-width:1500px; }
 .tl-note { color:var(--muted); font-size:12px; } .tl-what { overflow-wrap:anywhere; }
 .ev-picked_up { --e:var(--s1); } .ev-completed { --e:var(--good); } .ev-failed { --e:var(--critical); } .ev-parked { --e:var(--serious); }
 .next { border-left:5px solid var(--s1); }
+.k-ok { --k:var(--good); } .k-warn { --k:var(--warn); } .k-info { --k:var(--s1); } .k-alt { --k:var(--s3); }
+.k-plain { --k:var(--ink2); } .k-hours { --k:var(--s1); } .k-all { --k:var(--ink); }
+.kpi .bar { height:6px; border-radius:3px; background:var(--grid); margin-top:8px; overflow:hidden; }
+.kpi .bar i { display:block; height:100%; }
+.kpi.selected { outline:2px solid var(--s1); }
+.item[hidden], .card[hidden] { display:none; }
+a.kpi:hover { border-color:var(--s1); }
+.topbar form.filter { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin:0; font-size:13px; }
+.topbar form.filter label { white-space:nowrap; }
+.topbar form.filter input { font:inherit; font-size:13px; padding:4px 7px; border-radius:6px;
+  border:1px solid var(--axis); background:var(--surface); color:var(--ink); }
+.topbar form.filter input[type=number] { width:4.5em; } .topbar form.filter input[type=search] { width:22ch; }
+.topbar form.filter button, .topbar a.btn { font:inherit; font-size:13px; padding:5px 12px; border-radius:6px; cursor:pointer;
+  border:1px solid var(--axis); background:var(--surface); color:var(--ink); text-decoration:none; }
+.topbar form.filter button:hover, .topbar a.btn:hover { border-color:var(--s1); }
+.topbar form.go { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start; margin:0; }
+.topbar form.go textarea { width:min(48ch, 70vw); font-size:13px; padding:6px 8px; }
+.topbar form.go .btns { margin-top:0; flex-direction:column; align-items:flex-start; gap:4px; }
+.topbar form.go .btns .muted { font-size:12px; }
+.item .what { min-width:0; overflow-wrap:anywhere; }
+.item .path { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+.item .size { color:var(--muted); font-size:12px; margin-right:8px; }
+.item .act { color:var(--ink2); font-size:13px; }
+.lane .item.owes { background:color-mix(in srgb, var(--critical) 5%, transparent); }
+.count.owed { color:var(--critical); font-weight:600; }
 """
+
+# Nav links in the order every page shows them; the current page is bold.
+NAV = (("/", "Usage"), ("/board", "Board"), ("/hours", "Hours"), ("/deliverables", "Deliverables"),
+       ("/intents", "Intents"))
+
+SEEN_BOX = ('<span class="seenbox"><span id="newcount" class="age"></span>'
+            '<button id="seen" type="button">Mark seen</button></span>')
+
+
+def page(current: str, title: str, h1: str, sub: str, body: str, actions: str = "",
+         refresh: int | None = None, tail: str = "") -> str:
+    """Every dashboard page, so none can drift from the others: the one nav
+    (`current` bold), the topbar (h1 and sub on the left, the page's actions
+    on the right), the wide command-center layout, folding cards, and the
+    Mark-seen tagging of anything carrying data-since. `title` is text;
+    `h1`, `sub`, `body`, `actions` and `tail` are HTML. `refresh` adds the
+    meta refresh; `tail` goes after the body for a page's own scripts."""
+    nav = "<nav>" + " · ".join(f"<b>{esc(label)}</b>" if label == current else f'<a href="{href}">{esc(label)}</a>'
+                               for href, label in NAV) + "</nav>"
+    meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    btns = f'<div class="btns">{actions}</div>' if actions else ""
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">{meta}'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title>'
+            f'<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}{CENTER_CSS}</style></head><body class="wide"><main>'
+            f'{nav}<div class="topbar"><div><h1>{h1}</h1><p class="sub">{sub}</p></div>{btns}</div>\n'
+            f'{body}\n{COLLAPSE_JS}{SEEN_JS}{tail}</main></body></html>')
 
 
 def _val(v: Any, text=esc) -> str:
@@ -1116,19 +1164,11 @@ def open_path(p: Path, how: str = "open") -> None:
         os.startfile(str(p))  # type: ignore[attr-defined]  # Windows only, as is this dashboard
 
 
-def _shell(title: str, body: str) -> str:
-    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
-            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title>'
-            f"<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}</style></head><body><main>{body}{COLLAPSE_JS}</main></body></html>")
-
-
 def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False) -> str:
     """One task in full: what was asked, what came back, and how it got there."""
-    nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Task</b> · '
-           '<a href="/deliverables">Deliverables</a> · <a href="/intents">Intents</a></nav>')
     if d is None:
-        return _shell("Coord task", f'{nav}<h1>No such task</h1>'
-                      f'<p class="sub">Nothing on the board has id <code>{esc(task_id)}</code>.</p>')
+        return page("Board", "Coord task", "No such task",
+                    f'Nothing on the board has id <code>{esc(task_id)}</code>.', "")
     took = ""
     if d["completed_at"]:
         m = (d["completed_at"] - d["created_at"]) // 60
@@ -1183,24 +1223,27 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
             f'<span class="muted">{esc(c["assigned_to"] or "")} · {esc(c["state"])}</span></li>'
             for c in d["children"])
         cards.append(f'<div class="card"><h2>Follow-up tasks</h2><ul class="vals">{items}</ul></div>')
-    head = (f'{nav}<h1>{esc(d["title"])}<span class="state st-{esc(d["state"])}">{esc(d["state"])}</span></h1>'
-            f'<p class="sub">{esc(d["assigned_to"] or "")} · {esc(d["kind"])}{took}</p>'
-            f'<form class="card go" method="post" action="/api/prompt"><h2>Tell master</h2>'
-            f'<input type="hidden" name="action" value="go"><input type="hidden" name="task" value="{esc(d["id"])}">'
-            f'<input type="hidden" name="back" value="/board/task/{esc(d["id"])}">'
-            f'<textarea name="comment" rows="2" maxlength="{store.COMMENT_MAX}" '
-            f'placeholder="Optional direction, e.g. &quot;split it: schema first&quot; or &quot;hold until Monday&quot;"></textarea>'
-            f'<div class="btns"><button class="primary">Go</button>'
-            + ('<b class="st-done">Sent. Master picks it up when idle.</b>' if queued else
-               '<span class="muted">queued for master; it runs when master is idle</span>')
-            + '</div></form>')
+    h1 = f'{esc(d["title"])}<span class="state st-{esc(d["state"])}">{esc(d["state"])}</span>'
+    sub = f'{esc(d["assigned_to"] or "")} · {esc(d["kind"])}{took} · <code>{esc(d["id"])}</code>'
+    # The Go form lives in the topbar: direction on the left, the button beside it.
+    go = (f'<form class="go" method="post" action="/api/prompt">'
+          f'<input type="hidden" name="action" value="go"><input type="hidden" name="task" value="{esc(d["id"])}">'
+          f'<input type="hidden" name="back" value="/board/task/{esc(d["id"])}">'
+          f'<textarea name="comment" rows="2" maxlength="{store.COMMENT_MAX}" '
+          f'placeholder="Tell master. Optional direction, e.g. &quot;split it: schema first&quot; or &quot;hold until Monday&quot;"></textarea>'
+          f'<div class="btns"><button class="primary">Go</button>'
+          + ('<b class="st-done">Sent. Master picks it up when idle.</b>' if queued else
+             '<span class="muted">queued for master; runs when master is idle</span>')
+          + '</div></form>')
+    head = ""
     q = d.get("question")
     if q:
-        head += (f'<div class="card go"><h2>Master asks</h2><p>{esc(q["question"])}</p>'
+        head += (f'<div class="card go next"><h2>Master asks</h2><p>{esc(q["question"])}</p>'
                  f'<div class="btns">{_answer_buttons(q, "/board/task/" + d["id"])}</div>'
                  f'<p class="muted">On <code>{esc(q["ref"])}</code>. A press sends master '
                  f'&quot;Answer on {esc(q["ref"])}: &lt;option&gt;&quot; when it is idle.</p></div>')
-    return _shell(f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', head + "".join(cards) + FILE_JS)
+    return page("Board", f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', h1, sub, head + "".join(cards),
+                actions=go, tail=FILE_JS)
 
 
 def _size(n: int | None) -> str:
@@ -1212,27 +1255,37 @@ def _size(n: int | None) -> str:
 def deliverables_page(v: dict[str, Any]) -> str:
     """Files finished tasks produced, by client, each beside what Ben owes on it."""
     from urllib.parse import urlencode
-    nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <a href="/hours">Hours</a> · '
-           '<b>Deliverables</b> · <a href="/intents">Intents</a></nav>')
     t, files = v["as_of"], v["files"]
-    form = (f'<form class="card" method="get" action="/deliverables">'
-            f'<label>Last <input type="number" name="days" min="1" max="365" value="{v["days"]}" size="4"> days</label> '
-            f'<label>client <input name="client" value="{esc(v["client"] or "")}" placeholder="all" size="10"></label> '
-            f'<button>Show</button> · <label>search <input type="search" id="dl-q" name="q" '
-            f'value="{esc(v.get("q") or "")}" placeholder="file, path, task, owed…" size="28" autocomplete="off"></label> '
-            f'<span class="muted" id="dl-n"></span></form>')
-    sub = ('<p class="sub">Read from results on the board: data-pull outputs, changed files and '
+    form = (f'<form class="filter" method="get" action="/deliverables">'
+            f'<label>Last <input type="number" name="days" min="1" max="365" value="{v["days"]}"> days</label>'
+            f'<label>client <input name="client" value="{esc(v["client"] or "")}" placeholder="all" size="10"></label>'
+            f'<label>search <input type="search" id="dl-q" name="q" '
+            f'value="{esc(v.get("q") or "")}" placeholder="file, path, task, owed…" autocomplete="off"></label>'
+            f'<button>Show</button><span class="muted" id="dl-n"></span></form>')
+    sub = ('Read from results on the board: data-pull outputs, changed files and '
            'investigation pointers that a person would open. Newest first; a file two tasks touched '
-           'shows under the newer one. <i>missing</i> means the result named it but it is not on disk.</p>')
+           'shows under the newer one. <i>missing</i> means the result named it but it is not on disk.')
     if not files:
-        return _shell("Deliverables", f'{nav}<h1>Deliverables</h1>{sub}{form}'
-                      '<p class="empty">No deliverables in this range.</p>')
+        return page("Deliverables", "Deliverables", "Deliverables", sub,
+                    '<p class="empty">No deliverables in this range.</p>', actions=form + SEEN_BOX)
     groups: dict[str, list[dict[str, Any]]] = {}
     for d in files:
         groups.setdefault(d["client"], []).append(d)
+    owed_n = sum(1 for d in files if d["ben"])
+    missing = sum(1 for d in files if not d["exists"])
+    fresh = sum(1 for d in files if t - d["completed_at"] <= 86400)
+    kpi = '<div class="kpis">' + "".join(
+        f'<div class="kpi {cls}{" zero" if not n else ""}"><span class="n">{n}</span>'
+        f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></div>'
+        for label, n, cls, hint in (
+            ("Files", len(files), "k-info", f"last {v['days']} days"),
+            ("New today", fresh, "k-done", "finished in the last 24h"),
+            ("Owed to you", owed_n, "k-you", "a result named a step for Ben"),
+            ("Missing", missing, "k-fail", "named in a result, not on disk"),
+            ("Clients", len(groups), "k-alt", "with deliverables in range"))) + "</div>"
     cards = []
     for c, g in sorted(groups.items(), key=lambda kv: -max(d["completed_at"] for d in kv[1])):
-        trs = []
+        rows = []
         for d in g:
             name = file_link(d["task_id"], d["path"], d["exists"], d["name"])
             if not d["exists"]:
@@ -1244,82 +1297,93 @@ def deliverables_page(v: dict[str, Any]) -> str:
             hay = " ".join([d["name"], d["path"], d["title"], d["task_id"], c, *d["ben"]]).lower()
             task = (f'<div class="muted">from task <a class="drill" href="/board/task/{esc(d["task_id"])}">'
                     f'{esc(d["title"])}</a> <code>{esc(d["task_id"])}</code></div>')
-            trs.append(f'<tr class="dl{" owes" if d["ben"] else ""}" data-s="{esc(hay)}"><td>{name}'
-                       f'<div class="muted" style="overflow-wrap:anywhere">{esc(d["path"])}</div>{task}{owed}</td>'
-                       f'<td class="n">{_size(d["size"])}</td><td class="n">{_age(d["completed_at"], t)}</td></tr>')
+            rows.append(f'<div class="item bare dl{" owes" if d["ben"] else ""}" data-s="{esc(hay)}" '
+                        f'data-since="{int(d["completed_at"])}" data-age="{_age_bucket(d["completed_at"], t)}">'
+                        f'<div class="what">{name}<div class="path">{esc(d["path"])}</div>{task}</div>'
+                        f'<div class="age"><span class="size">{_size(d["size"])}</span>{_age(d["completed_at"], t)}</div>'
+                        f'{owed}</div>')
         owe = sum(1 for d in g if d["ben"])
         badge = f' <span class="count owed">{owe} owed</span>' if owe else ""
-        cards.append(f'<div class="card dlc"><h2>{esc(c)}<span class="count">{len(g)}</span>{badge}</h2><div class="wrap"><table>'
-                     f'<tr><th>File</th><th class="n">Size</th><th class="n">Done</th></tr>'
-                     f'{"".join(trs)}</table></div></div>')
+        cards.append(f'<div class="card lane dlc"><h2>{esc(c)}<span class="count">{len(g)}</span>{badge}</h2>'
+                     f'{"".join(rows)}</div>')
     none = '<p class="empty" id="dl-none" hidden>Nothing matches.</p>'
-    return _shell(f"Deliverables ({len(files)})",
-                  f'{nav}<h1>Deliverables</h1>{sub}{form}{none}{"".join(cards)}{DELIVERABLES_JS}{FILE_JS}')
+    return page("Deliverables", f"Deliverables ({len(files)})", "Deliverables", sub,
+                f'{kpi}{none}{"".join(cards)}', actions=form + SEEN_BOX, tail=DELIVERABLES_JS + FILE_JS)
 
 
 
 def intents_page(v: dict[str, Any]) -> str:
     """Every email the hourly triage reviewed, what it did with it, and what Ben owes."""
-    nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <a href="/hours">Hours</a> · '
-           '<a href="/deliverables">Deliverables</a> · <b>Intents</b></nav>')
     t, rows = v["as_of"], v["emails"]
-    form = (f'<form class="card" method="get" action="/intents">'
-            f'<label>Last <input type="number" name="days" min="1" max="90" value="{v["days"]}" size="4"> days</label> '
-            f'<label>client <input name="client" value="{esc(v["client"] or "")}" placeholder="all" size="10"></label> '
-            f'<button>Show</button> · <label><input type="checkbox" id="in-owed"{" checked" if v.get("owed") else ""}> '
-            f'only what I owe</label> · <label>search <input type="search" id="in-q" value="{esc(v.get("q") or "")}" '
-            f'placeholder="sender, client, subject…" size="24" autocomplete="off"></label> '
-            f'<span class="muted" id="in-n"></span></form>')
+    form = (f'<form class="filter" method="get" action="/intents">'
+            f'<label>Last <input type="number" name="days" min="1" max="90" value="{v["days"]}"> days</label>'
+            f'<label>client <input name="client" value="{esc(v["client"] or "")}" placeholder="all" size="10"></label>'
+            f'<label>search <input type="search" id="in-q" value="{esc(v.get("q") or "")}" '
+            f'placeholder="sender, client, subject…" autocomplete="off"></label>'
+            f'<label><input type="checkbox" id="in-owed"{" checked" if v.get("owed") else ""}> only what I owe</label>'
+            f'<button>Show</button><span class="muted" id="in-n"></span></form>')
     owed = sum(1 for d in rows if d["owed"])
     tasked = sum(1 for d in rows if d["action"] == "converted")
-    sub = (f'<p class="sub">{len(rows)} emails reviewed · {tasked} turned into tasks · '
-           f'{sum(1 for d in rows if d["action"] == "dismissed")} dismissed · '
-           f'{sum(1 for d in rows if d["action"] == "noted")} noted only · '
-           f'<b>{owed} with a follow-up for you</b>. Follow-up is an open loose end addressed to you on the '
-           f'email\'s tasks, or a reply the triage flagged as yours; the page cannot see whether you have '
-           f'since replied.</p>')
+    dismissed = sum(1 for d in rows if d["action"] == "dismissed")
+    noted = sum(1 for d in rows if d["action"] == "noted")
+    open_intents = sum(1 for d in rows if d["action"] == "intent")
+    sub = (f'{len(rows)} emails reviewed · {tasked} turned into tasks · {dismissed} dismissed · '
+           f'{noted} noted only · <b>{owed} with a follow-up for you</b>. Follow-up is an open loose end '
+           f'addressed to you on the email\'s tasks, or a reply the triage flagged as yours; the page cannot '
+           f'see whether you have since replied.')
     if not rows:
-        return _shell("Intents", f'{nav}<h1>Intents</h1>{sub}{form}<p class="empty">No emails in this range.</p>')
-    trs = []
+        return page("Intents", "Intents", "Intents", sub, '<p class="empty">No emails in this range.</p>',
+                    actions=form + SEEN_BOX)
+    kpi = '<div class="kpis">' + "".join(
+        f'<div class="kpi {cls}{" zero" if not n else ""}"><span class="n">{n}</span>'
+        f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></div>'
+        for label, n, cls, hint in (
+            ("Reviewed", len(rows), "k-info", f"emails, last {v['days']} days"),
+            ("Open intents", open_intents, "k-wait", "on the board, not yet tasked"),
+            ("Tasked", tasked, "k-done", "turned into board tasks"),
+            ("Dismissed", dismissed, "k-plain", "triage saw nothing to do"),
+            ("Owed to you", owed, "k-you", "a reply or a ruling is yours"))) + "</div>"
+    items = []
     for d in rows:
         if d["action"] == "converted":
             act = "Tasked → " + ", ".join(
                 f'<a class="drill" href="/board/task/{esc(k["id"])}">{esc(k["title"])}</a> '
                 f'<span class="state st-{esc(k["state"])}">{esc(k["state"])}</span>' for k in d["tasks"])
         elif d["action"] == "dismissed":
-            act = f'Dismissed<div class="muted">{esc((d["note"] or "")[:300])}</div>'
+            act = f'Dismissed<span class="muted"> · {esc((d["note"] or "")[:300])}</span>'
         elif d["action"] == "intent":
             act = f'Intent <code>{esc(d["intent_id"])}</code>'
         else:
             act = '<span class="muted">Noted, no task</span>'
-        fu = "".join(f'<div class="note">{esc(w[:240])}</div>' for w in d["owed"]) or '<span class="muted">—</span>'
+        fu = "".join(f'<div class="note">Ben: {esc(w[:240])}</div>' for w in d["owed"])
         hay = " ".join([d["sender"], d["client"], d["summary"], d["note"] or "", *d["owed"],
                         *(k["title"] for k in d["tasks"])]).lower()
-        trs.append(f'<tr class="em{" owes" if d["owed"] else ""}" data-s="{esc(hay)}">'
-                   f'<td class="n">{esc(d["received"] or "")}<div class="muted">{_age(d["at"], t)}</div></td>'
-                   f'<td>{esc(d["sender"])}<div class="muted">{esc(d["client"])}</div></td>'
-                   f'<td>{esc(d["summary"])}</td><td>{act}</td><td>{fu}</td></tr>')
+        items.append(f'<div class="item em{" owes" if d["owed"] else ""}" data-s="{esc(hay)}" '
+                     f'data-since="{int(d["at"])}" data-age="{_age_bucket(d["at"], t)}">'
+                     f'<div class="client">{esc(d["client"])}</div>'
+                     f'<div class="what"><b>{esc(d["sender"])}</b> <span class="muted">{esc(d["received"] or "")}</span>'
+                     f'<div>{esc(d["summary"])}</div><div class="act">{act}</div></div>'
+                     f'<div class="age">{_age(d["at"], t)}</div>{fu}</div>')
     badge = f' <span class="count owed">{owed} owed</span>' if owed else ""
-    table = (f'<div class="card"><h2>Emails<span class="count" id="in-c">{len(rows)}</span>'
-             f'{badge}</h2><div class="wrap"><table>'
-             f'<tr><th class="n">Received</th><th>From</th><th>What</th><th>Action</th><th>Follow-up for you</th></tr>'
-             f'{"".join(trs)}</table></div></div>')
+    table = (f'<div class="card lane"><h2>Emails<span class="count" id="in-c">{len(rows)}</span>'
+             f'{badge}</h2>{"".join(items)}</div>')
     skipped = ""
     if v["skipped"]:
         n = sum(s["n"] for s in v["skipped"])
-        items = "".join(f'<li><span class="muted">{esc(s["day"])} {esc(s["run"])}</span> · {s["n"]} · '
-                        f'{esc(s["what"][:300])}</li>' for s in v["skipped"])
+        li = "".join(f'<li><span class="muted">{esc(s["day"])} {esc(s["run"])}</span> · {s["n"]} · '
+                     f'{esc(s["what"][:300])}</li>' for s in v["skipped"])
         skipped = (f'<details class="card"><summary><b>Skipped as automated</b> '
-                   f'<span class="count">{n}</span></summary><ul>{items}</ul></details>')
+                   f'<span class="count">{n}</span></summary><ul>{li}</ul></details>')
     none = '<p class="empty" id="in-none" hidden>Nothing matches.</p>'
-    return _shell(f"Intents ({owed} owed)", f'{nav}<h1>Intents</h1>{sub}{form}{none}{table}{skipped}{INTENTS_JS}')
+    return page("Intents", f"Intents ({owed} owed)", "Intents", sub, f'{kpi}{none}{table}{skipped}',
+                actions=form + SEEN_BOX, tail=INTENTS_JS)
 
 
 # Live filter, as on Deliverables, plus the "only what I owe" toggle.
 INTENTS_JS = """<script>
 (() => { const q = document.getElementById("in-q"), o = document.getElementById("in-owed"),
     n = document.getElementById("in-n"), c = document.getElementById("in-c"),
-    none = document.getElementById("in-none"), rows = [...document.querySelectorAll("tr.em")];
+    none = document.getElementById("in-none"), rows = [...document.querySelectorAll(".em")];
   if (!q) return;
   const run = () => {
     const words = q.value.toLowerCase().split(/\\s+/).filter(Boolean);
@@ -1338,7 +1402,7 @@ INTENTS_JS = """<script>
 # client or what Ben owes. Kept in ?q= so a filtered view can be bookmarked.
 DELIVERABLES_JS = """<script>
 (() => { const q = document.getElementById("dl-q"), n = document.getElementById("dl-n"),
-    none = document.getElementById("dl-none"), rows = [...document.querySelectorAll("tr.dl")];
+    none = document.getElementById("dl-none"), rows = [...document.querySelectorAll(".dl")];
   if (!q) return;
   q.form.addEventListener("submit", () => { if (!q.value.trim()) q.disabled = true; });
   const run = () => {
@@ -1346,9 +1410,9 @@ DELIVERABLES_JS = """<script>
     let shown = 0;
     rows.forEach(r => { const hit = words.every(w => r.dataset.s.includes(w)); r.hidden = !hit; shown += hit; });
     document.querySelectorAll(".card.dlc").forEach(c => {
-      const k = c.querySelectorAll("tr.dl:not([hidden])").length;
+      const k = c.querySelectorAll(".dl:not([hidden])").length;
       c.hidden = !k; c.querySelector("h2 .count").textContent = k;
-      const o = c.querySelector("h2 .owed"), m = c.querySelectorAll("tr.owes:not([hidden])").length;
+      const o = c.querySelector("h2 .owed"), m = c.querySelectorAll(".owes:not([hidden])").length;
       if (o) { o.textContent = m + " owed"; o.hidden = !m; } });
     n.textContent = words.length ? shown + " of " + rows.length : "";
     none.hidden = !(words.length && !shown);
@@ -1391,9 +1455,8 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
     """Day x client grid, then each client's tasks. A draft for the operator."""
     from datetime import date, timedelta
     from urllib.parse import urlencode
-    nav = ('<nav><a href="/">Usage</a> · <a href="/board">Board</a> · <b>Hours</b> · '
-           '<a href="/deliverables">Deliverables</a> · <a href="/intents">Intents</a></nav>')
     qs = urlencode({k: v for k, v in (("start", start), ("end", end), ("client", client)) if v})
+    range_qs = urlencode({"start": start, "end": end})
     # Every day in range, empty ones too, so a gap reads as a gap. Stops at
     # today: the rest of the billing period has nothing to show yet.
     lo, hi = hours.parse_day(start), min(hours.parse_day(end), today or date.today())
@@ -1403,21 +1466,36 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
     grid: dict[tuple[str, str], float] = {}
     for r in rows:
         grid[(r["day"], r["client"])] = grid.get((r["day"], r["client"]), 0.0) + r["total_min"]
-    form = (f'<form class="card" method="get" action="/hours">'
-            f'<label>From <input type="date" name="start" value="{esc(start)}"></label> '
-            f'<label>to <input type="date" name="end" value="{esc(end)}"></label> '
-            f'<label>client <input name="client" value="{esc(client or "")}" placeholder="all" size="10"></label> '
-            f'<button>Show</button> · <a href="/hours.csv?{esc(qs)}">CSV</a></form>')
-    caveat = ('<p class="sub">Draft, not a bill. Agent time is measured from transcripts (gaps between a '
+    form = (f'<form class="filter" method="get" action="/hours">'
+            f'<label>From <input type="date" name="start" value="{esc(start)}"></label>'
+            f'<label>to <input type="date" name="end" value="{esc(end)}"></label>'
+            f'<label>client <input name="client" value="{esc(client or "")}" placeholder="all" size="10"></label>'
+            f'<button>Show</button><a class="btn" href="/hours.csv?{esc(qs)}">CSV</a></form>')
+    caveat = ('Draft, not a bill. Agent time is measured from transcripts (gaps between a '
               f"client's requests, each capped at {hours.IDLE_GAP // 60} min) and is not Ben's time; "
               'operator time is what <code>coord_log_time</code> recorded; meeting time is your Outlook '
               'calendar (busy and tentative, overlaps shared), which shows invitations, not attendance. '
               '<i>Internal</i> is Logan-only meetings and is never pushed. Sessions outside client folders '
               '(master, Posey) are excluded. <i>est</i> marks tasks from before pickup events were recorded, '
-              'timed from creation to close. Hours round to 0.25 on this page only.</p>')
+              'timed from creation to close. Hours round to 0.25 on this page only.')
+    title = f"Hours, {start} to {end}"
     if not rows:
-        return _shell("Hours", f'{nav}<h1>Hours</h1>{caveat}{form}'
-                      '<p class="empty">No client activity in this range.</p>')
+        return page("Hours", "Hours", title, caveat, '<p class="empty">No client activity in this range.</p>',
+                    actions=form)
+    # One tile per client with its hours in range, then the total; a click narrows the page.
+    tiles = []
+    for c in clients:
+        mins = sum(grid.get((d, c), 0.0) for d in days)
+        n_tasks = len({r["task_id"] for r in rows if r["client"] == c and r["task_id"] not in (hours.UNASSIGNED, meetings.MEETINGS)})
+        n_days = sum(1 for d in days if grid.get((d, c), 0.0))
+        href = f"/hours?{range_qs}" if client == c else f"/hours?{range_qs}&client={quote(c)}"
+        tiles.append(f'<a class="kpi k-hours{" selected" if client == c else ""}" href="{esc(href)}">'
+                     f'<span class="n">{_h(mins)}</span><span class="label">{esc(c)}</span>'
+                     f'<span class="hint">{n_tasks} task{"" if n_tasks == 1 else "s"} · {n_days} day{"" if n_days == 1 else "s"}</span></a>')
+    tiles.append(f'<a class="kpi k-all" href="/hours?{range_qs}"><span class="n">{_h(sum(grid.values()))}</span>'
+                 f'<span class="label">All clients</span><span class="hint">{len(clients)} client{"" if len(clients) == 1 else "s"} '
+                 f'· {len(days)} day{"" if len(days) == 1 else "s"}</span></a>')
+    kpi = f'<div class="kpis">{"".join(tiles)}</div>'
     head = "".join(f'<th class="n">{esc(c)}</th>' for c in clients)
     lines = []
     for d in days:
@@ -1466,7 +1544,7 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
                  f'which client each belongs to (or skip); <code>coord_assign_meeting</code> remembers it.</p>'
                  f'<div class="wrap"><table><tr><th>Subject</th><th>Organizer</th><th class="n">Times</th>'
                  f'<th class="n">Hours</th></tr>{trs}</table></div></div>')
-    return _shell("Hours", f'{nav}<h1>Hours</h1>{caveat}{form}{loose}{table}{"".join(per)}{pushed}')
+    return page("Hours", "Hours", title, caveat, f'{kpi}{loose}{table}{"".join(per)}{pushed}', actions=form)
 
 
 def billing_period(today=None):
