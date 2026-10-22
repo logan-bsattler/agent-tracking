@@ -77,6 +77,14 @@ def test_never_delivered_fires_after_threshold_only(conn):
     assert f"1 never delivered ({tid})" in _text(conn)
 
 
+def test_held_task_is_quiet_until_the_hold_ages(conn):
+    tid = _task(conn, "Royal")
+    store.record_decision(conn, "hold until DEVL refresh", task_id=tid)
+    assert _fires(conn, store.MINDER_UNDELIVERED + 1)["reason"] == "nothing owed"
+    r = _fires(conn, store.MINDER_HOLD + 1)
+    assert r["fired"] and r["owed"]["undelivered"] == [tid]
+
+
 def test_picked_up_task_is_delivered(conn):
     tid = _task(conn, "LNK")
     store.get_task(conn, tid, reader="LNK")

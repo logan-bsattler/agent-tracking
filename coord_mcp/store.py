@@ -1109,6 +1109,7 @@ MINDER_UNDELIVERED = _env_minutes("UNDELIVERED", 15)  # open, never picked up, n
 MINDER_UNREAD = _env_minutes("UNREAD", 10)            # done or failed, no lead read since
 MINDER_LOOSE = _env_minutes("LOOSE", 30)              # open client follow-up with no child task
 MINDER_INTENTS = _env_minutes("INTENTS", 15)          # open intent
+MINDER_HOLD = _env_minutes("HOLD", 12 * 60)           # undelivered with a decision this recent is held
 MINDER_EVERY = _env_minutes("EVERY", 30)              # at most one minder prompt per this
 MINDER_IDS = 5                                        # ids listed per condition; the rest is a count
 
@@ -1116,11 +1117,15 @@ MINDER_IDS = 5                                        # ids listed per condition
 def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     """Ids per condition, each past its threshold. Empty lists mean nothing owed."""
     parked = [d["id"] for d in parked_tasks(conn) if d["parked_at"] <= now_ts - MINDER_PARKED * 60]
+    # A recent decision on an undelivered task is master holding it on purpose
+    # (waiting on a refresh, an access grant). It comes back once the decision
+    # is MINDER_HOLD old, so a hold nobody restates is not forgotten either.
     undelivered = [r["id"] for r in conn.execute(
         """SELECT t.id FROM tasks t
            WHERE t.state='open' AND t.picked_up_at IS NULL AND t.created_at <= ?
              AND NOT EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id)
-           ORDER BY t.created_at""", (now_ts - MINDER_UNDELIVERED * 60,))]
+             AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.task_id = t.id AND d.created_at > ?)
+           ORDER BY t.created_at""", (now_ts - MINDER_UNDELIVERED * 60, now_ts - MINDER_HOLD * 60))]
     # A decision on the task or a child task since it finished is the master
     # acting on the result, whether or not it fetched the result itself.
     unread = [r["id"] for r in conn.execute(
