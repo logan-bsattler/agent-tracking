@@ -1474,10 +1474,17 @@ def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None 
                 desc = re.sub(r"^REPLY:\s*", "", rest)
                 if f'{e.group("client")}: {desc}'.lower() in raised:
                     continue  # Ben raised an intent from this line; its row shows the email
+                # An intent outside the window (raised earlier that day, or days
+                # before a later email cited it) is not in intent_ids; read its
+                # state from the board rather than calling it open.
+                action = "noted"
+                if ref:
+                    st = conn.execute("SELECT state FROM intents WHERE id=?", (ref.group(1),)).fetchone()
+                    action = "intent" if st is None or st["state"] == "open" else st["state"]
                 out.append({
                     "at": at, "received": f'{e.group("date") or f.stem} {e.group("time")}',
                     "sender": e.group("sender"), "client": e.group("client"), "summary": desc,
-                    "action": "intent" if ref else "noted", "intent_id": ref.group(1) if ref else None,
+                    "action": action, "intent_id": ref.group(1) if ref else None,
                     "tasks": [], "note": None,
                     "owed": ["Reply to the sender (triage flagged it as yours)."] if _REPLY_OWED.search(rest) else [],
                 })

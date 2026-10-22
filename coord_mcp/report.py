@@ -1653,7 +1653,8 @@ def hours_csv(rows: list[dict[str, Any]]) -> str:
 
 
 def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | None,
-               push: dict[str, Any], today=None, unclassified: list[dict[str, Any]] | None = None) -> str:
+               push: dict[str, Any], today=None, unclassified: list[dict[str, Any]] | None = None,
+               choices: list[str] | None = None) -> str:
     """Day x client grid, then each client's tasks. A draft for the operator."""
     from datetime import date, timedelta
     from urllib.parse import urlencode
@@ -1740,12 +1741,24 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
               f'out until linked with <code>coord_set_pipeline_task</code>.</p></div>')
     loose = ""
     if unclassified:
+        # Same choices coord_assign_meeting takes: a client key, Internal, or skip.
+        opts = "".join(f'<option value="{esc(c)}">{esc(c)}</option>'
+                       for c in [*(choices or hours.CLIENTS), meetings.INTERNAL]) + '<option value="skip">Skip</option>'
+        back = f"/hours?{qs}" if qs else "/hours"
+
+        def pick(u):
+            return (f'<form class="go" method="post" action="/api/meeting/assign">'
+                    f'<input type="hidden" name="subject" value="{esc(u["subject"])}">'
+                    f'<input type="hidden" name="back" value="{esc(back)}">'
+                    f'<select name="client" required><option value="">client…</option>{opts}</select>'
+                    f'<button>Classify</button></form>')
         trs = "".join(f'<tr><td>{esc(u["subject"])}</td><td class="muted">{esc(u["organizer"] or "")}</td>'
-                      f'<td class="n">{u["n"]}</td><td class="n">{_h(u["m"])}</td></tr>' for u in unclassified)
-        loose = (f'<div class="card"><h2>Unclassified meetings</h2><p class="muted">Not counted yet. Tell Master '
-                 f'which client each belongs to (or skip); <code>coord_assign_meeting</code> remembers it.</p>'
+                      f'<td class="n">{u["n"]}</td><td class="n">{_h(u["m"])}</td><td>{pick(u)}</td></tr>'
+                      for u in unclassified)
+        loose = (f'<div class="card"><h2>Unclassified meetings</h2><p class="muted">Not counted yet. Pick the '
+                 f'client each belongs to (or skip); the subject is remembered for later pulls too.</p>'
                  f'<div class="wrap"><table><tr><th>Subject</th><th>Organizer</th><th class="n">Times</th>'
-                 f'<th class="n">Hours</th></tr>{trs}</table></div></div>')
+                 f'<th class="n">Hours</th><th>Classify</th></tr>{trs}</table></div></div>')
     return page("Hours", "Hours", title, caveat, f'{kpi}{loose}{table}{"".join(per)}{pushed}', actions=form)
 
 
@@ -1962,6 +1975,24 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         return
                     self._json(200, {"ok": True, "path": str(f), "how": how})
                     return
+                if path == "/api/meeting/assign":  # the Hours page's Classify button
+                    one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+                    if not one("subject") or not one("client"):
+                        self._json(400, {"ok": False, "error": "subject and client are both needed"})
+                        return
+                    try:
+                        meetings.seed(conn)
+                        meetings.assign(conn, one("subject"), one("client"))
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    back = one("back")
+                    if not re.fullmatch(r"/hours(\?[\w=&%+.-]*)?", back):
+                        back = "/hours"
+                    self.send_response(303)
+                    self.send_header("Location", back)
+                    self.end_headers()
+                    return
                 if path == "/api/prompts/take":
                     self._json(200, {"prompt": store.take_operator_prompt(conn)})
                     return
@@ -2034,8 +2065,8 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     self._type, self._disp = "text/csv; charset=utf-8", f"hours-{start}-{end}.csv"
                     return hours_csv(rows).encode("utf-8")
                 un = meetings.unclassified(conn, hours.parse_day(start), hours.parse_day(end))
-                return hours_page(rows, start, end, client, hours.push_to_pipeline(conn, rows),
-                                  unclassified=un).encode("utf-8")
+                return hours_page(rows, start, end, client, hours.push_to_pipeline(conn, rows), unclassified=un,
+                                  choices=sorted(set(hours._clients(conn).values()))).encode("utf-8")
             if path == "":
                 cached = home[0] if home else None
                 if cached and time.monotonic() - cached[0] < 2 * INGEST_EVERY:

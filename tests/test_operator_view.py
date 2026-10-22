@@ -610,3 +610,22 @@ def test_intents_page_lists_reviewed_email_action_and_what_ben_owes(conn, tmp_pa
         assert f'class="kpi' in html and f'data-k="{k}"' in html
     assert 'data-a="converted"' in html and 'data-a="dismissed"' in html and 'data-a="noted"' in html
     assert len(store.triage_emails(conn, log_dir=log, client="LNK")["emails"]) == 1
+
+
+def test_log_line_citing_an_intent_outside_the_window_shows_its_board_state(conn, tmp_path):
+    """The window cuts board intents by the hour and log files by the day, and
+    a later email may cite an old intent: neither is open just for missing it."""
+    old = store.propose_intent(conn, "Yamamoto: old ask", "email", origin="team", trust="trusted")["intent_id"]
+    store.resolve_intent(conn, old, note="handled")
+    live = store.propose_intent(conn, "LNK: still open", "email", origin="team", trust="trusted")["intent_id"]
+    conn.execute("UPDATE intents SET created_at = created_at - 30 * 86400 WHERE id IN (?, ?)", (old, live))
+    log = tmp_path / "log"
+    log.mkdir()
+    import datetime as dt
+    (log / f"{dt.date.today().isoformat()}.md").write_text(
+        "## 08:09 run\n"
+        f"- email 08:00 Kenji — Yamamoto — follow-up — intent {old}\n"
+        f"- email 08:01 Pat — LNK — chaser — intent {live}\n"
+        "- email 08:02 Sam — LNK — cites a typo — intent 0123456789ab\n", encoding="utf-8")
+    by = {d["sender"]: d["action"] for d in store.triage_emails(conn, log_dir=log)["emails"]}
+    assert by == {"Kenji": "dismissed", "Pat": "intent", "Sam": "intent"}
