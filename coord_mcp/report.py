@@ -1070,7 +1070,8 @@ body.wide main { max-width:1500px; }
 .kpi .bar i { display:block; height:100%; }
 .kpi.selected { outline:2px solid var(--s1); }
 .item[hidden], .card[hidden] { display:none; }
-a.kpi:hover { border-color:var(--s1); }
+a.kpi:hover, button.kpi:hover { border-color:var(--s1); }
+button.kpi { font:inherit; text-align:left; cursor:pointer; width:100%; }
 .topbar form.filter { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin:0; font-size:13px; }
 .topbar form.filter label { white-space:nowrap; }
 .topbar form.filter input { font:inherit; font-size:13px; padding:4px 7px; border-radius:6px;
@@ -1487,15 +1488,17 @@ def intents_page(v: dict[str, Any]) -> str:
     if not rows:
         return page("Intents", "Intents", "Intents", sub, '<p class="empty">No emails in this range.</p>',
                     actions=form + SEEN_BOX)
+    # Each tile filters the list to what it counts; Reviewed shows them all again.
     kpi = '<div class="kpis">' + "".join(
-        f'<div class="kpi {cls}{" zero" if not n else ""}"><span class="n">{n}</span>'
-        f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></div>'
-        for label, n, cls, hint in (
-            ("Reviewed", len(rows), "k-info", f"emails, last {v['days']} days"),
-            ("Open intents", open_intents, "k-wait", "on the board, not yet tasked"),
-            ("Tasked", tasked, "k-done", "turned into board tasks"),
-            ("Dismissed", dismissed, "k-plain", "triage saw nothing to do"),
-            ("Owed to you", owed, "k-you", "a reply or a ruling is yours"))) + "</div>"
+        f'<button type="button" class="kpi {cls}{" zero" if not n else ""}" data-k="{k}">'
+        f'<span class="n">{n}</span>'
+        f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></button>'
+        for k, label, n, cls, hint in (
+            ("", "Reviewed", len(rows), "k-info", f"emails, last {v['days']} days"),
+            ("intent", "Open intents", open_intents, "k-wait", "on the board, not yet tasked"),
+            ("converted", "Tasked", tasked, "k-done", "turned into board tasks"),
+            ("dismissed", "Dismissed", dismissed, "k-plain", "triage saw nothing to do"),
+            ("owed", "Owed to you", owed, "k-you", "a reply or a ruling is yours"))) + "</div>"
     items = []
     for d in rows:
         if d["action"] == "converted":
@@ -1513,6 +1516,7 @@ def intents_page(v: dict[str, Any]) -> str:
         hay = " ".join([d["sender"], d["client"], d["summary"], d["note"] or "", *d["owed"],
                         *(k["title"] for k in d["tasks"])]).lower()
         items.append(f'<div class="item em{" owes" if d["owed"] else ""}" data-s="{esc(hay)}" '
+                     f'data-a="{esc(d["action"])}" '
                      f'data-since="{int(d["at"])}" data-age="{_age_bucket(d["at"], t)}">'
                      f'<div class="client">{esc(d["client"])}</div>'
                      f'<div class="what"><b>{esc(d["sender"])}</b> <span class="muted">{esc(d["received"] or "")}</span>'
@@ -1561,17 +1565,33 @@ def _intent_go(d: dict[str, Any], v: dict[str, Any]) -> str:
 INTENTS_JS = """<script>
 (() => { const q = document.getElementById("in-q"), o = document.getElementById("in-owed"),
     n = document.getElementById("in-n"), c = document.getElementById("in-c"),
-    none = document.getElementById("in-none"), rows = [...document.querySelectorAll(".em")];
+    none = document.getElementById("in-none"), rows = [...document.querySelectorAll(".em")],
+    tiles = [...document.querySelectorAll(".kpi[data-k]")];
   if (!q) return;
+  // k: the action a tile narrowed to ("" = all). Owed to you is the checkbox.
+  let k = "";
+  try { k = new URL(location.href).searchParams.get("k") || ""; } catch (e) {}
   const run = () => {
     const words = q.value.toLowerCase().split(/\\s+/).filter(Boolean);
     let shown = 0;
     rows.forEach(r => { const hit = (!o.checked || r.classList.contains("owes")) &&
+      (!k || r.dataset.a === k) &&
       words.every(w => r.dataset.s.includes(w)); r.hidden = !hit; shown += hit; });
+    tiles.forEach(t => t.classList.toggle("selected", t.dataset.k === "owed" ? o.checked
+      : t.dataset.k === k && (k || !o.checked)));
     if (c) c.textContent = shown;
     n.textContent = shown === rows.length ? "" : shown + " of " + rows.length;
     none.hidden = shown > 0;
+    try { const u = new URL(location.href);
+      k ? u.searchParams.set("k", k) : u.searchParams.delete("k");
+      history.replaceState(null, "", u); } catch (e) {}
   };
+  tiles.forEach(t => t.addEventListener("click", () => {
+    const want = t.dataset.k;
+    if (want === "owed") { o.checked = !o.checked; }
+    else if (!want) { k = ""; o.checked = false; }
+    else { k = k === want ? "" : want; }
+    run(); }));
   q.addEventListener("input", run); o.addEventListener("change", run); run();
 })();
 </script>"""

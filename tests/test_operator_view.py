@@ -605,4 +605,8 @@ def test_intents_page_lists_reviewed_email_action_and_what_ben_owes(conn, tmp_pa
     html = report.intents_page(v)
     assert f"/board/task/{tid}" in html and "Dismissed" in html and "Noted, no task" in html
     assert "2 with a follow-up for you" in html and "Skipped as automated" in html
+    # Each top card filters to what it counts: the rows carry the action it matches.
+    for k in ("", "intent", "converted", "dismissed", "owed"):
+        assert f'class="kpi' in html and f'data-k="{k}"' in html
+    assert 'data-a="converted"' in html and 'data-a="dismissed"' in html and 'data-a="noted"' in html
     assert len(store.triage_emails(conn, log_dir=log, client="LNK")["emails"]) == 1
