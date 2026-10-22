@@ -539,7 +539,16 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
                 d["since"] = r["picked_up_at"]
                 running.append(d)
             else:
-                d["note"] = "not picked up"
+                # Held the way the minder reads it: a decision on the task
+                # within MINDER_HOLD is master keeping it back on purpose.
+                hold = conn.execute(
+                    "SELECT id, statement FROM decisions WHERE task_id=? AND created_at > ? "
+                    "ORDER BY created_at DESC LIMIT 1", (r["id"], t - MINDER_HOLD * 60)).fetchone()
+                if hold:
+                    d["held"] = True
+                    d["note"] = f"held · {hold['statement']} ({hold['id']})"
+                else:
+                    d["note"] = "not picked up"
                 waiting.append(d)
         else:
             d["note"] = _gist(r["result"])

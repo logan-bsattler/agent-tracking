@@ -841,8 +841,10 @@ def _fleet(rows: list[dict[str, Any]], t: int, selected: str | None) -> str:
 
 
 def _in_flight(v: dict[str, Any], t: int) -> str:
-    """Running, not picked up, and parked (with its Re-dispatch button)."""
+    """Running, held, not picked up, and parked (with its Re-dispatch button)."""
     parked = v.get("parked", [])
+    held = [d for d in v["waiting"] if d.get("held")]
+    loose = [d for d in v["waiting"] if not d.get("held")]
     parked_rows = "".join(
         f'<div class="item parked-row" data-since="{d["parked_at"]}" data-age="{_age_bucket(d["parked_at"], t)}">'
         f'<div class="client">{esc(d["client"])}</div>'
@@ -855,8 +857,10 @@ def _in_flight(v: dict[str, Any], t: int) -> str:
             f'{len(v["running"]) + len(v["waiting"]) + len(parked)}</span></h2>'
             f'<h3 class="type">Running<span class="count">{len(v["running"])}</span></h3>'
             f'{_items(v["running"], t, "Nothing picked up and in progress.", verb="running")}'
-            f'<h3 class="type">Not picked up<span class="count">{len(v["waiting"])}</span></h3>'
-            f'{_items(v["waiting"], t, "Every open task has been picked up.", verb="waiting")}'
+            + (f'<h3 class="type">Held<span class="count">{len(held)}</span></h3>'
+               f'{_items(held, t, "", verb="waiting")}' if held else "") +
+            f'<h3 class="type">Not picked up<span class="count">{len(loose)}</span></h3>'
+            f'{_items(loose, t, "Every open task has been picked up or held.", verb="waiting")}'
             f'<h3 class="type">Parked<span class="count">{len(parked)}</span></h3>'
             f'{parked_rows or "<p class=empty>No parked tasks.</p>"}</div>')
 

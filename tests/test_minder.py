@@ -85,6 +85,22 @@ def test_held_task_is_quiet_until_the_hold_ages(conn):
     assert r["fired"] and r["owed"]["undelivered"] == [tid]
 
 
+def test_board_shows_a_held_task_as_held_with_its_decision(conn):
+    held = _task(conn, "Royal", "re-verify after refresh")
+    plain = _task(conn, "LNK", "never sent")
+    did = store.record_decision(conn, "hold until DEVL refresh", task_id=held)["decision_id"]
+    by = {d["id"]: d for d in store.operator_view(conn)["waiting"]}
+    assert by[held]["held"] and by[held]["note"] == f"held · hold until DEVL refresh ({did})"
+    assert not by[plain].get("held") and by[plain]["note"] == "not picked up"
+    html = report.board_page(store.operator_view(conn))
+    assert "Held<span" in html and "hold until DEVL refresh" in html and "Not picked up<span" in html
+    # Same rule as the minder: a hold nobody restates lapses back to not picked up.
+    conn.execute("UPDATE decisions SET created_at = created_at - ? WHERE id = ?", ((store.MINDER_HOLD + 1) * MIN, did))
+    by = {d["id"]: d for d in store.operator_view(conn)["waiting"]}
+    assert not by[held].get("held") and by[held]["note"] == "not picked up"
+    assert "Held<span" not in report.board_page(store.operator_view(conn))
+
+
 def test_picked_up_task_is_delivered(conn):
     tid = _task(conn, "LNK")
     store.get_task(conn, tid, reader="LNK")
