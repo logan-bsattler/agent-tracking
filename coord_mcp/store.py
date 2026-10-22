@@ -912,22 +912,24 @@ def task_detail(conn: sqlite3.Connection, task_id: str, root: Path | None = None
     return d
 
 
-def client_walk(conn: sqlite3.Connection, client: str | None) -> list[dict[str, Any]]:
-    """The client's tasks that still want a Go, oldest first: every task not
-    done, plus done ones with a loose end still open."""
+def client_walk(conn: sqlite3.Connection, client: str | None, done: bool) -> list[dict[str, Any]]:
+    """The client's tasks that still want a Go, oldest first, in one of two
+    walks that never mix: done ones with a loose end still open, or every
+    task not done."""
     if not client:
         return []
+    where = ("t.state = 'done' AND EXISTS (SELECT 1 FROM follow_ups f WHERE f.task_id = t.id AND f.state = 'open')"
+             if done else "t.state != 'done'")
     return [dict(r) for r in conn.execute(
-        """SELECT t.id, t.title, t.state, t.created_at, t.rowid seq FROM tasks t
-           WHERE t.assigned_to = ? AND (t.state != 'done'
-                 OR EXISTS (SELECT 1 FROM follow_ups f WHERE f.task_id = t.id AND f.state = 'open'))
-           ORDER BY t.rowid""", (client,))]
+        f"""SELECT t.id, t.title, t.state, t.created_at, t.rowid seq FROM tasks t
+            WHERE t.assigned_to = ? AND {where} ORDER BY t.rowid""", (client,))]
 
 
 def next_for_client(conn: sqlite3.Connection, d: dict[str, Any]) -> dict[str, Any] | None:
-    """The task Ben moves to after this one: the next in the client's walk,
-    wrapping to its start, with his place in it. None when nothing else waits."""
-    walk = client_walk(conn, d.get("assigned_to"))
+    """The task Ben moves to after this one: the next in the client's walk of
+    the same side (done stays with done, not done with not done), wrapping to
+    its start, with his place in it. None when nothing else waits."""
+    walk = client_walk(conn, d.get("assigned_to"), d.get("state") == "done")
     others = [t for t in walk if t["id"] != d["id"]]
     if not others:
         return None

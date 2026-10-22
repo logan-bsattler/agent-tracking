@@ -1325,7 +1325,8 @@ def _next_link(d: dict[str, Any], queued: bool) -> str:
     n = d.get("next_for_client")
     if not n:
         return ""
-    label = f'Next for {esc(d["assigned_to"])}: {esc(n["title"][:50])}'
+    side = "done" if d.get("state") == "done" else "open"
+    label = f'Next {side} for {esc(d["assigned_to"])}: {esc(n["title"][:50])}'
     note = f'<span class="muted">{n["pos"]} of {n["of"]}</span>'
     cls = "drill next-task primary" if queued else "drill next-task"
     return f'<a class="{cls}" href="/board/task/{esc(n["id"])}">{label} →</a> {note}'

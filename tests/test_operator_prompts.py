@@ -107,21 +107,33 @@ def test_task_page_walks_to_clients_next_task(conn):
     n = store.task_detail(conn, c)["next_for_client"]
     assert n["id"] == a and (n["pos"], n["of"]) == (1, 3)
     page = report.task_page(store.task_detail(conn, a), a)
-    assert f'href="/board/task/{b}"' in page and "Next for LNK: second" in page
+    assert f'href="/board/task/{b}"' in page and "Next open for LNK: second" in page
     assert 'next-task primary' not in page
     assert 'next-task primary' in report.task_page(store.task_detail(conn, a), a, queued=True)
-    # A done task with nothing owed drops out of the walk; one with an open loose end stays.
+    # The two walks never mix: from an open task, only open ones; from a done
+    # one, only done ones still owing a loose end.
     store.get_task(conn, b)
     inv = {"done": True, "verdict": "v", "confidence": "high", "evidence": ["e"]}
-    store.complete_task(conn, b, inv)
+    store.complete_task(conn, b, {**inv, "follow_ups": [{"who": "Ben", "what": "decide"}]})
     assert store.task_detail(conn, a)["next_for_client"]["id"] == c
+    assert store.task_detail(conn, c)["next_for_client"]["id"] == a
+    assert store.task_detail(conn, b)["next_for_client"] is None
+    d = store.create_task(conn, "investigation", "fourth", {"q": "x"}, assigned_to="LNK")["task_id"]
+    store.get_task(conn, d)
+    store.complete_task(conn, d, {**inv, "follow_ups": [{"who": "Ben", "what": "ok?"}]})
+    n = store.task_detail(conn, b)["next_for_client"]
+    assert n["id"] == d and (n["pos"], n["of"]) == (2, 2)
+    assert "Next done for LNK: fourth" in report.task_page(store.task_detail(conn, b), b)
+    assert store.task_detail(conn, d)["next_for_client"]["id"] == b
+    # A done task with nothing owed is in neither walk.
     store.get_task(conn, c)
-    store.complete_task(conn, c, {**inv, "follow_ups": [{"who": "Ben", "what": "decide"}]})
-    assert store.task_detail(conn, a)["next_for_client"]["id"] == c
+    store.complete_task(conn, c, inv)
+    assert store.task_detail(conn, a)["next_for_client"] is None
+    assert store.task_detail(conn, b)["next_for_client"]["id"] == d
     # Alone, there is nowhere to go.
     solo = store.create_task(conn, "investigation", "solo", {"q": "x"}, assigned_to="TS Tech")["task_id"]
     assert store.task_detail(conn, solo)["next_for_client"] is None
-    assert "Next for TS Tech" not in report.task_page(store.task_detail(conn, solo), solo)
+    assert "Next open for TS Tech" not in report.task_page(store.task_detail(conn, solo), solo)
 
 
 def test_go_on_an_intent(conn):
