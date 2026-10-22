@@ -17,21 +17,29 @@ import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from email.utils import parseaddr
+from urllib.parse import quote, urlencode
 
 COMPOSE = "https://outlook.office.com/mail/deeplink/compose"
+
+
+def _addrs(xs: list[str]) -> str:
+    """Bare addresses, ';'-joined. Outlook does not parse 'Name <addr>' from
+    the deeplink: on 2026-10-22 it kept a garbled To and dropped the Cc."""
+    return ";".join(parseaddr(a)[1] or a.strip() for a in xs if a.strip())
 
 
 def compose_url(to: list[str], cc: list[str] | None = None, subject: str = "") -> str:
     """The Outlook-on-the-web compose deeplink with the envelope filled in.
     The body is never in the URL: it is long, and the URL would be the one
-    place it could be truncated without anyone noticing."""
-    q: list[tuple[str, str]] = [("to", ";".join(a.strip() for a in to if a.strip()))]
+    place it could be truncated without anyone noticing. Spaces go as %20:
+    Outlook shows a '+' literally."""
+    q: list[tuple[str, str]] = [("to", _addrs(to))]
     if cc:
-        q.append(("cc", ";".join(a.strip() for a in cc if a.strip())))
+        q.append(("cc", _addrs(cc)))
     if subject:
         q.append(("subject", subject))
-    return COMPOSE + "?" + urlencode(q)
+    return COMPOSE + "?" + urlencode(q, quote_via=quote)
 
 
 def body_text(raw: str) -> str:

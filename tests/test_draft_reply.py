@@ -46,8 +46,13 @@ def test_contract_envelope_only():
 
 def test_compose_url_carries_envelope_not_body():
     u = outlook.compose_url(["a@x.com", " b@x.com "], ["c@x.com"], "RE: hello & goodbye")
-    assert u.startswith(outlook.COMPOSE + "?to=a%40x.com%3Bb%40x.com&cc=c%40x.com&subject=RE%3A+hello+%26+goodbye")
+    assert u.startswith(outlook.COMPOSE + "?to=a%40x.com%3Bb%40x.com&cc=c%40x.com&subject=RE%3A%20hello%20%26%20goodbye")
     assert "body" not in u
+
+
+def test_compose_url_strips_display_names():
+    u = outlook.compose_url(["Shelton King <sking@x.com>"], ["Joanne Bolt <jbolt@y.com>"], "S")
+    assert "?to=sking%40x.com&cc=jbolt%40y.com&subject=S" in u and "+" not in u
 
 
 def test_body_drops_draft_header_only():
@@ -62,7 +67,7 @@ def test_draft_from_task(conn, tmp_path):
     d = outlook.draft(conn, tid)
     assert d["to"] == ["corwin@moog.com"] and d["cc"] == ["kelly@moog.com", "jade@moog.com"]
     assert d["exists"] and d["body"].startswith("Hi Corwin,") and d["body_path"] == str(f)
-    assert "subject=RE%3A+QSM-1050438" in d["url"]
+    assert "subject=RE%3A%20QSM-1050438" in d["url"]
 
 
 def test_draft_refuses_other_kinds_and_unfinished(conn, tmp_path):
