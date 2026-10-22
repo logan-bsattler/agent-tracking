@@ -1180,7 +1180,8 @@ MINDER_ENABLED = os.environ.get("COORD_MINDER", "on").strip().lower() not in ("o
 MINDER_PARKED = _env_minutes("PARKED", 10)            # parked, awaiting re-dispatch
 MINDER_UNDELIVERED = _env_minutes("UNDELIVERED", 15)  # open, never picked up, never parked
 MINDER_UNREAD = _env_minutes("UNREAD", 10)            # done or failed, no lead read since
-MINDER_LOOSE = _env_minutes("LOOSE", 30)              # open client follow-up with no child task
+MINDER_LOOSE = _env_minutes("LOOSE", 30)              # open client follow-up with no child task still going
+MINDER_FAILED = _env_minutes("FAILED", 30)            # failed, no decision since
 MINDER_INTENTS = _env_minutes("INTENTS", 15)          # open intent
 MINDER_HOLD = _env_minutes("HOLD", 12 * 60)           # undelivered with a decision this recent is held
 MINDER_EVERY = _env_minutes("EVERY", 30)              # at most one minder prompt per this
@@ -1209,21 +1210,34 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
              AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id AND c.created_at >= t.completed_at)
            ORDER BY t.completed_at""", (now_ts - MINDER_UNREAD * 60,))]
     clients = client_keys(conn)
+    # A child task still open is the loose end being worked. Once every child
+    # has finished (MINDER_LOOSE ago) and the loose end is still open, master
+    # owes either another task or the resolve it skipped.
+    cutoff = now_ts - MINDER_LOOSE * 60
     loose = [r["id"] for r in conn.execute(
         """SELECT f.id, f.who FROM follow_ups f
            WHERE f.state='open' AND f.created_at <= ?
-             AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = f.task_id)
-           ORDER BY f.created_at, f.idx""", (now_ts - MINDER_LOOSE * 60,))
+             AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = f.task_id
+                             AND (c.state = 'open' OR c.completed_at > ?))
+           ORDER BY f.created_at, f.idx""", (cutoff, cutoff))
         if r["who"].strip().casefold() in clients]
+    # A failure stays in Needs you until master records a decision on it,
+    # the same rule operator_view uses to acknowledge one.
+    failed = [r["id"] for r in conn.execute(
+        """SELECT t.id FROM tasks t
+           WHERE t.state='failed' AND t.completed_at <= ?
+             AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.task_id = t.id AND d.created_at >= t.completed_at)
+           ORDER BY t.completed_at""", (now_ts - MINDER_FAILED * 60,))]
     intents = [r["id"] for r in conn.execute(
         "SELECT id FROM intents WHERE state='open' AND created_at <= ? ORDER BY created_at",
         (now_ts - MINDER_INTENTS * 60,))]
-    return {"parked": parked, "undelivered": undelivered, "unread": unread, "loose": loose, "intents": intents}
+    return {"parked": parked, "undelivered": undelivered, "unread": unread, "loose": loose,
+            "failed": failed, "intents": intents}
 
 
 _MINDER_LABELS = (("parked", "parked awaiting re-dispatch"), ("undelivered", "never delivered"),
                   ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids)"),
-                  ("intents", "open intents"))
+                  ("failed", "failed with no decision"), ("intents", "open intents"))
 
 
 def minder_text(owed: dict[str, list[str]], now_ts: int) -> str:

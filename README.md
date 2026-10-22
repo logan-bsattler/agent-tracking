@@ -230,11 +230,12 @@ the text is built from stored rows.
 task parked and awaiting re-dispatch (10 min), one created and never
 delivered (15 min), a result no lead read has touched (10 min, stamped by
 `coord_get_task_result` from the master's session), a client loose end with
-no child task (30 min), an open intent (15 min). When any is past its
+no child task still going (30 min, from the last child finishing), a failed
+task with no decision since it failed (30 min), an open intent (15 min). When any is past its
 threshold it queues `Minder HH:MM: master owes work -- ...` with the ids, at
 most one per 30 minutes and never while another prompt is queued. Thresholds
 are minutes in `COORD_MINDER_PARKED`, `_UNDELIVERED`, `_UNREAD`, `_LOOSE`,
-`_INTENTS` and `_EVERY`; `COORD_MINDER=off` disables it. `/board` shows when
+`_FAILED`, `_INTENTS` and `_EVERY`; `COORD_MINDER=off` disables it. `/board` shows when
 it last fired and when it is next eligible; `/api/parked` carries the same
 under `minder`.
 

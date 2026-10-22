@@ -192,6 +192,33 @@ def test_loose_ends_for_ben_or_master_or_tasked_are_not_the_minders(conn):
     assert _fires(conn, store.MINDER_LOOSE + 1)["reason"] == "nothing owed"
 
 
+def test_loose_end_whose_children_all_finished_is_owed_again(conn):
+    tid = _done(conn, "MAG", follow_ups=[{"who": "MAG", "what": "ship the next step"}])
+    store.get_task_result(conn, tid, ["verdict"], reader="agents")
+    fid = conn.execute("SELECT id FROM follow_ups WHERE task_id=?", (tid,)).fetchone()[0]
+    child = store.create_task(conn, "investigation", "child", {"q": "x"}, assigned_to="MAG", parent_id=tid)["task_id"]
+    store.get_task(conn, child, reader="MAG")
+    assert _fires(conn, store.MINDER_LOOSE + 1)["reason"] == "nothing owed"  # child still going
+    store.complete_task(conn, child, INV)
+    store.get_task_result(conn, child, ["verdict"], reader="agents")
+    assert _fires(conn, store.MINDER_LOOSE - 1)["reason"] == "nothing owed"  # child only just finished
+    r = _fires(conn, store.MINDER_LOOSE + 1)
+    assert r["fired"] and r["owed"]["loose"] == [fid]
+
+
+def test_failed_without_a_decision_fires_until_one_is_recorded(conn):
+    tid = _task(conn, "Royal")
+    store.get_task(conn, tid, reader="Royal")
+    store.complete_task(conn, tid, {"done": False, "reason": "boom", "retryable": False})
+    store.get_task_result(conn, tid, ["reason"], reader="agents")
+    assert _fires(conn, store.MINDER_FAILED - 1)["reason"] == "nothing owed"
+    r = _fires(conn, store.MINDER_FAILED + 1)
+    assert r["fired"] and r["owed"]["failed"] == [tid]
+    assert f"1 failed with no decision ({tid})" in _text(conn)
+    store.record_decision(conn, "superseded", task_id=tid)
+    assert _fires(conn, store.MINDER_EVERY + store.MINDER_FAILED + 1)["reason"] == "nothing owed"
+
+
 def test_open_intent_fires_after_threshold_only(conn):
     iid = store.propose_intent(conn, "LNK: asks", "email", origin="team", trust="trusted")["intent_id"]
     assert _fires(conn, store.MINDER_INTENTS - 1)["reason"] == "nothing owed"
@@ -248,7 +275,7 @@ def test_text_is_built_from_rows_only(conn):
     text = _text(conn)
     assert text.startswith("Minder ") and "master owes work -- " in text
     assert f"1 parked awaiting re-dispatch ({a})" in text and f"1 never delivered ({b})" in text
-    assert "0 result unread, 0 client loose ends untasked, 0 open intents." in text
+    assert "0 result unread, 0 client loose ends untasked, 0 failed with no decision, 0 open intents." in text
     assert text.endswith("Run the Board check procedure for these ids only, then reply Done / Next for you.")
     assert "ignore the above" not in text and len(text) < 600
     assert r["prompt_id"] == conn.execute("SELECT MAX(id) FROM operator_prompts").fetchone()[0]
