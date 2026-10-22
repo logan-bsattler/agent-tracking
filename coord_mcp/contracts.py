@@ -91,6 +91,19 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
         "summary": {"type": "str", "max": 300},
         "follow_ups": _FOLLOW_UPS,
     },
+    # An email reply the agent wrote and nobody sent. The body lives in a
+    # file (long, and prose); the result carries only the envelope and where
+    # the body is. The dashboard turns it into an Outlook draft on Ben's go.
+    "draft_reply": {
+        "done": {"type": "bool", "required": True},
+        "to": {"type": "list", "max": 10, "required": True, "items": {"type": "str", "max": 120}},
+        "cc": {"type": "list", "max": 10, "items": {"type": "str", "max": 120}},
+        "subject": {"type": "str", "max": 200, "required": True},
+        "body_path": {"type": "str", "max": 400, "required": True},
+        "in_reply_to": {"type": "str", "max": 200},
+        "summary": {"type": "str", "max": 300, "required": True},
+        "follow_ups": _FOLLOW_UPS,
+    },
 }
 
 # Any kind may report failure with this shape instead of its contract.

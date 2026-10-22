@@ -92,7 +92,7 @@ there and cannot be tried.
 
 ## Task kinds
 
-`code_change`, `investigation`, `review`, `data_pull`. Contracts live in
+`code_change`, `investigation`, `review`, `data_pull`, `draft_reply`. Contracts live in
 `coord_mcp/contracts.py`; adding a kind is one dict entry. Every result has a
 required `done: bool`, and any kind may instead return
 `{"done": false, "reason": "<=200", "retryable": bool}`.
@@ -100,6 +100,14 @@ required `done: bool`, and any kind may instead return
 On rejection nothing is written. The error lists every offending field with
 its path, then prints the full expected shape, so the teammate fixes and
 resends in one turn.
+
+`draft_reply` is an email the agent wrote and nobody sent: `to`, `cc`,
+`subject`, `summary`, and `body_path` (a file holding the body as it should
+read; a leading `# DRAFT` header closed by `---` is dropped). The task page
+shows it with a **Draft in Outlook** button, which queues master to type it
+into Outlook on the web (`python -m coord_mcp.outlook <task_id>` gives the
+compose deeplink and body), where it autosaves to Drafts. Outlook COM is not
+used: its MAPI namespace hangs from an agent session. Nothing sends.
 
 ## Usage tracking
 

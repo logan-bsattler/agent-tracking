@@ -947,6 +947,10 @@ OPERATOR_ACTIONS = {
     "intent": ("Go on intent {intent_id} ({summary}): decide what work it warrants -- write the spec, "
                "create and dispatch the task(s) and coord_resolve_intent with their ids, or dismiss it "
                "with a note -- then reply Done / Next for you."),
+    "draft": ("Draft in Outlook: task {task_id} ({client}: {subject}): run `python -m coord_mcp.outlook "
+              "{task_id}` for the compose URL and body, open the URL in the Claude browser, type the body into "
+              "the editor, wait for Outlook to autosave it to Drafts, never press Send, then reply Done / Next "
+              "for you."),
     # Queued by the minder (minder_check), never by a page: {owed} is built
     # from board rows in minder_text.
     "minder": ("Minder {hhmm}: master owes work -- {owed}. Run the Board check procedure for these "
@@ -1035,6 +1039,11 @@ def queue_operator_prompt(conn: sqlite3.Connection, action: str, task_id: str | 
             raise ValueError(f"no task {task_id!r}")
         text = OPERATOR_ACTIONS["go"].format(task_id=r["id"], client=r["assigned_to"] or "unassigned",
                                              title=r["title"])
+    elif action == "draft":
+        from .outlook import draft as _draft
+        d = _draft(conn, task_id or "")  # refuses anything but a finished draft_reply
+        text = OPERATOR_ACTIONS["draft"].format(task_id=d["task_id"], client=d["client"] or "unassigned",
+                                                subject=d["subject"][:120])
     elif action == "redispatch":
         task = next((d for d in parked_tasks(conn) if d["id"] == task_id), None)
         if task is None:

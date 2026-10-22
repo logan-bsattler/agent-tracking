@@ -595,6 +595,8 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
                 tail=f'<div id="tip"></div><script>{JS}</script>')
 
 
+DRAFT_CSS = """.draft-body{white-space:pre-wrap;font:13px/1.45 ui-sans-serif,system-ui,sans-serif;background:var(--bg2,#f6f7f9);border:1px solid var(--line,#dde1e6);border-radius:8px;padding:12px 14px;margin:8px 0;max-height:60vh;overflow:auto}"""
+
 BOARD_CSS = """
 details.client { border-top:1px solid var(--grid); }
 details.client summary { cursor:pointer; padding:8px 0; font-weight:600; list-style-position:inside; }
@@ -1110,7 +1112,7 @@ def page(current: str, title: str, h1: str, sub: str, body: str, actions: str = 
     btns = f'<div class="btns">{actions}</div>' if actions else ""
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">{meta}'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title>'
-            f'<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}{CENTER_CSS}</style></head><body class="wide"><main>'
+            f'<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}{CENTER_CSS}{DRAFT_CSS}</style></head><body class="wide"><main>'
             f'{nav}<div class="topbar"><div><h1>{h1}</h1><p class="sub">{sub}</p></div>{btns}</div>\n'
             f'{body}\n{COLLAPSE_JS}{SEEN_JS}{tail}</main></body></html>')
 
@@ -1262,7 +1264,7 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
           + ('<b class="st-done">Sent. Master picks it up when idle.</b>' if queued else
              '<span class="muted">queued for master; runs when master is idle</span>')
           + _next_link(d, queued) + '</div></form>')
-    head = ""
+    head = _draft_card(d, queued)
     q = d.get("question")
     if q:
         head += (f'<div class="card go next"><h2>Master asks</h2><p>{esc(q["question"])}</p>'
@@ -1271,6 +1273,38 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
                  f'&quot;Answer on {esc(q["ref"])}: &lt;option&gt;&quot; when it is idle.</p></div>')
     return page("Board", f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', h1, sub, head + "".join(cards),
                 actions=go, tail=FILE_JS)
+
+
+def _draft_card(d: dict[str, Any], queued: bool) -> str:
+    """A finished draft_reply at the top of its page: the envelope, the body
+    as it will read, and two ways into Outlook. 'Draft in Outlook' queues
+    master to type it into Outlook on the web (autosaved to Drafts, never
+    sent); the compose link opens the same envelope in Ben's own browser for
+    him to paste the body himself. Nothing here sends mail."""
+    from . import outlook
+    if d["kind"] != "draft_reply" or not d["result"] or not d["result"].get("done"):
+        return ""
+    try:
+        dr = outlook.draft_from_result(d["id"], d["assigned_to"], d["title"], d["result"])
+    except (KeyError, OSError):
+        return ""
+    files = {f["path"]: f for f in d.get("files") or []}
+    f = files.get(dr["body_path"])
+    body_link = file_link(d["id"], dr["body_path"], bool(f and f["exists"]), Path(dr["body_path"]).name)
+    env = {"to": "; ".join(dr["to"]) or "—", "cc": "; ".join(dr["cc"]) or "—", "subject": dr["subject"]}
+    if dr["in_reply_to"]:
+        env["in reply to"] = dr["in_reply_to"]
+    kv = "".join(f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in env.items())
+    body = (f'<pre class="draft-body">{esc(dr["body"])}</pre>' if dr["exists"]
+            else '<p class="empty">Body file is not on disk; nothing to draft.</p>')
+    sent = ('<b class="st-done">Sent. Master drafts it when idle.</b>' if queued
+            else '<span class="muted">master types it into Outlook on the web; it lands in Drafts, unsent</span>')
+    btns = (_button("draft", "Draft in Outlook", task=d["id"], primary=True) if dr["exists"] else "")
+    return (f'<div class="card go draft"><h2>Draft reply</h2><dl class="kv">{kv}'
+            f'<dt>body</dt><dd>{body_link}</dd></dl>{body}'
+            f'<div class="btns">{btns}{sent}'
+            f'<a class="drill" href="{esc(dr["url"])}" target="_blank" rel="noopener">Open compose in my browser →</a>'
+            f'</div></div>')
 
 
 def _next_link(d: dict[str, Any], queued: bool) -> str:
