@@ -714,6 +714,59 @@ def deliverables(conn: sqlite3.Connection, days: int = 14, root: Path | None = N
     return {"files": out, "days": days, "client": client, "as_of": t}
 
 
+def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None = None) -> dict[str, Any]:
+    """Finished draft_reply tasks, in the order Ben works them.
+
+    A draft sits between the agent that wrote it and Ben's Drafts folder, and
+    the board already knows where: an untaken 'draft' prompt means master is
+    about to type it, and the decision master records once it lands says it
+    is in Drafts. Unworked ones come first, oldest first, so one pass down the
+    page empties the backlog; drafted ones follow, newest first, as a record.
+    """
+    from .outlook import draft_from_result
+    t = now()
+    sql = ("SELECT id, title, assigned_to, result, completed_at FROM tasks "
+           "WHERE kind = 'draft_reply' AND state = 'done' AND completed_at >= ?")
+    args: list[Any] = [t - days * 86400]
+    if client:
+        sql += " AND assigned_to = ?"
+        args.append(client)
+    landed: dict[str, dict[str, Any]] = {}
+    for r in conn.execute("SELECT id, task_id, statement, created_at FROM decisions "
+                          "WHERE task_id IS NOT NULL ORDER BY created_at"):
+        w = r["statement"].lower()
+        if "draft" in w and "outlook" in w:
+            landed[r["task_id"]] = {"decision": r["id"], "at": r["created_at"]}
+    live = {r["task_id"] for r in conn.execute(
+        "SELECT task_id FROM operator_prompts WHERE action = 'draft' AND taken_at IS NULL "
+        "AND created_at >= ?", (t - PROMPT_TTL,)) if r["task_id"]}
+    ben: dict[str, list[str]] = {}
+    for f in conn.execute("SELECT task_id, what FROM follow_ups WHERE state='open' "
+                          "AND lower(trim(who))='ben' ORDER BY idx"):
+        ben.setdefault(f["task_id"], []).append(f["what"])
+    out: list[dict[str, Any]] = []
+    for r in conn.execute(sql + " ORDER BY completed_at DESC", args):
+        res = json.loads(r["result"] or "{}")
+        if not res.get("done"):
+            continue
+        try:
+            d = draft_from_result(r["id"], r["assigned_to"], r["title"], res)
+        except (KeyError, OSError):
+            continue  # off-contract or unreadable: there is no draft to show
+        sent = landed.get(r["id"])
+        d.update({"client": r["assigned_to"] or "—", "completed_at": r["completed_at"],
+                  "summary": res.get("summary", ""), "ben": ben.get(r["id"], []),
+                  "queued": r["id"] in live, "drafted": sent,
+                  "state": ("drafted" if sent else "queued" if r["id"] in live
+                            else "missing" if not d["exists"] else "waiting")})
+        out.append(d)
+    rank = {"waiting": 0, "missing": 0, "queued": 0, "drafted": 1}
+    out.sort(key=lambda d: (rank[d["state"]],
+                            d["completed_at"] if rank[d["state"]] else -d["completed_at"]))
+    return {"drafts": out, "days": days, "client": client, "as_of": t,
+            "open": sum(1 for d in out if d["state"] != "drafted")}
+
+
 def deliverable_path(conn: sqlite3.Connection, task_id: str, path: str, root: Path | None = None) -> Path | None:
     """The file behind a dashboard link, only if the board lists it. The
     server never opens a path just because a URL named it."""

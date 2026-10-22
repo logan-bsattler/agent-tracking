@@ -595,7 +595,10 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
                 tail=f'<div id="tip"></div><script>{JS}</script>')
 
 
-DRAFT_CSS = """.draft-body{white-space:pre-wrap;font:13px/1.45 ui-sans-serif,system-ui,sans-serif;background:var(--bg2,#f6f7f9);border:1px solid var(--line,#dde1e6);border-radius:8px;padding:12px 14px;margin:8px 0;max-height:60vh;overflow:auto}"""
+DRAFT_CSS = """.card.draft .btns{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}
+.card.draft h2 .count{margin-left:8px}
+.card.draft{scroll-margin-top:12px}
+.draft-body{white-space:pre-wrap;font:13px/1.45 ui-sans-serif,system-ui,sans-serif;background:var(--bg2,#f6f7f9);border:1px solid var(--line,#dde1e6);border-radius:8px;padding:12px 14px;margin:8px 0;max-height:60vh;overflow:auto}"""
 
 BOARD_CSS = """
 details.client { border-top:1px solid var(--grid); }
@@ -1091,8 +1094,8 @@ a.kpi:hover { border-color:var(--s1); }
 """
 
 # Nav links in the order every page shows them; the current page is bold.
-NAV = (("/", "Usage"), ("/board", "Board"), ("/hours", "Hours"), ("/deliverables", "Deliverables"),
-       ("/intents", "Intents"))
+NAV = (("/", "Usage"), ("/board", "Board"), ("/hours", "Hours"), ("/drafts", "Drafts"),
+       ("/deliverables", "Deliverables"), ("/intents", "Intents"))
 
 SEEN_BOX = ('<span class="seenbox"><span id="newcount" class="age"></span>'
             '<button id="seen" type="button">Mark seen</button></span>')
@@ -1291,20 +1294,29 @@ def _draft_card(d: dict[str, Any], queued: bool) -> str:
     files = {f["path"]: f for f in d.get("files") or []}
     f = files.get(dr["body_path"])
     body_link = file_link(d["id"], dr["body_path"], bool(f and f["exists"]), Path(dr["body_path"]).name)
+    sent = ('<b class="st-done">Sent. Master drafts it when idle.</b>' if queued
+            else '<span class="muted">master types it into Outlook on the web; it lands in Drafts, unsent</span>')
+    btns = (_button("draft", "Draft in Outlook", task=d["id"], primary=True) if dr["exists"] else "")
+    return (f'<div class="card go draft"><h2>Draft reply</h2>{_draft_envelope(dr, body_link)}'
+            f'<div class="btns">{btns}{sent}{_compose_link(dr)}</div></div>')
+
+
+def _draft_envelope(dr: dict[str, Any], body_link: str) -> str:
+    """A draft's envelope and the body as it will read. Shared, so the task
+    page and the drafts walk can never show the same draft differently."""
     env = {"to": "; ".join(dr["to"]) or "—", "cc": "; ".join(dr["cc"]) or "—", "subject": dr["subject"]}
     if dr["in_reply_to"]:
         env["in reply to"] = dr["in_reply_to"]
     kv = "".join(f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in env.items())
     body = (f'<pre class="draft-body">{esc(dr["body"])}</pre>' if dr["exists"]
             else '<p class="empty">Body file is not on disk; nothing to draft.</p>')
-    sent = ('<b class="st-done">Sent. Master drafts it when idle.</b>' if queued
-            else '<span class="muted">master types it into Outlook on the web; it lands in Drafts, unsent</span>')
-    btns = (_button("draft", "Draft in Outlook", task=d["id"], primary=True) if dr["exists"] else "")
-    return (f'<div class="card go draft"><h2>Draft reply</h2><dl class="kv">{kv}'
-            f'<dt>body</dt><dd>{body_link}</dd></dl>{body}'
-            f'<div class="btns">{btns}{sent}'
-            f'<a class="drill" href="{esc(dr["url"])}" target="_blank" rel="noopener">Open compose in my browser →</a>'
-            f'</div></div>')
+    return f'<dl class="kv">{kv}<dt>body</dt><dd>{body_link}</dd></dl>{body}'
+
+
+def _compose_link(dr: dict[str, Any]) -> str:
+    """The same envelope in Ben's own browser, for him to paste the body."""
+    return (f'<a class="drill" href="{esc(dr["url"])}" target="_blank" rel="noopener">'
+            f'Open compose in my browser →</a>')
 
 
 def _next_link(d: dict[str, Any], queued: bool) -> str:
@@ -1383,6 +1395,73 @@ def deliverables_page(v: dict[str, Any]) -> str:
     return page("Deliverables", f"Deliverables ({len(files)})", "Deliverables", sub,
                 f'{kpi}{none}{"".join(cards)}', actions=form + SEEN_BOX, tail=DELIVERABLES_JS + FILE_JS)
 
+
+
+def drafts_page(v: dict[str, Any]) -> str:
+    """Every reply an agent wrote, as one walk down the page.
+
+    The board shows a draft as one more thing needing Ben; here it is the
+    email itself, in the order he works them, with the next one a click away.
+    Unworked first, oldest first; drafted ones stay below as the record of
+    what already went to Outlook. Nothing on this page sends mail.
+    """
+    t, rows = v["as_of"], v["drafts"]
+    form = (f'<form class="filter" method="get" action="/drafts">'
+            f'<label>Last <input type="number" name="days" min="1" max="365" value="{v["days"]}"> days</label>'
+            f'<label>client <input name="client" value="{esc(v["client"] or "")}" placeholder="all" size="10"></label>'
+            f'<button>Show</button></form>')
+    sub = ('One card per finished <code>draft_reply</code>. <b>Draft in Outlook</b> queues master to type it '
+           'into Outlook on the web, where it autosaves to Drafts; the compose link opens the same envelope '
+           'in your own browser. Neither sends.')
+    if not rows:
+        return page("Drafts", "Drafts", "Email drafts", sub,
+                    f'<p class="empty">No drafts in the last {v["days"]} days.</p>',
+                    actions=form + SEEN_BOX)
+    todo = [d for d in rows if d["state"] != "drafted"]
+    counts = {k: sum(1 for d in rows if d["state"] == k) for k in ("waiting", "queued", "missing", "drafted")}
+    kpi = '<div class="kpis">' + "".join(
+        f'<div class="kpi {cls}{" zero" if not n else ""}"><span class="n">{n}</span>'
+        f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></div>'
+        for label, n, cls, hint in (
+            ("To go through", counts["waiting"], "k-you", "written, not yet in Drafts"),
+            ("Queued", counts["queued"], "k-run", "master drafts it when idle"),
+            ("In Drafts", counts["drafted"], "k-done", "already typed into Outlook"),
+            ("Body missing", counts["missing"], "k-fail", "the file the result named is gone"),
+            ("Clients", len({d["client"] for d in rows}), "k-alt", "with a draft in range"))) + "</div>"
+    badge = {"waiting": '<b class="st-open">to go through</b>',
+             "queued": '<b class="st-waiting">queued for master</b>',
+             "missing": '<b class="st-failed">body missing</b>',
+             "drafted": '<b class="st-done">in Drafts</b>'}
+    cards = []
+    for d in rows:
+        i = todo.index(d) if d["state"] != "drafted" else None
+        pos = (f'<span class="count">{i + 1} of {len(todo)}</span>' if i is not None else "")
+        nxt = (f'<a class="drill next-task" href="#d-{esc(todo[i + 1]["task_id"])}">Next draft →</a>'
+               if i is not None and i + 1 < len(todo)
+               else '<span class="muted">last one</span>' if i is not None else "")
+        # A draft already in Drafts keeps its button, so a reply Ben edited and
+        # lost can be retyped -- but never as the primary one, since pressing it
+        # twice leaves two drafts in the folder.
+        btns = (_button("draft", "Draft again" if d["drafted"] else "Draft in Outlook",
+                        task=d["task_id"], primary=d["state"] == "waiting")
+                if d["exists"] and d["state"] != "queued" else "")
+        body_link = file_link(d["task_id"], d["body_path"], d["exists"], Path(d["body_path"]).name)
+        why = f'<div class="note">{esc(d["summary"][:300])}</div>' if d["summary"] else ""
+        owed = "".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"])
+        when_sent = (f'drafted {_age(d["drafted"]["at"], t)} · ' if d["drafted"] else "")
+        head = (f'<h2>{esc(d["client"])}: {esc(d["subject"][:90])}{pos}</h2>'
+                f'<div class="muted">{badge[d["state"]]} · {when_sent}written '
+                f'{_age(d["completed_at"], t)} · <a class="drill" href="/board/task/{esc(d["task_id"])}">'
+                f'{esc(d["title"][:60])}</a> <code>{esc(d["task_id"][:8])}</code></div>')
+        cards.append(f'<div class="card lane draft" id="d-{esc(d["task_id"])}" '
+                     f'data-since="{int(d["completed_at"])}" data-age="{_age_bucket(d["completed_at"], t)}">'
+                     f'{head}{why}{owed}{_draft_envelope(d, body_link)}'
+                     f'<div class="btns">{btns}{_compose_link(d)}{nxt}</div></div>')
+    lead = (f'<p class="sub">Start at the top: <a class="drill" href="#d-{esc(todo[0]["task_id"])}">'
+            f'{esc(todo[0]["client"])}: {esc(todo[0]["subject"][:70])} →</a></p>' if todo
+            else '<p class="clear">Every draft in range is in Outlook Drafts.</p>')
+    return page("Drafts", f'{"(" + str(len(todo)) + ") " if todo else ""}Drafts', "Email drafts", sub,
+                f'{kpi}{lead}{"".join(cards)}', actions=form + SEEN_BOX)
 
 
 def intents_page(v: dict[str, Any]) -> str:
@@ -1899,6 +1978,11 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v = store.deliverables(conn, days=max(1, min(window, 365)), client=client)
                 v["q"] = (self._query.get("q") or [""])[0].strip()
                 return deliverables_page(v).encode("utf-8")
+            if path == "/drafts":
+                window = int((self._query.get("days") or ["30"])[0] or 30)
+                client = (self._query.get("client") or [""])[0].strip() or None
+                return drafts_page(store.draft_replies(conn, days=max(1, min(window, 365)),
+                                                       client=client)).encode("utf-8")
             if path == "/intents":
                 window = int((self._query.get("days") or ["7"])[0] or 7)
                 client = (self._query.get("client") or [""])[0].strip() or None

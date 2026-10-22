@@ -107,3 +107,90 @@ def test_cli_prints_url_then_body(conn, tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert out.startswith(outlook.COMPOSE) and "Subject: RE: QSM-1050438" in out and out.rstrip().endswith("Ben")
     assert outlook.main(["nope"]) == 1
+
+
+# ---- the drafts walk -------------------------------------------------------
+#
+# Every finished draft on one page, in the order Ben works them, so he never
+# has to open a task to find out whether a reply is waiting on him.
+
+
+def _second_draft(conn, tmp_path, name="DRAFT-reply-Kelly.md", client="Royal"):
+    f = tmp_path / name
+    f.write_text("Hi Kelly,\n\nShipping Monday.\n\nBen\n", encoding="utf-8")
+    tid = store.create_task(conn, "draft_reply", "Reply to Kelly re cutover", {"q": "x"},
+                            assigned_to=client)["task_id"]
+    store.get_task(conn, tid, reader=client)
+    store.complete_task(conn, tid, {"done": True, "to": ["kelly@royal.com"], "subject": "RE: cutover",
+                                    "body_path": str(f), "summary": "Confirm the Monday date."})
+    return tid, f
+
+
+def test_drafts_lists_only_finished_draft_replies(conn, tmp_path):
+    tid, _ = _draft_task(conn, tmp_path)
+    store.create_task(conn, "investigation", "not a draft", {"q": "x"}, assigned_to="Moog")
+    unfinished, _ = _draft_task(conn, tmp_path, done=False)
+    v = store.draft_replies(conn)
+    assert [d["task_id"] for d in v["drafts"]] == [tid]
+    assert v["drafts"][0]["state"] == "waiting" and v["open"] == 1
+    assert v["drafts"][0]["body"].startswith("Hi Corwin,")  # the '# DRAFT' header is not the body
+    assert v["drafts"][0]["ben"] == ["Review and draft to Corwin."]
+
+
+def test_drafts_state_follows_the_queue_then_the_decision(conn, tmp_path):
+    tid, _ = _draft_task(conn, tmp_path)
+    store.queue_operator_prompt(conn, "draft", tid)
+    assert store.draft_replies(conn)["drafts"][0]["state"] == "queued"
+    store.take_operator_prompt(conn)
+    store.record_decision(conn, f"{tid} drafted to Outlook Drafts", "Ben reviewed it", task_id=tid)
+    d = store.draft_replies(conn)["drafts"][0]
+    assert d["state"] == "drafted" and d["drafted"]["at"] and store.draft_replies(conn)["open"] == 0
+
+
+def test_drafts_missing_body_is_its_own_state(conn, tmp_path):
+    tid, f = _draft_task(conn, tmp_path)
+    f.unlink()
+    d = store.draft_replies(conn)["drafts"][0]
+    assert d["state"] == "missing" and not d["exists"]
+    page = report.drafts_page(store.draft_replies(conn))
+    assert "body missing" in page and 'value="draft"' not in page  # nothing to type into Outlook
+
+
+def test_drafts_page_walks_unworked_first_oldest_first(conn, tmp_path):
+    first, _ = _draft_task(conn, tmp_path)
+    second, _ = _second_draft(conn, tmp_path)
+    store.record_decision(conn, f"{first} drafted to Outlook Drafts", "done", task_id=first)
+    v = store.draft_replies(conn)
+    assert [d["task_id"] for d in v["drafts"]] == [second, first]  # waiting leads, drafted trails
+    page = report.drafts_page(v)
+    assert f'id="d-{second}"' in page and "1 of 1" in page and "last one" in page
+    assert "Hi Kelly," in page and "Hi Corwin," in page
+    assert "in Drafts" in page and "Shipping Monday" in page
+
+
+def test_drafts_page_chains_next_draft(conn, tmp_path):
+    _draft_task(conn, tmp_path)
+    second, _ = _second_draft(conn, tmp_path)
+    page = report.drafts_page(store.draft_replies(conn))
+    assert f'href="#d-{second}">Next draft' in page and "1 of 2" in page and "2 of 2" in page
+
+
+def test_drafts_page_empty_and_all_done(conn, tmp_path):
+    assert "No drafts in the last" in report.drafts_page(store.draft_replies(conn))
+    tid, _ = _draft_task(conn, tmp_path)
+    store.record_decision(conn, f"{tid} drafted to Outlook Drafts", "done", task_id=tid)
+    assert "Every draft in range is in Outlook Drafts" in report.drafts_page(store.draft_replies(conn))
+
+
+def test_drafts_is_its_own_nav_page(conn, tmp_path):
+    _draft_task(conn, tmp_path)
+    page = report.drafts_page(store.draft_replies(conn))
+    assert '<b>Drafts</b>' in page and 'href="/deliverables"' in page
+    assert "Open compose in my browser" in page and "Neither sends." in page
+
+
+def test_drafted_card_offers_a_retype_never_as_the_primary(conn, tmp_path):
+    tid, _ = _draft_task(conn, tmp_path)
+    store.record_decision(conn, f"{tid} drafted to Outlook Drafts", "done", task_id=tid)
+    page = report.drafts_page(store.draft_replies(conn))
+    assert "Draft again" in page and "class=primary" not in page  # two presses, two drafts
