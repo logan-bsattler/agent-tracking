@@ -60,6 +60,31 @@ def test_same_words_from_another_speaker_are_new():
     assert texts(out) == [("B", "sounds good to me", False)]
 
 
+def test_teams_entries_found_below_wrappers_and_beside_the_toolbar():
+    # The shape the live pane had on 2026-10-23, names shortened.
+    def leaf(n, button=False):
+        return (n, button, [])
+
+    def entry(spk, text):
+        return ("", False, [leaf(spk), leaf(text)])
+
+    pane = ("Live Captions", False, [
+        ("", False, [("", False, [("", False, [
+            ("", False, [leaf("Captions will be shown in: English (US)")]),
+            ("", False, []),
+            entry("Ana", "Can you send the spec"),
+            ("", False, []),
+            entry("Ben", "By Friday"),
+        ])])]),
+        ("", False, [
+            ("", False, [leaf("Give live captions feedback Thumb up", True),
+                         leaf("Give live captions feedback Thumb down", True)]),
+            leaf("Hide live captions", True),
+        ]),
+    ])
+    assert captions.teams_entries(pane) == [it("Ana", "Can you send the spec"), it("Ben", "By Friday")]
+
+
 def test_render():
     from datetime import datetime
 

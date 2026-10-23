@@ -45,7 +45,8 @@ TEAMS_PROC = "ms-teams.exe"
 LIVE_PROC = "LiveCaptions.exe"
 # HTML ids new Teams has used for the captions pane (WebView2 exposes an
 # element's id as its AutomationId), and the aria-labels it may carry
-# instead. Unverified against a live meeting: `dump` shows what is there.
+# instead. Seen live 2026-10-23: the pane matched by name ("Live Captions");
+# none of the ids appeared. `dump` shows what is there if it changes.
 TEAMS_IDS = ("closed-captions-renderer", "closed-caption-renderer-wrapper", "closedCaptionsRenderer")
 TEAMS_NAMES = ("Live captions", "Captions")
 LIVE_TEXT_ID = "CaptionsTextBlock"
@@ -139,6 +140,24 @@ class TeamsDiffer:
         self.written.append([spk, text])
         del self.written[: -self.memory]
         return Line(spk, text)
+
+
+def teams_entries(node: tuple) -> list[dict]:
+    """The captions pane, as `(name, is_button, kids)` nodes, to entries.
+
+    Seen live on 2026-10-23: each caption is a group of two text leaves,
+    speaker then words, a few wrappers below the pane, beside a toolbar of
+    buttons (feedback, settings, pop-out). An entry is any node whose
+    children are all named, non-button leaves, two or more of them;
+    everything else is searched through. The pane's own "Captions will be
+    shown in" notice is a lone leaf, and is not an entry.
+    """
+    name, button, kids = node
+    if button:
+        return []
+    if len(kids) >= 2 and all(not k[2] and not k[1] and k[0] for k in kids):
+        return [{"speaker": kids[0][0], "text": " ".join(k[0] for k in kids[1:])}]
+    return [e for k in kids for e in teams_entries(k)]
 
 
 _SENT = re.compile(r"(?<=[.!?])\s+")
@@ -301,18 +320,17 @@ class UIA:
             if not root:
                 return "no-captions"
         self._root = root
-        # Wrappers with one child sit between the pane and its entries.
-        kids = self.children(root)
-        while len(kids) == 1 and self.children(kids[0]):
-            kids = self.children(kids[0])
-        items = []
-        for k in kids:
-            t = self.texts(k)
-            if len(t) >= 2:
-                items.append({"speaker": t[0], "text": " ".join(t[1:])})
-            elif t:
-                items.append({"speaker": "", "text": t[0]})
-        return items
+        return teams_entries(self.snapshot(root))
+
+    def snapshot(self, e) -> tuple:
+        """e's subtree as `(name, is_button, kids)`. The pane is about a
+        hundred nodes, so walking it each poll is cheap."""
+        try:
+            name = (e.CurrentName or "").strip()
+            button = e.CurrentControlType == self.U.UIA_ButtonControlTypeId
+        except Exception:
+            return ("", True, [])
+        return (name, button, [self.snapshot(k) for k in self.children(e)])
 
     def live_text(self) -> str:
         wins = self.windows(LIVE_PROC)
