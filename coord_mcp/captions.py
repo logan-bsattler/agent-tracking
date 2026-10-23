@@ -50,8 +50,10 @@ LIVE_PROC = "LiveCaptions.exe"
 TEAMS_IDS = ("closed-captions-renderer", "closed-caption-renderer-wrapper", "closedCaptionsRenderer")
 TEAMS_NAMES = ("Live captions", "Captions")
 LIVE_TEXT_ID = "CaptionsTextBlock"
-# Teams' own non-meeting windows: "Chat | ...", "Calendar | ...".
-NOT_MEETING = re.compile(r"^(Chat|Calendar|Activity|Teams|Files|Apps|OneDrive) \|")
+# Teams' own non-meeting windows: "Chat | ...", "Calendar | ...". Seen live
+# 2026-10-23: a screen share adds "Sharing control bar | ..." and an unnamed
+# window ahead of the meeting's own, and the unnamed one was taken for it.
+NOT_MEETING = re.compile(r"^(Chat|Calendar|Activity|Teams|Files|Apps|OneDrive|Sharing control bar) \|")
 
 
 def meetings_dir() -> Path:
@@ -219,6 +221,7 @@ class UIA:
         self.a = cc.CreateObject(U.CUIAutomation, interface=U.IUIAutomation)
         self.walker = self.a.RawViewWalker
         self._root = None  # the captions pane, kept across polls
+        self._win = None  # the window it is in
 
     @staticmethod
     def _exe(pid: int) -> str:
@@ -293,34 +296,39 @@ class UIA:
 
     def meeting_window(self):
         """Teams opens a meeting in its own top-level window; its chat and
-        calendar windows say what they are in the title, and are skipped."""
-        wins = [w for w in self.windows(TEAMS_PROC) if not NOT_MEETING.match(w.CurrentName or "")]
+        calendar windows say what they are in the title, and are skipped, as
+        are unnamed ones. Of the rest, the one showing captions is the
+        meeting: a screen share opens more windows than the meeting's."""
+        if self._root is not None:
+            try:
+                self._root.CurrentName  # still on screen?
+                if self._win.CurrentName:
+                    return self._win
+            except Exception:
+                pass
+        self._root = self._win = None
+        wins = [w for w in self.windows(TEAMS_PROC)
+                if w.CurrentName and not NOT_MEETING.match(w.CurrentName)]
+        for w in wins:
+            root = self.captions_root(w)
+            if root:
+                self._root, self._win = root, w
+                return w
         return wins[0] if wins else None
 
     def meeting(self) -> tuple[str | None, list[dict] | str]:
         """(meeting title, teams_items()); title None when no meeting is open."""
         w = self.meeting_window()
         if not w:
-            self._root = None
             return None, "no-window"
         return clean_title(w.CurrentName or ""), self.teams_items()
 
     def teams_items(self) -> list[dict] | str:
-        root = self._root
-        if root is not None:
-            try:
-                root.CurrentName  # still on screen?
-            except Exception:
-                root = None
-        if root is None:
-            w = self.meeting_window()
-            if not w:
-                return "no-window"
-            root = self.captions_root(w)
-            if not root:
-                return "no-captions"
-        self._root = root
-        return teams_entries(self.snapshot(root))
+        if self._root is None and not self.meeting_window():
+            return "no-window"
+        if self._root is None:
+            return "no-captions"
+        return teams_entries(self.snapshot(self._root))
 
     def snapshot(self, e) -> tuple:
         """e's subtree as `(name, is_button, kids)`. The pane is about a
