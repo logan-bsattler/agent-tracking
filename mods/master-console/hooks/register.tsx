@@ -119,7 +119,7 @@ export const register: Register = on => {
     const list = await read($, parked)
     const texts = await read($, actions)
     const q = await read($, question)
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button, Link, Text } = $.ui.resolve(e)
     const send = (text: string) => () => { void $.prompt.submit({ text, asUser: true }) }
     const answer = (q: Question, i: number) => () => {
       void (async () => {
@@ -135,8 +135,8 @@ export const register: Register = on => {
       })()
     }
     return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" flexWrap="wrap" gap={1}>
+      <Box flexDirection="column" rowGap={1}>
+        <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
           <Button key="next" variant="primary" onPress={send(texts.next ?? FALLBACK.next)}>Next question</Button>
           <Button key="board" onPress={send(texts.board ?? FALLBACK.board)}>Board check</Button>
           {list.slice(0, MAX_BUTTONS).map(d => (
@@ -147,8 +147,10 @@ export const register: Register = on => {
           {list.length > MAX_BUTTONS ? <Text dimColor>+{list.length - MAX_BUTTONS} parked on /board</Text> : null}
         </Box>
         {q ? (
-          <Box flexDirection="row" flexWrap="wrap" gap={1}>
-            <Text dimColor>Answer {q.ref.slice(0, 12)}:</Text>
+          <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
+            <Text dimColor>
+              Answer <Link href={`${DASH}/board/task/${q.task_id}`}>{q.ref.slice(0, 12)}</Link>:
+            </Text>
             {q.options.map((o, i) => (
               <Button key={`ans-${q.id}-${i}`} variant={i === q.recommended ? 'primary' : undefined}
                 onPress={answer(q, i)}>{o}</Button>

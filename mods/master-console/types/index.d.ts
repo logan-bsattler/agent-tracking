@@ -5,6 +5,7 @@ export type Parked = { id: string; title: string; client: string; parks: number;
 export type Question = {
   id: number
   ref: string
+  task_id: string
   question: string
   options: string[]
   prompts: string[]
