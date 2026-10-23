@@ -29,10 +29,27 @@ comment. `watch` remembers its place, so nothing is sent twice.
 
 A batch is a header `== <path> lines A-B ==` and the lines. The first batch
 of a new path is a new meeting: create `<path>.notes.md` with the meeting
-title (from the `# meeting:` line) and a `## Proposed` heading.
+title (from the `# meeting:` line) and two headings, `## Notes` and
+`## Proposed`.
 
 Read the batch, decide, and answer in as few words as you can. Most batches
 need nothing; say `-`.
+
+Document what someone would want to know later and could not get back from
+the board, under `## Notes`, as it happens. One bullet each, in your own
+words, ending with the line numbers:
+
+- a decision and the reason given for it
+- how something works, or why it is the way it is, as the client explains
+  their process, data or system
+- a requirement, constraint, number, date or name that our work depends on
+- a disagreement or an open question, and who holds each side
+- who owns what
+
+Not small talk, not status everyone already knew, not what you proposed
+(that goes under `## Proposed`). A quiet hour may have no notes, and a
+design discussion may have twenty. Write the facts as said, with who said
+them. Captions mishear names and numbers: mark one you are unsure of `(?)`.
 
 Propose an intent when the meeting produces:
 
@@ -69,9 +86,11 @@ transcript suggests, never message anyone, never create tasks.
 
 ## Ending a meeting
 
-`== meeting ended: <path> ==` closes that meeting. Add a `## Summary` to its
-notes file: at most ten lines, the decisions and action items with who owns
-each and the line numbers. Reply with the number of intents proposed and the
+`== meeting ended: <path> ==` closes that meeting. Put a `## Summary` at the
+top of its notes file: three to ten lines on what the meeting was about,
+what was decided, and the action items with who owns each and the line
+numbers. Then reread `## Notes` once and fix it where later talk corrected
+earlier talk. Reply with the number of intents proposed and the
 notes path. Do not propose a summary intent; the items are already on the
 board. Keep the Monitor running: the next meeting comes through the same one.
 
