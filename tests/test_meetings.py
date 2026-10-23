@@ -117,7 +117,8 @@ def test_classify_button_assigns_from_the_hours_page(tmp_path):
     rs = hours.breakdown(c, DAY, DAY)
     page = report.hours_page(rs, DAY.isoformat(), DAY.isoformat(), None, hours.push_to_pipeline(c, rs), today=DAY,
                              unclassified=meetings.unclassified(c, DAY, DAY), choices=["Acument", "MAG"])
-    assert 'action="/api/meeting/assign"' in page and 'value="Mystery &amp; sync"' in page
+    assert page.count('action="/api/meeting/assign"') == 1 and page.count("<button>Classify</button>") == 1
+    assert 'name="subject.0" value="Mystery &amp; sync"' in page and 'name="client.0"' in page
     assert '<option value="Acument">' in page and '<option value="Internal">' in page and 'value="skip"' in page
     c.close()
     with socket.socket() as probe:
@@ -155,4 +156,49 @@ def test_classify_button_assigns_from_the_hours_page(tmp_path):
     assert post({"subject": "Mystery & sync", "client": "skip", "back": "http://evil.example/"}) == (303, "/hours")
     c = make()
     assert stored(c)["e1"][0] == "skipped"
+    c.close()
+
+
+def test_one_classify_button_assigns_every_picked_row(tmp_path):
+    import functools
+    import socket
+    import threading
+    import time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    make = functools.partial(connect, tmp_path / "srv.db")
+    c = make()
+    pull(c, [ev(1, "Alpha", 9, 10, [ME, "a@acme.com"]), ev(2, "Beta", 11, 12, [ME, "a@acme.com"]),
+             ev(3, "Gamma", 13, 14, [ME, "a@acme.com"])])
+    c.close()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    threading.Thread(target=report.serve, args=(make, port), daemon=True).start()
+    for _ in range(50):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **kw):
+            return None
+
+    def post(fields):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/meeting/assign",
+                                     data=urllib.parse.urlencode(fields).encode())
+        try:
+            return urllib.request.build_opener(NoRedirect).open(req, timeout=10).status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    rows = {"subject.0": "Alpha", "subject.1": "Beta", "subject.2": "Gamma"}
+    assert post({**rows, "client.0": "", "client.1": "", "client.2": ""}) == 400  # nothing picked
+    assert post({**rows, "client.0": "cascade", "client.1": "skip", "client.2": ""}) == 303
+    c = make()
+    assert stored(c) == {"e1": ("counted", "Cascade"), "e2": ("skipped", None), "e3": ("unclassified", None)}
     c.close()

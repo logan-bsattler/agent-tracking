@@ -1844,19 +1844,20 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
                        for c in [*(choices or hours.CLIENTS), meetings.INTERNAL]) + '<option value="skip">Skip</option>'
         back = f"/hours?{qs}" if qs else "/hours"
 
-        def pick(u):
-            return (f'<form class="go" method="post" action="/api/meeting/assign">'
-                    f'<input type="hidden" name="subject" value="{esc(u["subject"])}">'
-                    f'<input type="hidden" name="back" value="{esc(back)}">'
-                    f'<select name="client" required><option value="">client…</option>{opts}</select>'
-                    f'<button>Classify</button></form>')
+        # One form for the whole table: rows left at "client…" stay unclassified.
+        def pick(i, u):
+            return (f'<input type="hidden" name="subject.{i}" value="{esc(u["subject"])}">'
+                    f'<select name="client.{i}"><option value="">client…</option>{opts}</select>')
         trs = "".join(f'<tr><td>{esc(u["subject"])}</td><td class="muted">{esc(u["organizer"] or "")}</td>'
-                      f'<td class="n">{u["n"]}</td><td class="n">{_h(u["m"])}</td><td>{pick(u)}</td></tr>'
-                      for u in unclassified)
+                      f'<td class="n">{u["n"]}</td><td class="n">{_h(u["m"])}</td><td>{pick(i, u)}</td></tr>'
+                      for i, u in enumerate(unclassified))
         loose = (f'<div class="card"><h2>Unclassified meetings</h2><p class="muted">Not counted yet. Pick the '
-                 f'client each belongs to (or skip); the subject is remembered for later pulls too.</p>'
+                 f'client each belongs to (or skip), then Classify once; the subjects are remembered for later '
+                 f'pulls too.</p><form method="post" action="/api/meeting/assign">'
+                 f'<input type="hidden" name="back" value="{esc(back)}">'
                  f'<div class="wrap"><table><tr><th>Subject</th><th>Organizer</th><th class="n">Times</th>'
-                 f'<th class="n">Hours</th><th>Classify</th></tr>{trs}</table></div></div>')
+                 f'<th class="n">Hours</th><th>Client</th></tr>{trs}</table></div>'
+                 f'<p><button>Classify</button></p></form></div>')
     return page("Hours", "Hours", title, caveat, f'{kpi}{loose}{table}{"".join(per)}{pushed}', actions=form)
 
 
@@ -2075,12 +2076,17 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     return
                 if path == "/api/meeting/assign":  # the Hours page's Classify button
                     one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
-                    if not one("subject") or not one("client"):
-                        self._json(400, {"ok": False, "error": "subject and client are both needed"})
+                    # The page posts subject.N / client.N per row; a bare subject/client is one pick.
+                    keys = [k[8:] for k in form if k.startswith("subject.")] if "subject" not in form else [None]
+                    sfx = lambda k, i: f"{k}.{i}" if i is not None else k  # noqa: E731
+                    picks = [(one(sfx("subject", i)), one(sfx("client", i))) for i in keys]
+                    picks = [(s, c) for s, c in picks if c]
+                    if not picks or not all(s for s, _ in picks):
+                        self._json(400, {"ok": False, "error": "pick a client for at least one subject"})
                         return
                     try:
                         meetings.seed(conn)
-                        meetings.assign(conn, one("subject"), one("client"))
+                        meetings.assign_many(conn, picks)
                     except ValueError as e:
                         self._json(400, {"ok": False, "error": str(e)})
                         return

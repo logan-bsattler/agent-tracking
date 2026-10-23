@@ -165,11 +165,26 @@ def reclassify_all(conn: sqlite3.Connection) -> int:
     return n
 
 
-def assign(conn: sqlite3.Connection, subject: str, client: str) -> dict[str, Any]:
+def assign(conn: sqlite3.Connection, subject: str, client: str, reclassify: bool = True) -> dict[str, Any]:
     """Teach the classifier a subject: `client` is a client key, Internal, or skip."""
     if client.strip().casefold() == "skip":
-        return add_rule(conn, "skip", subject)
-    return add_rule(conn, "subject", subject, client)
+        return add_rule(conn, "skip", subject, reclassify=reclassify)
+    return add_rule(conn, "subject", subject, client, reclassify=reclassify)
+
+
+def assign_many(conn: sqlite3.Connection, picks: list[tuple[str, str]]) -> int:
+    """`assign` for each (subject, client), reclassifying once at the end.
+    All or none: a bad pick leaves every rule as it was."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for subject, client in picks:
+            assign(conn, subject, client, reclassify=False)
+        n = reclassify_all(conn)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return n
 
 
 # ------------------------------------------------------------- import
