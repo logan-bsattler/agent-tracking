@@ -267,6 +267,26 @@ def test_auto_new_title_ends_old_and_starts_new(home):
     assert captions.ended(first) and a.path != first and "Second" in a.path.name
 
 
+def test_auto_generic_title_flip_does_not_split(home):
+    a = auto()
+    a.step("Staffing", [it("A", "one")], 0, NOW)
+    p = a.path
+    a.step("Microsoft Teams", [it("A", "one"), it("B", "two")], 5, NOW)
+    a.step("Staffing", [it("A", "one"), it("B", "two"), it("A", "three")], 10, NOW)
+    assert a.path == p and not captions.ended(p)
+    assert len(list(p.parent.glob("*.txt"))) == 1
+
+
+def test_auto_started_under_generic_title_takes_the_real_one(home):
+    a = auto()
+    a.step("Microsoft Teams", [it("A", "one")], 0, NOW)
+    p = a.path
+    a.step("Staffing", [it("A", "one"), it("B", "two")], 5, NOW)
+    assert a.path == p and a.title == "Staffing"
+    a.step("Other", [it("C", "x")], 10, NOW)
+    assert captions.ended(p)
+
+
 def test_auto_skip_list_is_logged_once(home):
     log = []
     a = auto(log)

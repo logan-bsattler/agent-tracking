@@ -437,6 +437,11 @@ def clean_title(name: str) -> str:
     return name.split(" | ")[0].strip() or "meeting"
 
 
+# Titles that say nothing about which meeting it is. Seen live 2026-10-23: a
+# meeting window flipped between its own title and "Microsoft Teams" every
+# minute or two, and each flip split the transcript.
+GENERIC_TITLES = frozenset({"Microsoft Teams", "meeting"})
+
 SKIP_DEFAULT = ("Focus time", "Lunch")
 
 
@@ -468,7 +473,8 @@ class Auto:
     window title, unless the title matches skip.txt. It ends when the window
     has closed, or the captions have been gone `grace` seconds (turned off,
     or Teams re-rendering the pane, which should not split a transcript). A
-    different meeting title ends the old one and starts the new one.
+    different meeting title ends the old one and starts the new one; a
+    generic title (GENERIC_TITLES) is never a different meeting.
     """
 
     def __init__(self, settle: float = 4.0, grace: float = 60.0, log=lambda s: None,
@@ -488,7 +494,13 @@ class Auto:
             self._passed, self.path, self.title, self.differ = self.title, None, None, None
             return
         if self.path and (title != self.title and title is not None and showing):
-            self.stop("another meeting started")
+            # A generic title is the same meeting; a real one after a
+            # generic one names it. Only two real titles are two meetings.
+            if self.title in GENERIC_TITLES and title not in GENERIC_TITLES:
+                self.log(f"'{self.title}' is '{title}'")
+                self.title = title
+            elif title not in GENERIC_TITLES:
+                self.stop("another meeting started")
         if self.path:
             if showing:
                 self._seen = t
