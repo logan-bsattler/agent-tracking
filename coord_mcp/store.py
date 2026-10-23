@@ -1310,7 +1310,7 @@ MINDER_UNREAD = _env_minutes("UNREAD", 10)            # done or failed, no lead 
 MINDER_LOOSE = _env_minutes("LOOSE", 30)              # open client follow-up with no child task still going
 MINDER_FAILED = _env_minutes("FAILED", 30)            # failed, no decision since
 MINDER_INTENTS = _env_minutes("INTENTS", 15)          # open intent
-MINDER_HOLD = _env_minutes("HOLD", 12 * 60)           # undelivered with a decision this recent is held
+MINDER_HOLD = _env_minutes("HOLD", 7 * 24 * 60)       # undelivered with a decision this recent is held
 MINDER_EVERY = _env_minutes("EVERY", 30)              # at most one minder prompt per this
 MINDER_IDS = 5                                        # ids listed per condition; the rest is a count
 
@@ -1321,6 +1321,8 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     # A recent decision on an undelivered task is master holding it on purpose
     # (waiting on a refresh, an access grant). It comes back once the decision
     # is MINDER_HOLD old, so a hold nobody restates is not forgotten either.
+    # A week, not hours: holds wait on people outside the board, and a 12 h
+    # window had master restating the same hold, and asking Ben, every day.
     undelivered = [r["id"] for r in conn.execute(
         """SELECT t.id FROM tasks t
            WHERE t.state='open' AND t.picked_up_at IS NULL AND t.created_at <= ?
