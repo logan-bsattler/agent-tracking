@@ -261,6 +261,33 @@ CREATE INDEX IF NOT EXISTS quota_ts ON quota_snapshots(ts);
 """
 
 
+# Task order: task_id waits on blocked_by. Kept out of DDL on purpose, and
+# created on first use instead: folding it in means bumping SCHEMA_VERSION,
+# and every coord server still running the old code would then see a version
+# it does not know, re-run its DDL and write its own number back, so the two
+# would ping-pong a full init on every guard-hook call until those sessions
+# restart. It moves into DDL, with the bump, when agents get the tool side
+# (docs/task-dependencies.md).
+DEPS_DDL = """
+CREATE TABLE IF NOT EXISTS task_deps (
+  task_id    TEXT NOT NULL REFERENCES tasks(id),
+  blocked_by TEXT NOT NULL REFERENCES tasks(id),
+  note       TEXT,
+  created_at INTEGER NOT NULL,
+  cleared_at INTEGER,
+  PRIMARY KEY (task_id, blocked_by)
+);
+CREATE INDEX IF NOT EXISTS task_deps_blocker ON task_deps(blocked_by);
+"""
+
+
+def ensure_deps(conn: sqlite3.Connection) -> None:
+    """Create task_deps if this file has none yet. One indexed read when it
+    exists, so every reader can call it."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_deps'").fetchone() is None:
+        conn.executescript(DEPS_DDL)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Additive migrations. CREATE TABLE IF NOT EXISTS won't add a column to a
     table that already exists, so do it here."""

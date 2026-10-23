@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import contracts
-from .db import now
+from .db import ensure_deps, now
 
 
 def _id() -> str:
@@ -575,6 +575,14 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
             master_owes.append(d)
         else:
             loose_ends.append(d)  # owed by someone else: a client, a colleague
+    held_by = waiting_on(conn)
+    holds = blocking(held_by)
+    for lane in (needs_you, master_owes, loose_ends, deferred, running, waiting, recent, acknowledged):
+        for d in lane:
+            if d["id"] in held_by:
+                d["waits_on"] = held_by[d["id"]]
+            if d["id"] in holds:
+                d["blocks"] = holds[d["id"]]
     intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
     if intents:
         master_owes.append({"id": "", "kind": "intent", "title": f"{intents} open intent(s) to triage",
@@ -749,6 +757,8 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
     live = {r["task_id"] for r in conn.execute(
         "SELECT task_id FROM operator_prompts WHERE action = 'draft' AND taken_at IS NULL "
         "AND created_at >= ?", (t - PROMPT_TTL,)) if r["task_id"]}
+    held_by = waiting_on(conn)
+    holds = blocking(held_by)
     ben: dict[str, list[str]] = {}
     for f in conn.execute("SELECT task_id, what FROM follow_ups WHERE state='open' "
                           "AND lower(trim(who))='ben' ORDER BY idx"):
@@ -766,11 +776,14 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
         d.update({"client": r["assigned_to"] or "—", "completed_at": r["completed_at"],
                   "summary": res.get("summary", ""), "ben": ben.get(r["id"], []),
                   "queued": r["id"] in live, "drafted": sent,
+                  "waits_on": held_by.get(r["id"], []), "blocks": holds.get(r["id"], []),
                   "state": ("drafted" if sent else "queued" if r["id"] in live
                             else "missing" if not d["exists"] else "waiting")})
         out.append(d)
     rank = {"waiting": 0, "missing": 0, "queued": 0, "drafted": 1}
-    out.sort(key=lambda d: (rank[d["state"]],
+    # A draft that waits on another follows every unworked one that does
+    # not, so the walk reaches its blocker first.
+    out.sort(key=lambda d: (rank[d["state"]], not rank[d["state"]] and bool(d["waits_on"]),
                             d["completed_at"] if rank[d["state"]] else -d["completed_at"]))
     return {"drafts": out, "days": days, "client": client, "as_of": t,
             "open": sum(1 for d in out if d["state"] != "drafted")}
@@ -918,7 +931,114 @@ def task_detail(conn: sqlite3.Connection, task_id: str, root: Path | None = None
     d["question"] = current_question(conn, task_id)
     d["files"] = task_files(conn, task_id, root)
     d["next_for_client"] = next_for_client(conn, d)
+    d["deps"] = task_deps(conn, task_id)
     return d
+
+
+# ------------------------------------------------------------ task order
+#
+# "Do B before A", so Ben can see which to execute first. The board cannot see
+# a task's real-world effect: a draft_reply is done when the agent wrote it,
+# not when Ben sent it. So a wait clears by itself only when its blocker is
+# done and is not a draft; a draft blocker clears when Ben marks it sent.
+# Dashboard and CLI only for now: no MCP tool reads or writes these yet.
+
+
+def _task_row(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row:
+    r = conn.execute("SELECT id, kind, title, state, assigned_to FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if r is None:
+        raise ValueError(f"no task {task_id!r}")
+    return r
+
+
+def _met(kind: str, state: str, cleared_at: int | None) -> bool:
+    """Whether a blocker of this kind and state no longer holds anything up."""
+    return bool(cleared_at) or (state == "done" and kind != "draft_reply")
+
+
+def _dep(r: sqlite3.Row) -> dict[str, Any]:
+    """The other end of a wait, with whether it still holds."""
+    return {"id": r["id"], "title": r["title"], "state": r["state"], "kind": r["kind"],
+            "client": r["assigned_to"] or "—", "note": r["note"], "cleared_at": r["cleared_at"]}
+
+
+def add_dep(conn: sqlite3.Connection, task_id: str, blocked_by: str, note: str = "") -> dict[str, Any]:
+    """Record that task_id waits on blocked_by. Refuses an unknown task, a
+    task waiting on itself, and a wait that would close a loop. Re-adding a
+    wait that was cleared sets it again."""
+    ensure_deps(conn)
+    a, b = _task_row(conn, task_id)["id"], _task_row(conn, blocked_by)["id"]
+    if a == b:
+        raise ValueError("a task cannot wait on itself")
+    seen, todo = set(), [b]
+    while todo:  # does the blocker already wait, at any depth, on task_id?
+        x = todo.pop()
+        if x == a:
+            raise ValueError(f"{b} already waits on {a}; that would be a loop")
+        if x not in seen:
+            seen.add(x)
+            todo += [r[0] for r in conn.execute("SELECT blocked_by FROM task_deps WHERE task_id=?", (x,))]
+    conn.execute("INSERT INTO task_deps(task_id, blocked_by, note, created_at) VALUES (?,?,?,?) "
+                 "ON CONFLICT(task_id, blocked_by) DO UPDATE SET note=excluded.note, cleared_at=NULL",
+                 (a, b, (note or "").strip()[:200] or None, now()))
+    return {"ok": True, "task_id": a, "blocked_by": b}
+
+
+def remove_dep(conn: sqlite3.Connection, task_id: str, blocked_by: str) -> dict[str, Any]:
+    ensure_deps(conn)
+    n = conn.execute("DELETE FROM task_deps WHERE task_id=? AND blocked_by=?", (task_id, blocked_by)).rowcount
+    return {"ok": bool(n), "removed": n}
+
+
+def clear_blocker(conn: sqlite3.Connection, blocked_by: str) -> dict[str, Any]:
+    """Ben says the blocker is done in the world (a draft sent): every task
+    waiting on it may go."""
+    ensure_deps(conn)
+    _task_row(conn, blocked_by)
+    n = conn.execute("UPDATE task_deps SET cleared_at=? WHERE blocked_by=? AND cleared_at IS NULL",
+                     (now(), blocked_by)).rowcount
+    return {"ok": True, "cleared": n}
+
+
+def task_deps(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+    """Both directions for one task: what it waits on, and what waits on it.
+    `clear_as` is set when this task holds others up and only Ben can say it
+    is done (a draft: "sent")."""
+    ensure_deps(conn)
+    cols = "t.id, t.kind, t.title, t.state, t.assigned_to, d.note, d.cleared_at"
+    waits = []
+    for r in conn.execute(f"SELECT {cols} FROM task_deps d JOIN tasks t ON t.id = d.blocked_by "
+                          "WHERE d.task_id=? ORDER BY d.created_at", (task_id,)):
+        waits.append({**_dep(r), "met": _met(r["kind"], r["state"], r["cleared_at"])})
+    me = conn.execute("SELECT kind, state FROM tasks WHERE id=?", (task_id,)).fetchone()
+    blocks = []
+    for r in conn.execute(f"SELECT {cols} FROM task_deps d JOIN tasks t ON t.id = d.task_id "
+                          "WHERE d.blocked_by=? ORDER BY d.created_at", (task_id,)):
+        blocks.append({**_dep(r), "met": bool(me) and _met(me["kind"], me["state"], r["cleared_at"])})
+    held = any(not b["met"] for b in blocks)
+    return {"waits_on": waits, "blocks": blocks,
+            "clear_as": "sent" if held and me and me["kind"] == "draft_reply" else None}
+
+
+def waiting_on(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+    """Every task with a wait that still holds, to its unmet blockers. What
+    the board and drafts pages mark rows with."""
+    ensure_deps(conn)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in conn.execute("SELECT d.task_id waiter, t.id, t.kind, t.title, t.state, t.assigned_to, d.note, "
+                          "d.cleared_at FROM task_deps d JOIN tasks t ON t.id = d.blocked_by ORDER BY d.created_at"):
+        if not _met(r["kind"], r["state"], r["cleared_at"]):
+            out.setdefault(r["waiter"], []).append(_dep(r))
+    return out
+
+
+def blocking(held_by: dict[str, list[dict[str, Any]]]) -> dict[str, list[str]]:
+    """waiting_on turned round: each blocker to the tasks it holds up."""
+    out: dict[str, list[str]] = {}
+    for tid, bs in held_by.items():
+        for b in bs:
+            out.setdefault(b["id"], []).append(tid)
+    return out
 
 
 def client_walk(conn: sqlite3.Connection, client: str | None, done: bool) -> list[dict[str, Any]]:

@@ -598,6 +598,8 @@ def render(s: dict[str, Any], v: dict[str, Any] | None = None, refresh: int | No
 DRAFT_CSS = """.card.draft .btns{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}
 .card.draft h2 .count{margin-left:8px}
 .card.draft{scroll-margin-top:12px}
+.order{display:block;margin-top:3px;font-size:12px}.order.wait{color:var(--serious,#c98500)}.order.first{color:var(--s1)}
+.card.order-card ul{margin:4px 0 8px}.card.order-card form{display:inline}.card.order-card form.add{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .draft-body{white-space:pre-wrap;font:13px/1.45 ui-sans-serif,system-ui,sans-serif;background:var(--bg2,#f6f7f9);border:1px solid var(--line,#dde1e6);border-radius:8px;padding:12px 14px;margin:8px 0;max-height:60vh;overflow:auto}"""
 
 BOARD_CSS = """
@@ -712,7 +714,7 @@ def _next_up(rows: list[dict[str, Any]], t: int, q: dict[str, Any] | None = None
     """The one thing to do first, and the three behind it. Master's open
     question leads when there is one: it is the head of Ben's queue as master
     ordered it. Otherwise failures lead, since they gate dispatch, then oldest."""
-    order = sorted(rows, key=lambda d: (not d.get("failed"), d["since"]))
+    order = sorted(rows, key=lambda d: (bool(d.get("waits_on")), not d.get("failed"), d["since"]))
     if q:
         tid = q.get("task_id") or ""
         link = (f' <a class="drill" href="/board/task/{esc(tid)}">{esc(tid[:8])}</a>' if tid else "")
@@ -772,6 +774,74 @@ def _age_bucket(since: int, t: int) -> str:
     return "old"
 
 
+def _task_link(tid: str, title: str = "") -> str:
+    text = f"{title[:60]} " if title else ""
+    return f'<a class="drill" href="/board/task/{esc(tid)}">{esc(text)}<code>{esc(tid[:8])}</code></a>'
+
+
+def _order_chips(d: dict[str, Any]) -> str:
+    """'Waits on X' / 'Do first: blocks Y' under a row, each a link to the
+    other task, so the order is readable without opening either. Takes
+    either row shape: waits_on as blocker dicts, blocks as ids."""
+    out = ""
+    w = d.get("waits_on") or []
+    if w:
+        out += ('<span class="order wait">⏸ waits on '
+                + ", ".join(_task_link(b["id"], b["title"]) for b in w) + "</span>")
+    b = d.get("blocks") or []
+    if b:
+        out += ('<span class="order first">▶ do first: holds up '
+                + ", ".join(_task_link(x) for x in b) + "</span>")
+    return out
+
+
+def _dep_form(action: str, task: str, blocker: str, label: str, back: str, primary: bool = False) -> str:
+    return (f'<form method="post" action="/api/dep"><input type="hidden" name="action" value="{esc(action)}">'
+            f'<input type="hidden" name="task" value="{esc(task)}"><input type="hidden" name="blocker" '
+            f'value="{esc(blocker)}"><input type="hidden" name="back" value="{esc(back)}">'
+            f'<button{" class=primary" if primary else ""}>{esc(label)}</button></form>')
+
+
+def _order_card(d: dict[str, Any]) -> str:
+    """The task page's Order card: what this task waits on, what waits on
+    it, and a way to add a wait. A draft blocker clears only when Ben marks
+    it sent, since nothing on the board sees Outlook."""
+    deps, me, back = d.get("deps") or {}, d["id"], f'/board/task/{d["id"]}'
+    def state(x: dict[str, Any]) -> str:
+        if x["cleared_at"]:
+            return f'<span class="st-done">cleared {when(x["cleared_at"])}</span>'
+        if x["met"]:
+            return '<span class="st-done">done</span>'
+        return '<b class="st-failed">not yet</b>' + (" (a draft: clears when marked sent)"
+                                                       if x["kind"] == "draft_reply" else "")
+    items = []
+    for x in deps.get("waits_on", []):
+        clear = (_dep_form("clear", me, x["id"], "Mark it sent", back)
+                 if not x["met"] and x["kind"] == "draft_reply" else "")
+        items.append(f'<li>Waits on {_task_link(x["id"], x["title"])} <span class="muted">{esc(x["client"])} · '
+                     f'{esc(x["state"])}</span> — {state(x)}'
+                     + (f' <span class="muted">— {esc(x["note"])}</span>' if x["note"] else "")
+                     + f' {clear}{_dep_form("remove", me, x["id"], "Remove", back)}</li>')
+    for x in deps.get("blocks", []):
+        items.append(f'<li>Holds up {_task_link(x["id"], x["title"])} <span class="muted">{esc(x["client"])} · '
+                     f'{esc(x["state"])}</span> — {state(x)}'
+                     + (f' <span class="muted">— {esc(x["note"])}</span>' if x["note"] else "")
+                     + f' {_dep_form("remove", x["id"], me, "Remove", back)}</li>')
+    first = ""
+    if deps.get("clear_as") == "sent":
+        first = (f'<p><b class="order first">Do this one first.</b> Once it is sent, '
+                 f'{_dep_form("clear", "", me, "Mark sent", back, primary=True)}</p>')
+    elif any(not x["met"] for x in deps.get("waits_on", [])):
+        first = '<p><b class="order wait">Do the task it waits on first.</b></p>'
+    add = (f'<form class="add" method="post" action="/api/dep"><input type="hidden" name="action" value="add">'
+           f'<input type="hidden" name="task" value="{esc(me)}"><input type="hidden" name="back" value="{esc(back)}">'
+           f'<input name="blocker" placeholder="task id this waits on" size="16" pattern="[0-9a-f]{{12}}" required>'
+           f'<input name="note" placeholder="why (optional)" size="30" maxlength="200">'
+           f'<button>Add wait</button></form>')
+    body = f'<ul class="vals">{"".join(items)}</ul>' if items else '<p class="empty">No order set.</p>'
+    return f'<div class="card order-card"><h2>Order</h2>{first}{body}{add}</div>'
+
+
 def _items(rows: list[dict[str, Any]], t: int, empty: str, client: bool = True, verb: str = "") -> str:
     """One row per item. `verb` ("running", "waiting") prefixes the age."""
     if not rows:
@@ -782,6 +852,7 @@ def _items(rows: list[dict[str, Any]], t: int, empty: str, client: bool = True, 
         title = (f'<a class="drill" href="/board/task/{esc(d["id"])}">{esc(d["title"])}</a>' if d["id"]
                  else esc(d["title"]))
         note = f'<div class="note">{esc(d["note"][:220])}</div>' if d.get("note") else ""
+        note += _order_chips(d)
         who = f'<div class="client">{esc(d["client"])}</div>' if client else ""
         age = (verb + " " if verb else "") + _age(d["since"], t)
         out.append(f'<div class="item{"" if client else " bare"}" data-since="{int(d["since"])}" '
@@ -1272,7 +1343,7 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
           + ('<b class="st-done">Sent. Master picks it up when idle.</b>' if queued else
              '<span class="muted">queued for master; runs when master is idle</span>')
           + _next_link(d, queued) + '</div></form>')
-    head = _draft_card(d, queued)
+    head = _draft_card(d, queued) + _order_card(d)
     q = d.get("question")
     if q:
         head += (f'<div class="card go next"><h2>Master asks</h2><p>{esc(q["question"])}</p>'
@@ -1458,6 +1529,9 @@ def drafts_page(v: dict[str, Any]) -> str:
                 if d["exists"] and d["state"] != "queued" else "")
         body_link = file_link(d["task_id"], d["body_path"], d["exists"], Path(d["body_path"]).name)
         why = f'<div class="note">{esc(d["summary"][:300])}</div>' if d["summary"] else ""
+        why = _order_chips(d) + why
+        if d["blocks"]:  # nothing sees Outlook: Ben says when it went
+            btns += _dep_form("clear", "", d["task_id"], "Mark sent", "/drafts")
         owed = "".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"])
         when_sent = (f'drafted {_age(d["drafted"]["at"], t)} · ' if d["drafted"] else "")
         head = (f'<h2>{esc(d["client"])}: {esc(d["subject"][:90])}{pos}</h2>'
@@ -1994,6 +2068,28 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     back = one("back")
                     if not re.fullmatch(r"/hours(\?[\w=&%+.-]*)?", back):
                         back = "/hours"
+                    self.send_response(303)
+                    self.send_header("Location", back)
+                    self.end_headers()
+                    return
+                if path == "/api/dep":  # the Order card and the drafts walk
+                    one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+                    try:
+                        act, task, blocker = one("action"), one("task"), one("blocker")
+                        if act == "add":
+                            store.add_dep(conn, task, blocker, one("note"))
+                        elif act == "remove":
+                            store.remove_dep(conn, task, blocker)
+                        elif act == "clear":
+                            store.clear_blocker(conn, blocker)
+                        else:
+                            raise ValueError(f"unknown action {act!r}")
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    back = one("back")
+                    if not re.fullmatch(r"/board/task/[0-9a-f]{12}|/drafts", back):
+                        back = "/board"
                     self.send_response(303)
                     self.send_header("Location", back)
                     self.end_headers()
