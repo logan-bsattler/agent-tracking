@@ -261,6 +261,47 @@ The report reads top-down: limits now, limits over time, spend per day by
 model, spend by hour of day, then models, projects and sessions with cache-hit
 rate and subagent share. Light and dark, no JavaScript beyond tooltips.
 
+## Meeting listener (prototype)
+
+A Claude Code session that follows a live Teams meeting and proposes intents
+for anything that may need work: requests of Ben, his commitments, scope or
+date changes, blockers.
+
+`python -m coord_mcp.captions auto` starts at logon and runs with no window.
+It reads the new Teams captions pane off the screen with UI Automation. When
+a meeting window has captions showing, it writes
+`~/.coord/meetings/<date>-<time>-<title>.txt` with speaker names. When the
+window has been closed, or the captions off, for 60 seconds, it ends that
+transcript. Titles containing a line of `~/.coord/meetings/skip.txt` (Focus
+time, Lunch to begin with) are not captured. It logs to `auto.log` beside the
+transcripts. `capture` does a single meeting by hand, including Windows 11
+Live Captions (`--source livecaptions`, no names).
+
+`watch --follow` tails the newest transcript and prints it in batches, after
+a 20-second pause or 90 seconds at most. That gives the session one model
+turn per batch, not one per line, and nothing between meetings or for a
+meeting where nobody spoke. The session runs it under `Monitor` and proposes
+intents with the `desktop` role, so it has two tools and everything it
+proposes is stored as untrusted.
+
+Setup:
+
+1. `pip install -e .[captions]` (adds `comtypes`).
+2. `python -m coord_mcp.captions install` puts `coord-captions.cmd` in the
+   Startup folder and starts `auto` now. `stop` stops it until next logon;
+   `uninstall` removes it.
+3. Make a folder holding `examples/meeting/CLAUDE.md` and
+   `examples/meeting/.mcp.json`, and open it as its own session, left open.
+   It arms its Monitor on the first turn ("listen").
+
+Not yet verified against a live meeting. The Teams selectors (`TEAMS_IDS`,
+`TEAMS_NAMES` in `captions.py`) are a best guess. If `capture` logs
+`no-captions` while captions are showing, `python -m coord_mcp.captions dump`
+prints the meeting window's UIA tree to tune them against. Turning on Teams
+captions announces nothing to the other people in the meeting, but turning on
+transcription does. For client meetings, capture only with transcription on
+or the client's agreement.
+
 ## Deliberately not here
 
 - No sessions, heartbeats or stale reaping. Agent teams own teammate lifecycle.
