@@ -641,6 +641,44 @@ async def coord_assign_meeting(params: AssignMeetingInput) -> str:
         return _err(e)
 
 
+class MeetingNotesInput(Strict):
+    meeting: str | None = Field(default=None, description="Meeting id from the list; omit to list", max_length=120)
+    lines: str | None = Field(default=None, description="With meeting: transcript lines 'A-B', as the notes cite them",
+                              max_length=20)
+    client: str | None = Field(default=None, description="Master only: one client key; a client session always "
+                                                         "gets its own", max_length=80)
+    since: str | None = Field(default=None, description="List meetings on or after YYYY-MM-DD", max_length=10)
+    query: str | None = Field(default=None, description="List only meetings whose title or notes contain this",
+                              max_length=200)
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+@tool("coord_meeting_notes", read_only=True, title="Meeting notes")
+async def coord_meeting_notes(params: MeetingNotesInput) -> str:
+    """Notes the meeting listener took in the operator's meetings. Without
+    `meeting`: a list, newest first, each with its summary. With `meeting`: that
+    meeting's full notes, or with `lines` the exact transcript lines a note
+    cites. Captions mishear names and numbers; a note marked (?) is unsure.
+    A client session sees only meetings attributed to its client.
+
+    Returns JSON: list {meetings: [{meeting, title, started, ended, clients,
+    attributed_by, has_notes, summary, summary_truncated}], more};
+    one {meeting, title, started, ended, clients, attributed_by, notes, truncated}
+    or, with lines, {..., lines, transcript}
+    """
+    try:
+        from . import notes
+        own = hours._clients(db()).get(READER.casefold())
+        if own and params.client and params.client.casefold() != own.casefold():
+            raise ValueError(f"this session is {own}'s; it reads only {own}'s meetings")
+        client = own or params.client
+        if params.meeting:
+            return _ok(notes.read(db(), params.meeting, client, params.lines))
+        return _ok(notes.index(db(), client, params.since, params.query, params.limit))
+    except Exception as e:
+        return _err(e)
+
+
 def main() -> None:
     mcp.run()
 

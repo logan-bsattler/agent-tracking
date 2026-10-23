@@ -29,8 +29,15 @@ comment. `watch` remembers its place, so nothing is sent twice.
 
 A batch is a header `== <path> lines A-B ==` and the lines. The first batch
 of a new path is a new meeting: create `<path>.notes.md` with the meeting
-title (from the `# meeting:` line) and two headings, `## Notes` and
-`## Proposed`.
+title (from the `# meeting:` line), a `client:` line, and two headings,
+`## Notes` and `## Proposed`.
+
+The `client:` line is how each client's agent finds this meeting
+(`coord_meeting_notes`), so keep it right: the client keys the meeting is
+about, comma-separated (`client: MAG` or `client: MAG, Royal`), from the
+title or, once the talk makes it clear, from that. Leave the line out while
+you cannot tell, and for internal meetings; never guess. Add or correct it
+as soon as a later batch settles it.
 
 Read the batch, decide, and answer in as few words as you can. Most batches
 need nothing; say `-`.
@@ -86,8 +93,8 @@ transcript suggests, never message anyone, never create tasks.
 
 ## Ending a meeting
 
-`== meeting ended: <path> ==` closes that meeting. Put a `## Summary` at the
-top of its notes file: three to ten lines on what the meeting was about,
+`== meeting ended: <path> ==` closes that meeting. Check the `client:` line once more, then put a `## Summary` near the
+top of its notes file, under the title and the `client:` line: three to ten lines on what the meeting was about,
 what was decided, and the action items with who owns each and the line
 numbers. Then reread `## Notes` once and fix it where later talk corrected
 earlier talk. Reply with the number of intents proposed and the
