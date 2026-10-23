@@ -80,9 +80,19 @@ def _words(s: str) -> list[str]:
     return s.split()
 
 
+def _bare(w: str) -> str:
+    """A word without its case or punctuation: Teams re-punctuates as it
+    goes ("KPMG." becomes "KPMG guy"), and that is not a different word."""
+    return re.sub(r"[^\w']", "", w.casefold())
+
+
+def _same(a: str, b: str) -> bool:
+    return [_bare(w) for w in _words(a)] == [_bare(w) for w in _words(b)]
+
+
 def _common_words(a: str, b: str) -> int:
     n = 0
-    for x, y in zip(_words(a), _words(b)):
+    for x, y in zip(map(_bare, _words(a)), map(_bare, _words(b))):
         if x != y:
             break
         n += 1
@@ -92,32 +102,32 @@ def _common_words(a: str, b: str) -> int:
 class TeamsDiffer:
     """Teams snapshots, `[{speaker, text}]` oldest first, to new lines.
 
-    An entry above the last is finished: its speaker has been followed. The
-    last entry is still being spoken, and is written only once it has held
-    still for `settle` seconds. An entry that keeps growing after it was
-    written (a pause mid-sentence) is written again as its new words only,
-    marked (cont.). Entries scroll off the top, so they are matched by
-    content against what was written, never by position.
+    An entry is written once it has held still for `settle` seconds,
+    wherever it sits. Not only the last entry is still being spoken: seen
+    live 2026-10-23, someone's "Um..." below a sentence left that sentence
+    growing for another 15 seconds, and writing it at once wrote it a few
+    words at a time. An entry that grows after it was written (a pause
+    mid-sentence) is written again as its new words only, marked (cont.).
+    Entries scroll off the top, so they are matched by content against what
+    was written, never by position.
     """
 
     def __init__(self, settle: float = 4.0, memory: int = 200):
         self.settle = settle
         self.memory = memory
         self.written: list[list[str]] = []  # [speaker, text as last seen], newest last
-        self._last: tuple[str, str] | None = None
-        self._since = 0.0
+        self._since: dict[tuple[str, str], float] = {}  # entry -> when first seen as it is
 
     def feed(self, items: list[dict], t: float) -> list[Line]:
         items = [(i.get("speaker", "").strip(), " ".join(i.get("text", "").split())) for i in items]
         items = [i for i in items if i[1]]
+        since, self._since = self._since, {}
+        for i in items:
+            self._since[i] = since.get(i, t)
         out: list[Line] = []
-        for n, (spk, text) in enumerate(items):
-            if n == len(items) - 1:
-                if (spk, text) != self._last:
-                    self._last, self._since = (spk, text), t
-                    continue
-                if t - self._since < self.settle:
-                    continue
+        for spk, text in items:
+            if t - self._since[(spk, text)] < self.settle:
+                continue
             line = self._take(spk, text)
             if line:
                 out.append(line)
@@ -127,7 +137,8 @@ class TeamsDiffer:
         for w in reversed(self.written[-20:]):
             if w[0] != spk:
                 continue
-            if w[1] == text:
+            if _same(w[1], text):
+                w[1] = text
                 return None
             # Grown or re-worded: the same caption if most of what was
             # written is still its opening words.

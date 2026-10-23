@@ -21,11 +21,37 @@ def texts(lines):
 # ------------------------------------------------------------ Teams
 
 
-def test_entry_above_the_last_is_written_at_once():
+def test_entry_above_the_last_also_waits_until_it_holds_still():
     d = TeamsDiffer(settle=4)
     assert d.feed([it("Ana", "Hello all")], 0) == []
-    out = d.feed([it("Ana", "Hello all"), it("Ben", "Hi")], 1)
+    assert d.feed([it("Ana", "Hello all"), it("Ben", "Hi")], 1) == []
+    out = d.feed([it("Ana", "Hello all"), it("Ben", "Hi")], 4)
     assert texts(out) == [("Ana", "Hello all", False)]
+
+
+def test_sentence_growing_above_an_interjection_is_one_line():
+    # Seen live 2026-10-23: Harald's "Um..." sat below Henric's sentence while
+    # it grew, re-punctuated, and the sentence came out a few words a line.
+    d = TeamsDiffer(settle=4)
+    steps = ["I I could, you know, once we kind of.",
+             "I I could, you know, once we kind of get our plan.",
+             "I I could, you know, once we kind of get our plan in some kind of a shape.",
+             "I, I could, you know, once we kind of get our plan in some kind of a shape, we can bring the KPMG.",
+             "I, I could, you know, once we kind of get our plan in some kind of a shape, we can bring the KPMG guy who."]
+    out = []
+    for n, text in enumerate(steps):
+        out += d.feed([it("Henric", text), it("Harald", "Um...")], n)
+    out += d.feed([it("Henric", steps[-1]), it("Harald", "Um.")], 8)
+    out += d.feed([it("Henric", steps[-1]), it("Harald", "Um.")], 9)
+    assert texts(out) == [("Harald", "Um...", False), ("Henric", steps[-1], False)]
+
+
+def test_repunctuation_alone_is_not_new():
+    d = TeamsDiffer(settle=1)
+    d.feed([it("Ana", "we can bring the KPMG.")], 0)
+    d.feed([it("Ana", "we can bring the KPMG.")], 1)
+    d.feed([it("Ana", "We can bring the KPMG")], 2)
+    assert d.feed([it("Ana", "We can bring the KPMG")], 3) == []
 
 
 def test_last_entry_waits_until_it_holds_still():
@@ -49,14 +75,17 @@ def test_entry_that_grows_after_writing_is_written_as_its_new_words():
 def test_entries_scrolling_off_the_top_are_not_rewritten():
     d = TeamsDiffer(settle=1)
     d.feed([it("A", "one two three"), it("B", "four five six"), it("A", "seven")], 0)
-    out = d.feed([it("B", "four five six"), it("A", "seven"), it("B", "eight")], 1)
-    assert texts(out) == [("A", "seven", False)]
+    d.feed([it("A", "one two three"), it("B", "four five six"), it("A", "seven")], 1)
+    out = d.feed([it("B", "four five six"), it("A", "seven"), it("B", "eight")], 2)
+    assert out == []
 
 
 def test_same_words_from_another_speaker_are_new():
     d = TeamsDiffer(settle=1)
-    d.feed([it("A", "sounds good to me"), it("B", "x")], 0)
-    out = d.feed([it("A", "sounds good to me"), it("B", "sounds good to me"), it("A", "y")], 1)
+    d.feed([it("A", "sounds good to me")], 0)
+    d.feed([it("A", "sounds good to me")], 1)
+    d.feed([it("A", "sounds good to me"), it("B", "sounds good to me")], 2)
+    out = d.feed([it("A", "sounds good to me"), it("B", "sounds good to me")], 3)
     assert texts(out) == [("B", "sounds good to me", False)]
 
 
@@ -240,11 +269,12 @@ def test_auto_starts_when_captions_show_and_ends_when_window_closes(home):
     a.step("MAG weekly", "no-captions", 0, NOW)
     assert a.path is None  # no captions, no transcript
     a.step("MAG weekly", [it("Ana", "hi"), it("Ben", "x")], 1, NOW)
+    a.step("MAG weekly", [it("Ana", "hi"), it("Ben", "x")], 2, NOW)
     p = a.path
     assert p and "MAG-weekly" in p.name and "Ana: hi" in p.read_text()
     a.step(None, "no-window", 30, NOW)
     assert a.path == p  # inside the grace period
-    a.step(None, "no-window", 61, NOW)
+    a.step(None, "no-window", 62, NOW)
     assert a.path is None and captions.ended(p)
 
 
