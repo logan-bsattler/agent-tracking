@@ -1012,13 +1012,20 @@ OPERATOR_ACTIONS = {
                "create and dispatch the task(s) and coord_resolve_intent with their ids, or dismiss it "
                "with a note -- then reply Done / Next for you."),
     "draft": ("Draft in Outlook: task {task_id} ({client}: {subject}): run `python -m coord_mcp.outlook "
-              "{task_id}` for the compose URL and body, open the URL in the Claude browser, type the body into "
-              "the editor, wait for Outlook to autosave it to Drafts, never press Send, then reply Done / Next "
-              "for you."),
+              "{task_id}` for the {how}, wait for Outlook to autosave it to Drafts, never press Send, then reply "
+              "Done / Next for you."),
     # Queued by the minder (minder_check), never by a page: {owed} is built
     # from board rows in minder_text.
     "minder": ("Minder {hhmm}: master owes work -- {owed}. Run the Board check procedure for these "
                "ids only, then reply Done / Next for you."),
+}
+# The middle of the draft prompt: a reply all into the original's thread
+# when the result names the message it answers, else a new message.
+DRAFT_HOW = {
+    True: ("search and body; in Outlook on the web in the Claude browser, search for the original, open it, "
+           "press Reply all, add any To/Cc it lists that Outlook left off, type the body above the quoted "
+           "thread (original not found: use the compose URL it prints, and say so)"),
+    False: "compose URL and body, open the URL in the Claude browser, type the body into the editor",
 }
 # Actions a page or the band may queue. The rest are the watcher's.
 PAGE_ACTIONS = frozenset(k for k in OPERATOR_ACTIONS if k != "minder")
@@ -1107,7 +1114,7 @@ def queue_operator_prompt(conn: sqlite3.Connection, action: str, task_id: str | 
         from .outlook import draft as _draft
         d = _draft(conn, task_id or "")  # refuses anything but a finished draft_reply
         text = OPERATOR_ACTIONS["draft"].format(task_id=d["task_id"], client=d["client"] or "unassigned",
-                                                subject=d["subject"][:120])
+                                                subject=d["subject"][:120], how=DRAFT_HOW[d["reply_all"]])
     elif action == "redispatch":
         task = next((d for d in parked_tasks(conn) if d["id"] == task_id), None)
         if task is None:

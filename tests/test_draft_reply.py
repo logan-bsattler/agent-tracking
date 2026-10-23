@@ -114,6 +114,66 @@ def test_cli_prints_url_then_body(conn, tmp_path, monkeypatch, capsys):
     assert outlook.main(["nope"]) == 1
 
 
+# ---- reply all ---------------------------------------------------------------
+#
+# A result that names the message it answers is drafted as a Reply all on that
+# message, so it threads, quotes, and takes its recipients from Outlook.
+
+
+def _reply_task(conn, tmp_path):
+    f = tmp_path / "DRAFT-reply-all.md"
+    f.write_text("Hi all,\n\nFixed.\n\nThanks!\n", encoding="utf-8")
+    tid = store.create_task(conn, "draft_reply", "Reply all re QSM", {"q": "x"}, assigned_to="Moog")["task_id"]
+    store.get_task(conn, tid, reader="Moog")
+    store.complete_task(conn, tid, {
+        "done": True, "to": ["corwin@moog.com"], "cc": ["kelly@moog.com"],
+        "subject": "RE: FW: QSM-1050438 SMTP failure", "body_path": str(f),
+        "reply_from": "Corwin Hale <corwin@moog.com>", "reply_date": "2026-10-21 09:12",
+        "summary": "Tell the thread it is fixed.",
+    })
+    return tid
+
+
+def test_search_query_strips_reply_chain_and_display_name():
+    assert (outlook.search_query("Corwin Hale <corwin@moog.com>", "RE: Fwd: re: Cutover \"plan\"")
+            == 'from:corwin@moog.com subject:"Cutover plan"')
+    assert outlook.search_query("corwin@moog.com", "RE:") == "from:corwin@moog.com"
+
+
+def test_reply_from_makes_it_a_reply_all(conn, tmp_path):
+    tid = _reply_task(conn, tmp_path)
+    d = outlook.draft(conn, tid)
+    assert d["reply_all"] and d["search"] == 'from:corwin@moog.com subject:"QSM-1050438 SMTP failure"'
+    assert d["url"].startswith(outlook.COMPOSE)  # the fallback stays
+    old, _ = _draft_task(conn, tmp_path)
+    assert not outlook.draft(conn, old)["reply_all"]  # in_reply_to alone is a label, not a message
+
+
+def test_reply_all_prompt_and_cli(conn, tmp_path, monkeypatch, capsys):
+    tid = _reply_task(conn, tmp_path)
+    store.queue_operator_prompt(conn, "draft", tid)
+    text = store.take_operator_prompt(conn)["text"]
+    assert "press Reply all" in text and "never press Send" in text and "compose URL" in text
+    monkeypatch.setenv("COORD_DB", str(tmp_path / "t.db"))
+    assert outlook.main([tid]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith(outlook.MAIL + "\n") and 'from:corwin@moog.com subject:"QSM' in out
+    assert "sent 2026-10-21 09:12" in out and "Compose URL: " + outlook.COMPOSE in out
+
+
+def test_new_message_prompt_unchanged(conn, tmp_path):
+    tid, _ = _draft_task(conn, tmp_path)
+    store.queue_operator_prompt(conn, "draft", tid)
+    text = store.take_operator_prompt(conn)["text"]
+    assert "Reply all" not in text and "open the URL in the Claude browser" in text
+
+
+def test_task_page_shows_reply_all(conn, tmp_path):
+    tid = _reply_task(conn, tmp_path)
+    page = report.task_page(store.task_detail(conn, tid), tid)
+    assert "reply all to" in page and "corwin@moog.com" in page and "not in the thread" in page
+
+
 # ---- the drafts walk -------------------------------------------------------
 #
 # Every finished draft on one page, in the order Ben works them, so he never

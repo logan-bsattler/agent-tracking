@@ -101,6 +101,11 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
         "subject": {"type": "str", "max": 200, "required": True},
         "body_path": {"type": "str", "max": 400, "required": True},
         "in_reply_to": {"type": "str", "max": 200},
+        # The message being answered, so master can open it in Outlook and
+        # press Reply all: threaded, quoted, recipients from Outlook itself.
+        # Without reply_from the draft is a new message to `to` and `cc`.
+        "reply_from": {"type": "str", "max": 120},
+        "reply_date": {"type": "str", "max": 40},
         "summary": {"type": "str", "max": 300, "required": True},
         "follow_ups": _FOLLOW_UPS,
     },

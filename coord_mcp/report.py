@@ -1312,6 +1312,9 @@ def _draft_envelope(dr: dict[str, Any], body_link: str) -> str:
     env = {"to": "; ".join(dr["to"]) or "—", "cc": "; ".join(dr["cc"]) or "—", "subject": dr["subject"]}
     if dr["in_reply_to"]:
         env["in reply to"] = dr["in_reply_to"]
+    if dr.get("reply_all"):
+        env["reply all to"] = " · ".join(x for x in (dr["reply_from"], dr["reply_date"]) if x)
+        env["find it with"] = dr["search"]
     kv = "".join(f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in env.items())
     body = (f'<pre class="draft-body">{esc(dr["body"])}</pre>' if dr["exists"]
             else '<p class="empty">Body file is not on disk; nothing to draft.</p>')
@@ -1319,9 +1322,11 @@ def _draft_envelope(dr: dict[str, Any], body_link: str) -> str:
 
 
 def _compose_link(dr: dict[str, Any]) -> str:
-    """The same envelope in Ben's own browser, for him to paste the body."""
+    """The same envelope in Ben's own browser, for him to paste the body.
+    For a reply all it is a new message, outside the thread, and says so."""
+    note = " (new message, not in the thread)" if dr.get("reply_all") else ""
     return (f'<a class="drill" href="{esc(dr["url"])}" target="_blank" rel="noopener">'
-            f'Open compose in my browser →</a>')
+            f'Open compose in my browser{note} →</a>')
 
 
 def _next_link(d: dict[str, Any], queued: bool) -> str:

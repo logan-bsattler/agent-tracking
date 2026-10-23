@@ -109,6 +109,12 @@ into Outlook on the web (`python -m coord_mcp.outlook <task_id>` gives the
 compose deeplink and body), where it autosaves to Drafts. Outlook COM is not
 used: its MAPI namespace hangs from an agent session. Nothing sends.
 
+A reply into an existing thread also gives `reply_from` (the sender of the
+message being answered) and `reply_date`. Master then searches Outlook for
+that message and presses **Reply all**, so the draft is threaded, quotes the
+history, and takes its recipients from Outlook; `to` and `cc` only add to
+them. Without `reply_from` it is a new message, as before.
+
 ## Usage tracking
 
 Answers "what did I spend the week's limit on", per session, project, model
