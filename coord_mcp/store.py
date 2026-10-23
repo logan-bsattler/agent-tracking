@@ -1398,6 +1398,16 @@ def minder_state(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[st
             "every_min": MINDER_EVERY}
 
 
+def minder_status(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any]:
+    """minder_state plus what decides whether it fires: how many ids are owed
+    and how many prompts are queued. For the board's line, not minder_check,
+    which reads the same things in its own order."""
+    now_ts = now() if now_ts is None else now_ts
+    owed = minder_owed(conn, now_ts)
+    return {**minder_state(conn, now_ts), "owed": sum(len(v) for v in owed.values()),
+            "queued": queued_operator_prompts(conn)}
+
+
 def minder_check(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any]:
     """One pass: queue a minder prompt if work is owed and nothing stands in the way.
 

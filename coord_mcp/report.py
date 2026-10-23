@@ -1005,17 +1005,29 @@ MINDER_TITLE = ("Master-minder: the dashboard queues a wake prompt to master whe
 
 
 def minder_line(m: dict[str, Any] | None, t: int) -> str:
-    """'Minder: last 14:05, next 14:35' or the reason there is none to show."""
+    """'Minder: last 14:05 (3m ago), eligible, nothing owed' or the reason
+    there is none to show. The tail says why it is not firing, in the order
+    minder_check tests: rate limit, nothing owed, a prompt already queued.
+    Without minder_status's counts it says only when it may fire next."""
     if not m:
         return "Minder: unknown"
     if not m.get("enabled"):
         return "Minder: off"
     last = m.get("last_fired")
     nxt = m.get("next_eligible") or t
-    if not last:
-        return "Minder: never fired, eligible now"
-    return (f"Minder: last {when(last)} ({_age(last, t)}), "
-            + ("eligible now" if nxt <= t else f"next {when(nxt)}"))
+    owed, queued = m.get("owed"), m.get("queued") or 0
+    if nxt > t:
+        why = f"rate limit until {when(nxt)}" + (f", {owed} owed" if owed else "")
+    elif owed is None:
+        why = "eligible now"
+    elif not owed:
+        why = "eligible, nothing owed"
+    elif queued:
+        why = f"eligible, {owed} owed, held behind {queued} queued prompt{'s' if queued > 1 else ''}"
+    else:
+        why = f"eligible, {owed} owed, fires on the next pass"
+    head = f"last {when(last)} ({_age(last, t)})" if last else "never fired"
+    return f"Minder: {head}, {why}"
 
 
 def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None = None) -> str:
@@ -2117,7 +2129,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 return json.dumps({"parked": store.parked_tasks(conn),
                                    "queued": store.queued_operator_prompts(conn),
                                    "question": store.current_question(conn),
-                                   "minder": store.minder_state(conn),
+                                   "minder": store.minder_status(conn),
                                    "actions": {k: v for k, v in store.OPERATOR_ACTIONS.items()
                                                if k in store.PAGE_ACTIONS and k != "redispatch"}}
                                   ).encode("utf-8")
@@ -2126,7 +2138,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v["parked"] = store.parked_tasks(conn)
                 v["queued"] = store.queued_operator_prompts(conn)
                 v["question"] = store.current_question(conn)
-                v["minder"] = store.minder_state(conn)
+                v["minder"] = store.minder_status(conn)
                 v["fleet"] = store.fleet(conn, v, hours.CLIENTS)
                 v["activity"] = store.activity(conn)
                 client = (self._query.get("client") or [""])[0].strip() or None

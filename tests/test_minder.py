@@ -305,10 +305,26 @@ def test_state_and_board_line(conn):
     m = store.minder_state(conn, fired_at + MIN)
     assert m["last_fired"] == fired_at and m["next_eligible"] == fired_at + store.MINDER_EVERY * MIN
     line = report.minder_line(m, fired_at + MIN)
-    assert line.startswith("Minder: last ") and "(1m ago)" in line and "next " in line
+    assert line.startswith("Minder: last ") and "(1m ago)" in line and "rate limit until " in line
     assert report.minder_line({"enabled": False}, t) == "Minder: off"
     v = store.operator_view(conn)
     v["parked"], v["queued"], v["minder"] = store.parked_tasks(conn), 1, m
     page = report.board_page(v)
     assert 'class="age minder"' in page and "Minder: last" in page
     assert json.dumps(m)  # what /api/parked returns is plain JSON
+
+
+def test_board_line_says_why_it_is_not_firing(conn):
+    t = now()
+    m = store.minder_status(conn, t)
+    assert (m["owed"], m["queued"]) == (0, 0)
+    assert report.minder_line(m, t) == "Minder: never fired, eligible, nothing owed"
+    _parked(conn)
+    later = t + (store.MINDER_PARKED + 1) * MIN
+    assert report.minder_line(store.minder_status(conn, later), later).endswith(
+        "eligible, 1 owed, fires on the next pass")
+    held = {**store.minder_status(conn, later), "queued": 2}
+    assert report.minder_line(held, later).endswith("eligible, 1 owed, held behind 2 queued prompts")
+    store.minder_check(conn, later)
+    line = report.minder_line(store.minder_status(conn, later + MIN), later + MIN)
+    assert "rate limit until " in line and line.endswith(", 1 owed")
