@@ -710,6 +710,11 @@ def _answer_buttons(q: dict[str, Any], back: str) -> str:
         for i, o in enumerate(q["options"]))
 
 
+def question_doc_href(q: dict[str, Any]) -> str:
+    """Where the dashboard shows the document a question was presented with."""
+    return f'/board/question/{int(q["id"])}/file'
+
+
 def _next_up(rows: list[dict[str, Any]], t: int, q: dict[str, Any] | None = None) -> str:
     """The one thing to do first, and the three behind it. Master's open
     question leads when there is one: it is the head of Ben's queue as master
@@ -718,6 +723,8 @@ def _next_up(rows: list[dict[str, Any]], t: int, q: dict[str, Any] | None = None
     if q:
         tid = q.get("task_id") or ""
         link = (f' <a class="drill" href="/board/task/{esc(tid)}">{esc(tid[:8])}</a>' if tid else "")
+        if q.get("path"):  # a board-wide question has no task page; its document is the drill-down
+            link += f' <a class="drill" href="{question_doc_href(q)}">{esc(Path(q["path"]).name)}</a>'
         head = (f'<div class="head"><p class="ask">{esc(q["question"])}{link}</p>'
                 f'<div class="btns">{_answer_buttons(q, "/board")}</div></div>')
         behind = [d for d in order if not q.get("follow_up_id") or d.get("fid") != q["follow_up_id"]][:3]
@@ -2124,6 +2131,18 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v["activity"] = store.activity(conn)
                 client = (self._query.get("client") or [""])[0].strip() or None
                 return board_page(v, client=client).encode("utf-8")
+            if m := re.fullmatch(r"/board/question/(\d+)/file", path):
+                # Only the path master stored with the question (store._question_doc
+                # held it to the agents and client folders), never one a request names.
+                f = store.question_file(conn, m.group(1))
+                if f is None:
+                    return None
+                ext = f.suffix.lower()
+                if ext in INLINE_TYPES:
+                    self._type, self._sandbox = INLINE_TYPES[ext], ext in (".html", ".htm")
+                else:
+                    self._type, self._disp = "application/octet-stream", f.name
+                return f.read_bytes()
             if path.startswith("/board/task/"):
                 tid = path.rsplit("/", 1)[1]
                 return task_page(store.task_detail(conn, tid), tid,

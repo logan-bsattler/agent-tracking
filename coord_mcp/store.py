@@ -1431,15 +1431,48 @@ def minder_check(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[st
 QUESTION_MAX = 500
 OPTION_MAX = 200
 OPTIONS_MAX = 6
+# Where a question's document may live: the master's own folder and the
+# client folders. The dashboard serves that one file to a page, so a path
+# elsewhere (a key, another user's profile) is refused when it is presented.
+AGENTS_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _ensure_question_path(conn: sqlite3.Connection) -> None:
+    """Add questions.path on first use, the way ensure_deps adds task_deps: a
+    SCHEMA_VERSION bump would ping-pong a full init with every coord server
+    still on the old code. Old code reads the column as an extra in q.*."""
+    if "path" not in {r[1] for r in conn.execute("PRAGMA table_info(questions)")}:
+        conn.execute("ALTER TABLE questions ADD COLUMN path TEXT")
+
+
+def _question_doc(path: str | None) -> str | None:
+    """The document a question is about, resolved, or None. Refuses a path
+    that is not an existing file under AGENTS_ROOT or DOCS_ROOT."""
+    if not path or not path.strip():
+        return None
+    p = Path(path.strip()).expanduser()
+    if not p.is_absolute():
+        raise ValueError(f"path must be absolute: {path!r}")
+    p = p.resolve()
+    if not any(p.is_relative_to(r.resolve()) for r in (AGENTS_ROOT, DOCS_ROOT)):
+        raise ValueError(f"path must be under {AGENTS_ROOT} or {DOCS_ROOT}")
+    if not p.is_file():
+        raise ValueError(f"no file at {p}")
+    return str(p)
 
 
 def present_question(conn: sqlite3.Connection, question: str, options: list[str], task_id: str | None = None,
-                     follow_up_id: str | None = None, recommended: int | None = None) -> dict[str, Any]:
+                     follow_up_id: str | None = None, recommended: int | None = None,
+                     path: str | None = None) -> dict[str, Any]:
     """Store the question master is putting to Ben; it closes the one before.
 
     The band and the task page draw one button per option. A press sends a
     prompt built from this row, so the text master wrote here is the only
     text an answer can carry.
+
+    With neither task_id nor follow_up_id it is board-wide, answered as
+    "Answer on q<id>". `path` is the document behind it, linked from the band
+    and Next up.
     """
     question = (question or "").strip()
     options = [str(o).strip() for o in options or []]
@@ -1460,16 +1493,19 @@ def present_question(conn: sqlite3.Connection, question: str, options: list[str]
         if task_id and task_id != fu["task_id"]:
             raise ValueError(f"follow-up '{follow_up_id}' belongs to task '{fu['task_id']}', not '{task_id}'")
         task_id = fu["task_id"]
-    if not task_id:
-        raise ValueError("give task_id or follow_up_id: the answer must name what it answers")
-    if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
+    if task_id and not conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
         raise KeyError(f"unknown task '{task_id}'")
+    doc = _question_doc(path)
+    _ensure_question_path(conn)
     t = now()
     conn.execute("UPDATE questions SET closed_at=? WHERE closed_at IS NULL", (t,))
+    # task_id is NOT NULL in the table; '' is board-wide, and reads give None.
     cur = conn.execute(
-        "INSERT INTO questions(task_id, follow_up_id, question, options, recommended, created_at) "
-        "VALUES (?,?,?,?,?,?)", (task_id, follow_up_id, question, json.dumps(options), recommended, t))
-    return {"ok": True, "question_id": cur.lastrowid, "task_id": task_id, "follow_up_id": follow_up_id}
+        "INSERT INTO questions(task_id, follow_up_id, question, options, recommended, created_at, path) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (task_id or "", follow_up_id, question, json.dumps(options), recommended, t, doc))
+    return {"ok": True, "question_id": cur.lastrowid, "task_id": task_id or None,
+            "follow_up_id": follow_up_id, "ref": follow_up_id or task_id or f"q{cur.lastrowid}", "path": doc}
 
 
 def current_question(conn: sqlite3.Connection, task_id: str | None = None) -> dict[str, Any] | None:
@@ -1483,8 +1519,10 @@ def current_question(conn: sqlite3.Connection, task_id: str | None = None) -> di
     if r is None or (task_id and r["task_id"] != task_id):
         return None
     d = dict(r)
+    d["task_id"] = d["task_id"] or None
+    d.setdefault("path", None)  # a board that has never had a path column
     d["options"] = json.loads(d["options"])
-    d["ref"] = d["follow_up_id"] or d["task_id"]
+    d["ref"] = d["follow_up_id"] or d["task_id"] or f"q{d['id']}"
     d["prompts"] = [OPERATOR_ACTIONS["answer"].format(ref=d["ref"], option=o, question=d["question"])
                     for o in d["options"]]
     return d
@@ -1502,6 +1540,21 @@ def answer_prompt(conn: sqlite3.Connection, question_id: Any, option: Any) -> tu
     if not 0 <= i < len(q["options"]):
         raise ValueError(f"question {qid} has no option {i}")
     return q["prompts"][i], q["task_id"]
+
+
+def question_file(conn: sqlite3.Connection, question_id: Any) -> Path | None:
+    """The document question `question_id` was presented with, if it is still
+    on disk. Only the stored path, never one a request names."""
+    try:
+        qid = int(question_id)
+    except (TypeError, ValueError):
+        return None
+    _ensure_question_path(conn)
+    r = conn.execute("SELECT path FROM questions WHERE id=?", (qid,)).fetchone()
+    if r is None or not r["path"]:
+        return None
+    p = Path(r["path"])
+    return p if p.is_file() else None
 
 
 def close_question(conn: sqlite3.Connection, question_id: Any) -> bool:

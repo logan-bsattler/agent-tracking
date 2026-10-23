@@ -149,7 +149,11 @@ export const register: Register = on => {
         {q ? (
           <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
             <Text dimColor>
-              Answer <Link href={`${DASH}/board/task/${q.task_id}`}>{q.ref.slice(0, 12)}</Link>:
+              Answer {q.task_id
+                ? <Link href={`${DASH}/board/task/${q.task_id}`}>{q.ref.slice(0, 12)}</Link>
+                : q.ref}
+              {q.path ? ' · ' : null}
+              {q.path ? <Link href={`${DASH}/board/question/${q.id}/file`}>{q.path.split(/[\\/]/).pop()}</Link> : null}:
             </Text>
             {q.options.map((o, i) => (
               <Button key={`ans-${q.id}-${i}`} variant={i === q.recommended ? 'primary' : undefined}

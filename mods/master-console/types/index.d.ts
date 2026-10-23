@@ -5,7 +5,8 @@ export type Parked = { id: string; title: string; client: string; parks: number;
 export type Question = {
   id: number
   ref: string
-  task_id: string
+  task_id: string | null  // null: board-wide, ref is q<id>
+  path: string | null     // the document behind it
   question: string
   options: string[]
   prompts: string[]

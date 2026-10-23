@@ -39,12 +39,39 @@ def test_present_refuses_what_a_button_cannot_carry(conn):
     for bad in ([], ["only one"], ["a", "a"], ["x" * (store.OPTION_MAX + 1), "b"]):
         with pytest.raises(ValueError):
             store.present_question(conn, "Q?", bad, task_id=t)
-    with pytest.raises(ValueError):
-        store.present_question(conn, "Q?", ["a", "b"])  # names nothing
     with pytest.raises(KeyError):
         store.present_question(conn, "Q?", ["a", "b"], task_id="nope")
     with pytest.raises(ValueError):
         store.present_question(conn, "Q?", ["a", "b"], task_id=t, recommended=2)
+
+
+def test_board_wide_question_is_answered_on_its_own_id(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "AGENTS_ROOT", tmp_path)
+    doc = tmp_path / "board-cleanup-review.md"
+    doc.write_text("# cleanup", encoding="utf-8")
+    r = store.present_question(conn, "Resolve the stale loose ends?", ["Yes", "No"], path=str(doc))
+    assert r["task_id"] is None and r["ref"] == f"q{r['question_id']}" and r["path"] == str(doc.resolve())
+    q = store.current_question(conn)
+    assert q["task_id"] is None and q["ref"] == r["ref"]
+    assert q["prompts"][0].startswith(f"Answer on {r['ref']}: Yes")
+    assert store.answer_prompt(conn, q["id"], 1) == (q["prompts"][1], None)
+    assert store.question_file(conn, q["id"]) == doc.resolve()
+    html = report._next_up([], store.now(), q)
+    assert report.question_doc_href(q) in html and "board-cleanup-review.md" in html and "/board/task/" not in html
+
+
+def test_question_path_must_be_a_file_under_the_known_roots(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "AGENTS_ROOT", tmp_path / "agents")
+    monkeypatch.setattr(store, "DOCS_ROOT", tmp_path / "docs")
+    (tmp_path / "agents").mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("x", encoding="utf-8")
+    for bad in (str(outside), "relative/review.md", str(tmp_path / "agents" / "missing.md"),
+                str(tmp_path / "agents" / ".." / "secret.txt")):
+        with pytest.raises(ValueError):
+            store.present_question(conn, "Q?", ["a", "b"], path=bad)
+    assert store.current_question(conn) is None
+    assert store.question_file(conn, 999) is None
 
 
 def test_a_new_question_closes_the_last(conn):
@@ -134,3 +161,39 @@ def test_answer_posts_through_the_server(tmp_path, monkeypatch):
         assert json.loads(r.read())["ok"]
     assert store.take_operator_prompt(c)["text"].startswith(f"Answer on {fu}: Monday")
     c.close()
+
+
+def test_board_wide_question_document_is_served(tmp_path, monkeypatch):
+    import functools
+    import socket
+    import threading
+    import time
+    import urllib.error
+    import urllib.request
+
+    from coord_mcp import usage
+    from coord_mcp.db import connect as db_connect
+
+    monkeypatch.setattr(usage, "ingest", lambda conn: None)
+    monkeypatch.setattr(store, "AGENTS_ROOT", tmp_path)
+    doc = tmp_path / "review.md"
+    doc.write_text("# the review", encoding="utf-8")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    make = functools.partial(db_connect, tmp_path / "srv.db")
+    c = make()
+    qid = store.present_question(c, "Clean up?", ["Yes", "No"], path=str(doc))["question_id"]
+    bare = store.present_question(c, "And this?", ["Yes", "No"])["question_id"]
+    threading.Thread(target=report.serve, args=(make, port), daemon=True).start()
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(50):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    with urllib.request.urlopen(f"{base}/board/question/{qid}/file", timeout=10) as r:
+        assert r.read() == b"# the review"
+    with pytest.raises(urllib.error.HTTPError):
+        urllib.request.urlopen(f"{base}/board/question/{bare}/file", timeout=10)

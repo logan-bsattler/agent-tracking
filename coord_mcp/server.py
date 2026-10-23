@@ -261,21 +261,27 @@ class PresentQuestionInput(Strict):
     task_id: str | None = Field(default=None, description="Task it is about, when no loose end fits",
                                 max_length=40)
     recommended: int | None = Field(default=None, description="Index into options of your recommendation", ge=0)
+    path: str | None = Field(default=None, description="Absolute path of the document behind the question "
+                             "(under the agents folder or a client folder); the band and Next up link it",
+                             max_length=500)
 
 
 @tool("coord_present_question", title="Present question")
 async def coord_present_question(params: PresentQuestionInput) -> str:
     """Call this every time you put a question with options to Ben. Each option
     becomes a button in his prompt band and on the task's dashboard page; a
-    press sends you "Answer on <follow_up_id or task_id>: <option>" as his own
-    prompt. Presenting a question closes the previous one. Give follow_up_id
-    or task_id.
+    press sends you "Answer on <ref>: <option>" as his own prompt. Presenting
+    a question closes the previous one.
 
-    Returns JSON: {ok, question_id, task_id, follow_up_id}
+    Give follow_up_id or task_id when it is about one. A board-wide question
+    (a cleanup, a policy) gives neither, rather than borrowing a task: its
+    ref is q<question_id>. path names the document Ben should read first.
+
+    Returns JSON: {ok, question_id, task_id, follow_up_id, ref, path}
     """
     try:
         return _ok(store.present_question(db(), params.question, params.options, params.task_id,
-                                          params.follow_up_id, params.recommended))
+                                          params.follow_up_id, params.recommended, params.path))
     except Exception as e:
         return _err(e)
 
