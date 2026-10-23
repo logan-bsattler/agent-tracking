@@ -201,21 +201,32 @@ class UIA:
         self.walker = self.a.RawViewWalker
         self._root = None  # the captions pane, kept across polls
 
-    def _pids(self, exe: str) -> set[int]:
-        import subprocess
+    @staticmethod
+    def _exe(pid: int) -> str:
+        """A process's image name, in-process. It used to shell out to
+        tasklist, which under pythonw flashed a console window every poll."""
+        import ctypes
+        from ctypes import wintypes
 
-        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {exe}", "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True).stdout
-        return {int(r[1]) for r in (l.strip('"').split('","') for l in out.splitlines()) if len(r) > 1 and r[1].isdigit()}
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            n = wintypes.DWORD(len(buf))
+            ok = k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n))
+            return Path(buf.value).name if ok else ""
+        finally:
+            k.CloseHandle(h)
 
     def windows(self, exe: str) -> list:
-        pids = self._pids(exe)
         kids = self.a.GetRootElement().FindAll(self.U.TreeScope_Children, self.a.CreateTrueCondition())
         out = []
         for i in range(kids.Length):
             try:
                 e = kids.GetElement(i)
-                if e.CurrentProcessId in pids:
+                if self._exe(e.CurrentProcessId).casefold() == exe.casefold():
                     out.append(e)
             except Exception:
                 continue
