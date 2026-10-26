@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import contracts
-from .db import ensure_deps, now
+from .db import ensure_deps, ensure_promotions, now
 
 
 def _id() -> str:
@@ -698,8 +698,9 @@ def deliverables(conn: sqlite3.Connection, days: int = 14, root: Path | None = N
     """
     root = root or DOCS_ROOT
     t = now()
+    # A dod_review names the file it judged, not one it made.
     sql = """SELECT id, kind, title, assigned_to, result, completed_at FROM tasks
-             WHERE state='done' AND completed_at >= ?"""
+             WHERE state='done' AND kind != 'dod_review' AND completed_at >= ?"""
     args: list[Any] = [t - days * 86400]
     if client:
         sql += " AND assigned_to = ?"
@@ -713,6 +714,7 @@ def deliverables(conn: sqlite3.Connection, days: int = 14, root: Path | None = N
     for r in rows:
         res = json.loads(r["result"] or "{}")
         raw = (([res["output_path"]] if res.get("output_path") else [])
+               + ([res["path"]] if r["kind"] == "deliverable" and res.get("path") else [])
                + [f.get("path", "") for f in res.get("files_changed") or [] if isinstance(f, dict)]
                + [x for x in res.get("pointers") or [] if isinstance(x, str)])
         for path in [x for item in raw for x in _split_paths(item)]:
@@ -727,8 +729,107 @@ def deliverables(conn: sqlite3.Connection, days: int = 14, root: Path | None = N
             out.append({"task_id": r["id"], "title": r["title"], "kind": r["kind"],
                         "client": r["assigned_to"] or "—", "name": full.name, "path": str(full),
                         "exists": exists, "size": full.stat().st_size if exists else None,
-                        "completed_at": r["completed_at"], "ben": ben.get(r["id"], [])})
+                        "completed_at": r["completed_at"], "ben": ben.get(r["id"], []),
+                        **_stage(conn, r["id"], r["kind"], full)})
+    ensure_promotions(conn)
+    psql = ("SELECT p.*, t.title FROM promotions p JOIN tasks t ON t.id = p.task_id "
+            "WHERE p.created_at >= ?" + (" AND p.client = ?" if client else "") + " ORDER BY p.created_at DESC, p.version DESC")
+    for p in conn.execute(psql, args):
+        dest = Path(p["dest"])
+        exists = dest.is_file()
+        out.append({"task_id": p["task_id"], "title": p["title"], "kind": "deliverable", "client": p["client"],
+                    "name": dest.name, "path": str(dest), "exists": exists,
+                    "size": dest.stat().st_size if exists else None, "completed_at": p["created_at"],
+                    "ben": [], "stage": "final", "version": p["version"], "reviews": 0})
     return {"files": out, "days": days, "client": client, "as_of": t}
+
+
+# Where a deliverable stands, as the dashboard labels it. Files from other
+# kinds predate the review step: in progress, with nothing to promote.
+STAGES = {"draft": "in progress", "review": "awaiting review", "changes": "changes requested",
+          "escalated": "escalated to Ben", "approved": "approved, ready to promote",
+          "stale": "changed since approval", "promoted": "promoted", "final": "final"}
+
+
+def latest_review(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
+    """The newest finished dod_review of a deliverable task, with its verdict."""
+    r = conn.execute("SELECT id, result, completed_at FROM tasks WHERE parent_id=? AND kind='dod_review' "
+                     "AND state='done' ORDER BY completed_at DESC, rowid DESC LIMIT 1", (task_id,)).fetchone()
+    if r is None:
+        return None
+    return {"id": r["id"], "completed_at": r["completed_at"],
+            "verdict": json.loads(r["result"] or "{}").get("verdict")}
+
+
+def _stage(conn: sqlite3.Connection, task_id: str, kind: str, path: Path) -> dict[str, Any]:
+    if kind != "deliverable":
+        return {"stage": "draft", "reviews": 0}
+    n = conn.execute("SELECT COUNT(*) FROM tasks WHERE parent_id=? AND kind='dod_review' AND state='done'",
+                     (task_id,)).fetchone()[0]
+    rev = latest_review(conn, task_id)
+    if rev is None:
+        return {"stage": "review", "reviews": n}
+    stage = {"approve": "approved", "request_changes": "changes", "escalate": "escalated"}[rev["verdict"]]
+    if stage == "approved":
+        ensure_promotions(conn)
+        if conn.execute("SELECT 1 FROM promotions WHERE task_id=? AND review_id=?",
+                        (task_id, rev["id"])).fetchone():
+            stage = "promoted"
+        elif path.is_file() and int(path.stat().st_mtime) > rev["completed_at"]:
+            stage = "stale"
+    return {"stage": stage, "reviews": n, "review_id": rev["id"]}
+
+
+def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None) -> dict[str, Any]:
+    """Copy an approved deliverable into <client>/deliverables as <name>-vN.
+
+    Ben's click on /deliverables, never an agent's: the client folder is what
+    the client sees. Refused unless the task is a finished deliverable whose
+    newest dod_review approves it and the file is unchanged since that review.
+    Never overwrites: each promotion is a new version beside the last.
+    """
+    import hashlib
+    import shutil
+
+    root = root or DOCS_ROOT
+    ensure_promotions(conn)
+    r = conn.execute("SELECT kind, state, assigned_to, result FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if r is None:
+        raise ValueError(f"no task {task_id!r}")
+    if r["kind"] != "deliverable" or r["state"] != "done":
+        raise ValueError("only a finished deliverable task can be promoted")
+    rev = latest_review(conn, task_id)
+    if rev is None or rev["verdict"] != "approve":
+        raise ValueError("its newest dod_review does not approve it; review it first")
+    client = r["assigned_to"]
+    folder = root / (client or "")
+    if not client or not folder.is_dir():
+        raise ValueError(f"no client folder for {client!r} under {root}")
+    src = _resolve(_clean_path(json.loads(r["result"])["path"]), client, root)
+    if not src.is_file():
+        raise ValueError(f"{src} is not on disk")
+    if int(src.stat().st_mtime) > rev["completed_at"]:
+        raise ValueError(f"{src.name} changed after review {rev['id']} approved it; review it again")
+    sha = hashlib.sha256(src.read_bytes()).hexdigest()
+    same = conn.execute("SELECT dest, version FROM promotions WHERE task_id=? AND sha256=?",
+                        (task_id, sha)).fetchone()
+    if same:
+        return {"ok": True, "duplicate": True, "dest": same["dest"], "version": same["version"]}
+    out_dir = folder / "deliverables"
+    out_dir.mkdir(exist_ok=True)
+    stem = re.sub(r"[-_ ]draft(?=$|[-_ ])", "", src.stem, flags=re.I) or src.stem
+    v = 1
+    while (out_dir / f"{stem}-v{v}{src.suffix}").exists():
+        v += 1
+    dest = out_dir / f"{stem}-v{v}{src.suffix}"
+    shutil.copy2(src, dest)
+    pid = _id()
+    conn.execute("INSERT INTO promotions(id, task_id, review_id, client, src, dest, version, sha256, created_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?)", (pid, task_id, rev["id"], client, str(src), str(dest), v, sha, now()))
+    dec = record_decision(conn, f"Promoted {src.name} to {client}/deliverables as {dest.name}"[:200],
+                          f"dod_review {rev['id']} approved it; Ben promoted it from /deliverables", task_id)
+    return {"ok": True, "duplicate": False, "promotion_id": pid, "dest": str(dest), "version": v,
+            "decision_id": dec["decision_id"]}
 
 
 def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None = None) -> dict[str, Any]:

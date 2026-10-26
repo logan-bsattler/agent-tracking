@@ -288,6 +288,30 @@ def ensure_deps(conn: sqlite3.Connection) -> None:
         conn.executescript(DEPS_DDL)
 
 
+# Deliverables Ben promoted into a client's deliverables folder. Created on
+# first use, like task_deps and for the same reason: no SCHEMA_VERSION bump
+# while older servers are still running.
+PROMOTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS promotions (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL REFERENCES tasks(id),
+  review_id  TEXT NOT NULL REFERENCES tasks(id),
+  client     TEXT NOT NULL,
+  src        TEXT NOT NULL,
+  dest       TEXT NOT NULL,
+  version    INTEGER NOT NULL,
+  sha256     TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS promotions_task ON promotions(task_id);
+"""
+
+
+def ensure_promotions(conn: sqlite3.Connection) -> None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='promotions'").fetchone() is None:
+        conn.executescript(PROMOTIONS_DDL)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Additive migrations. CREATE TABLE IF NOT EXISTS won't add a column to a
     table that already exists, so do it here."""

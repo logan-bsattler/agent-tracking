@@ -45,6 +45,20 @@ _FOLLOW_UPS = {
     }},
 }
 
+# One definition-of-done item, judged. `item` is the checklist line as the
+# DoD file words it, so producer and reviewer can be compared line by line.
+_CRITERION = {
+    "item": {"type": "str", "max": 200, "required": True},
+    "met": {"type": "bool", "required": True},
+    "note": {"type": "str", "max": 200},
+}
+
+_DOD_FINDING = {
+    "criterion": {"type": "str", "max": 200, "required": True},
+    "severity": {"type": "enum", "values": ["blocker", "major", "minor"], "required": True},
+    "note": {"type": "str", "max": 200, "required": True},
+}
+
 CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
     "code_change": {
         "done": {"type": "bool", "required": True},
@@ -109,7 +123,53 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
         "summary": {"type": "str", "max": 300, "required": True},
         "follow_ups": _FOLLOW_UPS,
     },
+    # A client-facing file in progress. It lives in the client's working
+    # folder; only an approving dod_review lets Ben promote it to the client's
+    # deliverables folder (store.promote). self_check is the producer's own
+    # pass over the definition of done, before any reviewer sees it.
+    "deliverable": {
+        "done": {"type": "bool", "required": True},
+        "summary": {"type": "str", "max": 300, "required": True},
+        "path": {"type": "str", "max": 400, "required": True},
+        "deliverable_type": {"type": "str", "max": 60, "required": True},
+        "dod_path": {"type": "str", "max": 400, "required": True},
+        "self_check": {"type": "list", "max": 30, "required": True,
+                       "items": {"type": "dict", "fields": _CRITERION}},
+        "follow_ups": _FOLLOW_UPS,
+    },
+    # An independent pass over a deliverable against its definition of done.
+    # Created with parent_id = the deliverable task, in a session that did not
+    # write it. Every DoD item is judged in `criteria`; `escalate` hands it to
+    # Ben (a judgement the checklist cannot settle, or the round cap reached).
+    "dod_review": {
+        "done": {"type": "bool", "required": True},
+        "verdict": {"type": "enum", "values": ["approve", "request_changes", "escalate"], "required": True},
+        "summary": {"type": "str", "max": 300, "required": True},
+        "path": {"type": "str", "max": 400, "required": True},
+        "dod_path": {"type": "str", "max": 400, "required": True},
+        "criteria": {"type": "list", "max": 30, "required": True,
+                     "items": {"type": "dict", "fields": _CRITERION}},
+        "findings": {"type": "list", "max": 20, "items": {"type": "dict", "fields": _DOD_FINDING}},
+        "follow_ups": _FOLLOW_UPS,
+    },
 }
+
+
+def _dod_review_rules(r: dict[str, Any]) -> list[str]:
+    """An approval is a claim that every item is met; hold it to that."""
+    if r.get("verdict") != "approve":
+        return []
+    errors = [f"verdict approve, but criterion {c['item']!r} is not met"
+              for c in r.get("criteria") or [] if isinstance(c, dict) and c.get("met") is False]
+    errors += [f"verdict approve, but finding on {f['criterion']!r} is a blocker"
+               for f in r.get("findings") or [] if isinstance(f, dict) and f.get("severity") == "blocker"]
+    if not r.get("criteria"):
+        errors.append("verdict approve needs every definition-of-done item judged in criteria")
+    return errors
+
+
+# Checks across fields, run once the shape is valid.
+RULES = {"dod_review": _dod_review_rules}
 
 # Any kind may report failure with this shape instead of its contract.
 FAILURE: dict[str, dict[str, Any]] = {
@@ -229,6 +289,8 @@ def validate(kind: str, result: dict[str, Any]) -> dict[str, Any]:
     contract = FAILURE if result.get("done") is False else CONTRACTS[kind]
     errors: list[str] = []
     out = _check_fields("", contract, result, errors)
+    if not errors and contract is not FAILURE and kind in RULES:
+        errors = RULES[kind](out)
     if errors:
         raise ValidationError(kind, errors)
     return out

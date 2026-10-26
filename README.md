@@ -93,7 +93,8 @@ there and cannot be tried.
 
 ## Task kinds
 
-`code_change`, `investigation`, `review`, `data_pull`, `draft_reply`. Contracts live in
+`code_change`, `investigation`, `review`, `data_pull`, `draft_reply`, `deliverable`,
+`dod_review`. Contracts live in
 `coord_mcp/contracts.py`; adding a kind is one dict entry. Every result has a
 required `done: bool`, and any kind may instead return
 `{"done": false, "reason": "<=200", "retryable": bool}`.
@@ -115,6 +116,32 @@ message being answered) and `reply_date`. Master then searches Outlook for
 that message and presses **Reply all**, so the draft is threaded, quotes the
 history, and takes its recipients from Outlook; `to` and `cc` only add to
 them. Without `reply_from` it is a new message, as before.
+
+### Client-facing deliverables
+
+A file the client will see goes through three steps, so "done" means
+client-ready rather than "the agent stopped":
+
+1. `deliverable`: the client agent writes the file in its working folder
+   and returns `path`, `deliverable_type`, `dod_path` (the definition-of-done
+   checklist it worked to) and `self_check`, one `{item, met, note}` per
+   checklist line.
+2. `dod_review`: created with `parent_id` = the deliverable task, in a
+   session that did not write it. It returns `verdict` (`approve`,
+   `request_changes`, `escalate`), `criteria` judging every checklist item,
+   and `findings`. The server refuses an `approve` with an unmet item or a
+   blocker finding.
+3. **Promote**, on `/deliverables`: Ben's click, never an agent's. It copies
+   the file to `<client>/deliverables/<name>-vN` (a `-draft` in the name is
+   dropped), never overwriting, and records a decision. It refuses unless the
+   newest review approves and the file is unchanged since that review.
+
+`/deliverables` shows **Final** (promoted copies) apart from **In progress**,
+and labels each deliverable's stage: awaiting review, changes requested,
+escalated, approved (with the Promote button), changed since approval, or
+promoted. The DoD checklists are files the spec points at; the board does not
+hold them. Capping review rounds is master's procedure: the stage shows the
+review count.
 
 ## Usage tracking
 

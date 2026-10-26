@@ -636,6 +636,9 @@ ul.vals { margin:0; padding-left:18px; } ul.vals li { margin:2px 0; overflow-wra
 .state { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600;
   border:1px solid currentColor; margin-left:8px; vertical-align:3px; }
 .st-done { color:var(--good); } .st-failed { color:var(--critical); } .st-open { color:var(--s1); }
+.st-approved, .st-final, .st-promoted { color:var(--good); } .st-review, .st-draft { color:var(--s1); }
+.st-changes, .st-stale, .st-escalated { color:var(--serious); }
+h2.section { margin:18px 0 2px; font-size:15px; }
 .actions { margin-bottom:20px; } .actions .btns { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
 form.act { display:inline; margin:0; }
 form.act button { font:inherit; font-size:13px; padding:5px 12px; border-radius:6px; cursor:pointer;
@@ -1448,53 +1451,80 @@ def deliverables_page(v: dict[str, Any]) -> str:
             f'<label>search <input type="search" id="dl-q" name="q" '
             f'value="{esc(v.get("q") or "")}" placeholder="file, path, task, owed…" autocomplete="off"></label>'
             f'<button>Show</button><span class="muted" id="dl-n"></span></form>')
-    sub = ('Read from results on the board: data-pull outputs, changed files and '
-           'investigation pointers that a person would open. Newest first; a file two tasks touched '
-           'shows under the newer one. <i>missing</i> means the result named it but it is not on disk.')
+    sub = ('Read from results on the board: deliverables, data-pull outputs, changed files and '
+           'investigation pointers that a person would open. Final files are the promoted copies in each '
+           'client&#39;s deliverables folder; everything else is in progress. <i>missing</i> means the result '
+           'named it but it is not on disk.')
     if not files:
         return page("Deliverables", "Deliverables", "Deliverables", sub,
                     '<p class="empty">No deliverables in this range.</p>', actions=form + SEEN_BOX)
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for d in files:
-        groups.setdefault(d["client"], []).append(d)
-    owed_n = sum(1 for d in files if d["ben"])
+    final = [d for d in files if d["stage"] == "final"]
+    working = [d for d in files if d["stage"] != "final"]
+    owed_n = sum(1 for d in working if d["ben"])
+    ready = sum(1 for d in working if d["stage"] == "approved")
     missing = sum(1 for d in files if not d["exists"])
-    fresh = sum(1 for d in files if t - d["completed_at"] <= 86400)
+    fresh = sum(1 for d in working if t - d["completed_at"] <= 86400)
     kpi = '<div class="kpis">' + "".join(
         f'<div class="kpi {cls}{" zero" if not n else ""}"><span class="n">{n}</span>'
         f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></div>'
         for label, n, cls, hint in (
-            ("Files", len(files), "k-info", f"last {v['days']} days"),
+            ("In progress", len(working), "k-info", f"last {v['days']} days"),
             ("New today", fresh, "k-done", "finished in the last 24h"),
+            ("Ready to promote", ready, "k-you", "a dod_review approved it"),
             ("Owed to you", owed_n, "k-you", "a result named a step for Ben"),
-            ("Missing", missing, "k-fail", "named in a result, not on disk"),
-            ("Clients", len(groups), "k-alt", "with deliverables in range"))) + "</div>"
-    cards = []
-    for c, g in sorted(groups.items(), key=lambda kv: -max(d["completed_at"] for d in kv[1])):
-        rows = []
-        for d in g:
-            name = file_link(d["task_id"], d["path"], d["exists"], d["name"])
-            if not d["exists"]:
-                name += ' <b class="st-failed">missing</b>'
-            elif Path(d["path"]).suffix.lower() in INLINE_TYPES:  # also readable right here
-                name += (f' <a class="drill muted" href="/deliverables/file?'
-                         f'{esc(urlencode({"task": d["task_id"], "path": d["path"]}))}">view</a>')
-            owed = ("".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"]) if d["ben"] else "")
-            hay = " ".join([d["name"], d["path"], d["title"], d["task_id"], c, *d["ben"]]).lower()
-            task = (f'<div class="muted">from task <a class="drill" href="/board/task/{esc(d["task_id"])}">'
-                    f'{esc(d["title"])}</a> <code>{esc(d["task_id"])}</code></div>')
-            rows.append(f'<div class="item bare dl{" owes" if d["ben"] else ""}" data-s="{esc(hay)}" '
-                        f'data-since="{int(d["completed_at"])}" data-age="{_age_bucket(d["completed_at"], t)}">'
-                        f'<div class="what">{name}<div class="path">{esc(d["path"])}</div>{task}</div>'
-                        f'<div class="age"><span class="size">{_size(d["size"])}</span>{_age(d["completed_at"], t)}</div>'
-                        f'{owed}</div>')
-        owe = sum(1 for d in g if d["ben"])
-        badge = f' <span class="count owed">{owe} owed</span>' if owe else ""
-        cards.append(f'<div class="card lane dlc"><h2>{esc(c)}<span class="count">{len(g)}</span>{badge}</h2>'
-                     f'{"".join(rows)}</div>')
-    none = '<p class="empty" id="dl-none" hidden>Nothing matches.</p>'
+            ("Final", len(final), "k-done", "promoted to a client deliverables folder"),
+            ("Missing", missing, "k-fail", "named in a result, not on disk"))) + "</div>"
+
+    def row(d: dict[str, Any]) -> str:
+        c = d["client"]
+        name = file_link(d["task_id"], d["path"], d["exists"], d["name"])
+        if not d["exists"]:
+            name += ' <b class="st-failed">missing</b>'
+        elif Path(d["path"]).suffix.lower() in INLINE_TYPES:  # also readable right here
+            name += (f' <a class="drill muted" href="/deliverables/file?'
+                     f'{esc(urlencode({"task": d["task_id"], "path": d["path"]}))}">view</a>')
+        stage = store.STAGES[d["stage"]]
+        if d["stage"] == "final":
+            stage += f' v{d["version"]}'
+        elif d["reviews"]:
+            stage += f' · {d["reviews"]} review{"s" if d["reviews"] > 1 else ""}'
+        name += f' <span class="state st-{esc(d["stage"])}">{esc(stage)}</span>'
+        if d["stage"] == "approved" and d["exists"]:
+            name += (f'<form method="post" action="/api/promote" class="act" style="display:inline">'
+                     f'<input type="hidden" name="task" value="{esc(d["task_id"])}">'
+                     f'<button class="primary" title="Copy to {esc(c)}/deliverables as the next version">'
+                     f'Promote</button></form>')
+        owed = "".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"])
+        hay = " ".join([d["name"], d["path"], d["title"], d["task_id"], c, stage, *d["ben"]]).lower()
+        task = (f'<div class="muted">from task <a class="drill" href="/board/task/{esc(d["task_id"])}">'
+                f'{esc(d["title"])}</a> <code>{esc(d["task_id"])}</code></div>')
+        return (f'<div class="item bare dl{" owes" if d["ben"] else ""}" data-s="{esc(hay)}" '
+                f'data-since="{int(d["completed_at"])}" data-age="{_age_bucket(d["completed_at"], t)}">'
+                f'<div class="what">{name}<div class="path">{esc(d["path"])}</div>{task}</div>'
+                f'<div class="age"><span class="size">{_size(d["size"])}</span>{_age(d["completed_at"], t)}</div>'
+                f'{owed}</div>')
+
+    def cards(rows: list[dict[str, Any]], suffix: str) -> str:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for d in rows:
+            groups.setdefault(d["client"], []).append(d)
+        out = []
+        for c, g in sorted(groups.items(), key=lambda kv: -max(d["completed_at"] for d in kv[1])):
+            owe = sum(1 for d in g if d["ben"])
+            badge = f' <span class="count owed">{owe} owed</span>' if owe else ""
+            out.append(f'<div class="card lane dlc"><h2>{esc(c)}{suffix}<span class="count">{len(g)}</span>{badge}</h2>'
+                       f'{"".join(row(d) for d in g)}</div>')
+        return "".join(out)
+
+    body = kpi + '<p class="empty" id="dl-none" hidden>Nothing matches.</p>'
+    if final:
+        body += ('<h2 class="section">Final</h2><p class="muted">In each client&#39;s <code>deliverables</code> '
+                 'folder: what the client may see. Only Promote puts a file here.</p>' + cards(final, " · final"))
+    body += ('<h2 class="section">In progress</h2><p class="muted">Working files. A <code>deliverable</code> task '
+             'goes to a <code>dod_review</code>; once one approves it, Promote copies it out.</p>'
+             + (cards(working, "") or '<p class="empty">Nothing in progress in this range.</p>'))
     return page("Deliverables", f"Deliverables ({len(files)})", "Deliverables", sub,
-                f'{kpi}{none}{"".join(cards)}', actions=form + SEEN_BOX, tail=DELIVERABLES_JS + FILE_JS)
+                body, actions=form + SEEN_BOX, tail=DELIVERABLES_JS + FILE_JS)
 
 
 
@@ -2117,6 +2147,19 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         back = "/board"
                     self.send_response(303)
                     self.send_header("Location", back)
+                    self.end_headers()
+                    return
+                if path == "/api/promote":  # Promote on /deliverables: Ben's click, never an agent's
+                    try:
+                        r = store.promote(conn, (form.get("task") or [""])[0].strip())
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    if "json" in (self.headers.get("Accept") or ""):
+                        self._json(200, r)
+                        return
+                    self.send_response(303)
+                    self.send_header("Location", "/deliverables?promoted=" + str(r["version"]))
                     self.end_headers()
                     return
                 if path == "/api/prompts/take":
