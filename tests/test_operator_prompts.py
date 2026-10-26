@@ -45,6 +45,12 @@ def test_queue_take_once_in_order(conn):
     assert store.take_operator_prompt(conn) is None
 
 
+def test_cleanup_queues_fixed_text(conn):
+    store.queue_operator_prompt(conn, "cleanup")
+    text = store.take_operator_prompt(conn)["text"]
+    assert text.startswith("Board cleanup:") and "026f568dc0c3" in text
+
+
 def test_double_click_is_one_prompt(conn):
     a = store.queue_operator_prompt(conn, "next")
     b = store.queue_operator_prompt(conn, "next")

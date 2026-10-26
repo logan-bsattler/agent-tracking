@@ -6,8 +6,8 @@ import type { Parked, Question } from '../types'
 // The master's console, so Ben clicks instead of typing the prompts he sends
 // most, and the master clears itself instead of waiting for his "clear".
 //
-// 1. Band above the prompt: Next question, Board check, and one Re-dispatch
-//    per task the board says is parked. A press submits the prompt as Ben's.
+// 1. Band above the prompt: Next question, Board check, Board cleanup, and one
+//    Re-dispatch per task the board says is parked. A press submits the prompt as Ben's.
 //    When master has put a question to Ben (coord_present_question), a second
 //    row carries one button per option; a press submits the board-built
 //    "Answer on <id>: <option>" and closes the question on the board.
@@ -32,6 +32,9 @@ const FALLBACK: Record<string, string> = {
   next: 'Next question: rebuild my queue from coord_board and present its head.',
   board: 'Board check: run coord_board, dispatch whatever an agent can do (loose ends, ' +
     'awaiting_redispatch, intents), then reply Done / Next for you.',
+  cleanup: 'Board cleanup: run the board cleanup procedure (decision 026f568dc0c3) -- verify open loose ' +
+    'ends and stale tasks against outside evidence, close what is done or moot, fold duplicates, ' +
+    'keep the rest -- then reply Done / Next for you.',
 }
 
 const parked = atom({ plugin: 'master-console', key: 'parked' } as const, [])
@@ -139,6 +142,7 @@ export const register: Register = on => {
         <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
           <Button key="next" variant="primary" onPress={send(texts.next ?? FALLBACK.next)}>Next question</Button>
           <Button key="board" onPress={send(texts.board ?? FALLBACK.board)}>Board check</Button>
+          <Button key="cleanup" onPress={send(texts.cleanup ?? FALLBACK.cleanup)}>Board cleanup</Button>
           {list.slice(0, MAX_BUTTONS).map(d => (
             <Button key={`re-${d.id}`} onPress={send(d.prompt)}>
               Re-dispatch {d.client} <Text dimColor>{d.id.slice(0, 8)}</Text>

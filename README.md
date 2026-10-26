@@ -254,7 +254,7 @@ or `COORD_GUARD=off` in the environment. `python -m coord_mcp.guard check
 over `~/.coord/coord.db`, per client, with a task page per task. Its buttons
 queue fixed prompts for the master session (`store.OPERATOR_ACTIONS`), which
 the `master-console` mod submits as the operator's own prompt once master is
-idle: **Next question**, **Board check**, **Re-dispatch** on a parked task,
+idle: **Next question**, **Board check**, **Board cleanup**, **Re-dispatch** on a parked task,
 **Go** on a task or intent, and one button per option of the question master
 is currently asking. A page never writes prompt text; it picks an action and
 the text is built from stored rows.

@@ -1075,7 +1075,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
                 f"{body}</div>")
     sub = f"as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · straight from ~/.coord/coord.db {scope}"
     actions = (f'{_button("next", "Next question", primary=True)}{_button("board", "Board check")}'
-               f'{queued_note}{minder_note}{SEEN_BOX}')
+               f'{_button("cleanup", "Board cleanup")}{queued_note}{minder_note}{SEEN_BOX}')
     body = f"""{_kpis(v, n, len(done_24h))}
 {_fleet(fleet_rows, t, client)}
 {_next_up(fresh, t, v.get("question"))}

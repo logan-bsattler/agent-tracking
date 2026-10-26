@@ -1223,6 +1223,11 @@ OPERATOR_ACTIONS = {
     "next": "Next question: rebuild my queue from coord_board and present its head.",
     "board": ("Board check: run coord_board, dispatch whatever an agent can do (loose ends, "
               "awaiting_redispatch, intents), then reply Done / Next for you."),
+    # Master's procedure is decision 026f568dc0c3: close what is already done
+    # or moot in the world, on evidence, without asking Ben.
+    "cleanup": ("Board cleanup: run the board cleanup procedure (decision 026f568dc0c3) -- verify open loose "
+                "ends and stale tasks against outside evidence, close what is done or moot, fold duplicates, "
+                "keep the rest -- then reply Done / Next for you."),
     "redispatch": ("Re-dispatch parked task {task_id} ({client}): check coord_get_decisions for a hold on it, "
                    "confirm the client's turn has stopped (get_session isRunning false), send the same dispatch "
                    "line, then read get_usage to confirm the clear."),
