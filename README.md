@@ -296,7 +296,7 @@ proposes is stored as untrusted.
 Setup:
 
 1. `pip install -e .[captions]` (adds `comtypes`).
-2. `python -m coord_mcp.captions install` puts `coord-captions.cmd` in the
+2. `python -m coord_mcp.captions install` puts `coord-captions.lnk` in the
    Startup folder and starts `auto` now. `stop` stops it until next logon;
    `uninstall` removes it.
 3. Make a folder holding `examples/meeting/CLAUDE.md` and

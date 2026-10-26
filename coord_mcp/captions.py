@@ -607,21 +607,38 @@ def run_auto(interval: float, settle: float, grace: float) -> int:
 # ============================================================ logon start
 
 
-def startup_file() -> Path:
+def startup_dir() -> Path:
     base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "coord-captions.cmd"
+    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+
+def startup_file() -> Path:
+    return startup_dir() / "coord-captions.lnk"
+
+
+# What install wrote before 2026-10-26. The endpoint rule that refuses .ps1
+# refuses .cmd too ("Access is denied"), so it never ran at a logon.
+LEGACY_STARTUP = "coord-captions.cmd"
 
 
 def install(start_now: bool = True) -> Path:
-    """A Startup-folder .cmd that runs `auto` windowless at logon, with this
-    interpreter. Startup folder rather than Task Scheduler: per user, no
-    admin, and deleting the file is the whole uninstall."""
+    """A Startup-folder shortcut that runs `auto` windowless at logon, with
+    this interpreter. Startup folder rather than Task Scheduler: per user, no
+    admin, and deleting the file is the whole uninstall. A .lnk, not a .cmd:
+    batch files are blocked on this machine."""
+    import comtypes.client as cc
+
     exe = Path(sys.executable)
     w = exe.with_name("pythonw.exe")
     exe = w if w.exists() else exe
     f = startup_file()
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(f'@start "" "{exe}" -m coord_mcp.captions auto\r\n', encoding="utf-8")
+    lnk = cc.CreateObject("WScript.Shell", dynamic=True).CreateShortcut(str(f))
+    lnk.TargetPath = str(exe)
+    lnk.Arguments = "-m coord_mcp.captions auto"
+    lnk.WorkingDirectory = str(Path(__file__).resolve().parent.parent)
+    lnk.Save()
+    (startup_dir() / LEGACY_STARTUP).unlink(missing_ok=True)
     if start_now:
         import subprocess
 
@@ -631,11 +648,12 @@ def install(start_now: bool = True) -> Path:
 
 
 def uninstall() -> bool:
-    f = startup_file()
-    if f.exists():
-        f.unlink()
-        return True
-    return False
+    found = False
+    for f in (startup_file(), startup_dir() / LEGACY_STARTUP):
+        if f.exists():
+            f.unlink()
+            found = True
+    return found
 
 
 # ============================================================ watch
