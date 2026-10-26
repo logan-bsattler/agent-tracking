@@ -17,10 +17,12 @@ captions showing, and ends it when the meeting closes. Titles matching
 
 On your first turn, and whenever Ben says "listen", arm `Monitor` on
 
-    C:\development\agents\agent-tracking\.venv\Scripts\python.exe -m coord_mcp.captions watch --follow
+    C:/development/agents/agent-tracking/.venv/Scripts/python.exe -m coord_mcp.captions watch --follow
 
-with `timeout_ms: 1800000` and description `meeting captions`. Reply in one
-line: listening. Between meetings it prints nothing.
+with `timeout_ms: 1800000` and description `meeting captions`. Copy the path
+as written: Monitor runs it through bash, which strips backslashes, so a
+Windows-style path fails. Reply in one line: listening. Between meetings it
+prints nothing.
 
 When the Monitor expires, arm it again with the same command, without
 comment. `watch` remembers its place, so nothing is sent twice.
@@ -102,7 +104,7 @@ notes path. Do not propose a summary intent; the items are already on the
 board. Keep the Monitor running: the next meeting comes through the same one.
 
 Ben may say "stop this one": run
-`C:\development\agents\agent-tracking\.venv\Scripts\python.exe -m coord_mcp.captions end`,
+`C:/development/agents/agent-tracking/.venv/Scripts/python.exe -m coord_mcp.captions end`,
 which ends the newest transcript; that meeting is then left alone until its
 window closes.
 
