@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import email.utils
 import json
 import os
 import re
 import sqlite3
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -832,14 +834,38 @@ def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None) ->
             "decision_id": dec["decision_id"]}
 
 
+def _client_since(conn: sqlite3.Connection, task_id: str, reply_date: str | None) -> tuple[int, str]:
+    """How long the client has waited on this reply: since the email it
+    answers (`reply_date`) when that parses, else since the work on it began,
+    the oldest task up its parent chain."""
+    if reply_date:
+        s = reply_date.strip()
+        for parse in (lambda x: datetime.fromisoformat(x.replace("Z", "+00:00")),
+                      email.utils.parsedate_to_datetime):
+            try:
+                d = parse(s)
+                return int((d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp()), "email"
+            except (TypeError, ValueError, IndexError):
+                pass
+    since, seen, tid = None, set(), task_id
+    while tid and tid not in seen:
+        seen.add(tid)
+        r = conn.execute("SELECT parent_id, created_at FROM tasks WHERE id=?", (tid,)).fetchone()
+        if r is None:
+            break
+        since, tid = r["created_at"], r["parent_id"]
+    return int(since or now()), "task"
+
+
 def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None = None) -> dict[str, Any]:
     """Finished draft_reply tasks, in the order Ben works them.
 
     A draft sits between the agent that wrote it and Ben's Drafts folder, and
     the board already knows where: an untaken 'draft' prompt means master is
     about to type it, and the decision master records once it lands says it
-    is in Drafts. Unworked ones come first, oldest first, so one pass down the
-    page empties the backlog; drafted ones follow, newest first, as a record.
+    is in Drafts. Unworked ones come first, the client who has waited longest
+    first, so one pass down the page empties the backlog in follow-up order;
+    drafted ones follow, newest first, as a record.
     """
     from .outlook import draft_from_result
     t = now()
@@ -874,7 +900,9 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
         except (KeyError, OSError):
             continue  # off-contract or unreadable: there is no draft to show
         sent = landed.get(r["id"])
+        since, since_from = _client_since(conn, r["id"], d["reply_date"])
         d.update({"client": r["assigned_to"] or "—", "completed_at": r["completed_at"],
+                  "client_since": since, "client_since_from": since_from,
                   "summary": res.get("summary", ""), "ben": ben.get(r["id"], []),
                   "queued": r["id"] in live, "drafted": sent,
                   "waits_on": held_by.get(r["id"], []), "blocks": holds.get(r["id"], []),
@@ -885,7 +913,7 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
     # A draft that waits on another follows every unworked one that does
     # not, so the walk reaches its blocker first.
     out.sort(key=lambda d: (rank[d["state"]], not rank[d["state"]] and bool(d["waits_on"]),
-                            d["completed_at"] if rank[d["state"]] else -d["completed_at"]))
+                            -d["completed_at"] if rank[d["state"]] else d["client_since"]))
     return {"drafts": out, "days": days, "client": client, "as_of": t,
             "open": sum(1 for d in out if d["state"] != "drafted")}
 

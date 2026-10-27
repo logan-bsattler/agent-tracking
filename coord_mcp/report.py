@@ -1533,7 +1533,7 @@ def drafts_page(v: dict[str, Any]) -> str:
 
     The board shows a draft as one more thing needing Ben; here it is the
     email itself, in the order he works them, with the next one a click away.
-    Unworked first, oldest first; drafted ones stay below as the record of
+    Unworked first, the longest-waiting client first; drafted ones stay below as the record of
     what already went to Outlook. Nothing on this page sends mail.
     """
     t, rows = v["as_of"], v["drafts"]
@@ -1583,8 +1583,15 @@ def drafts_page(v: dict[str, Any]) -> str:
             btns += _dep_form("clear", "", d["task_id"], "Mark sent", "/drafts")
         owed = "".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"])
         when_sent = (f'drafted {_age(d["drafted"]["at"], t)} · ' if d["drafted"] else "")
+        # How long the client has waited is what orders the walk, so it leads.
+        wait = _age(d["client_since"], t).removesuffix(" ago")
+        waited = ("" if d["drafted"] else
+                  f'<span class="order first" title="since the email it answers">client waiting {wait}</span> · '
+                  if d["client_since_from"] == "email" else
+                  f'<span class="order first" title="since the work on it began; the result has no reply_date">'
+                  f'open {wait}</span> · ')
         head = (f'<h2>{esc(d["client"])}: {esc(d["subject"][:90])}{pos}</h2>'
-                f'<div class="muted">{badge[d["state"]]} · {when_sent}written '
+                f'<div class="muted">{badge[d["state"]]} · {waited}{when_sent}written '
                 f'{_age(d["completed_at"], t)} · <a class="drill" href="/board/task/{esc(d["task_id"])}">'
                 f'{esc(d["title"][:60])}</a> <code>{esc(d["task_id"][:8])}</code></div>')
         cards.append(f'<div class="card lane draft" id="d-{esc(d["task_id"])}" '

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from coord_mcp import contracts, outlook, report, store
@@ -231,6 +233,29 @@ def test_drafts_page_walks_unworked_first_oldest_first(conn, tmp_path):
     assert f'id="d-{second}"' in page and "1 of 1" in page and "last one" in page
     assert "Hi Kelly," in page and "Hi Corwin," in page
     assert "in Drafts" in page and "Shipping Monday" in page
+
+
+def test_drafts_walk_longest_waiting_client_first(conn, tmp_path):
+    first, _ = _draft_task(conn, tmp_path)  # no reply_date: waits since its task began
+    second, _ = _second_draft(conn, tmp_path)
+    res = json.loads(conn.execute("SELECT result FROM tasks WHERE id=?", (second,)).fetchone()[0])
+    res["reply_date"] = "2026-01-05T09:00Z"  # the client wrote long before either task existed
+    conn.execute("UPDATE tasks SET result=? WHERE id=?", (json.dumps(res), second))
+    v = store.draft_replies(conn, days=3650)
+    assert [d["task_id"] for d in v["drafts"]] == [second, first]
+    assert [d["client_since_from"] for d in v["drafts"]] == ["email", "task"]
+    page = report.drafts_page(v)
+    assert "client waiting" in page and ">open " in page
+
+
+def test_client_since_falls_back_to_the_oldest_parent(conn):
+    root = store.create_task(conn, "investigation", "look", {"q": "x"}, assigned_to="Moog")["task_id"]
+    conn.execute("UPDATE tasks SET created_at = created_at - 86400 WHERE id=?", (root,))
+    child = store.create_task(conn, "draft_reply", "reply", {"q": "x"}, assigned_to="Moog",
+                              parent_id=root)["task_id"]
+    born = conn.execute("SELECT created_at FROM tasks WHERE id=?", (root,)).fetchone()[0]
+    assert store._client_since(conn, child, "not a date") == (born, "task")
+    assert store._client_since(conn, child, "Fri, 23 Oct 2026 18:00:00 +0000")[1] == "email"
 
 
 def test_drafts_page_chains_next_draft(conn, tmp_path):
