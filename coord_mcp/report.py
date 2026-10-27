@@ -1192,7 +1192,7 @@ button.kpi { font:inherit; text-align:left; cursor:pointer; width:100%; }
 """
 
 # Nav links in the order every page shows them; the current page is bold.
-NAV = (("/", "Usage"), ("/board", "Board"), ("/hours", "Hours"), ("/drafts", "Drafts"),
+NAV = (("/", "Usage"), ("/board", "Board"), ("/queue", "Queue"), ("/hours", "Hours"), ("/drafts", "Drafts"),
        ("/deliverables", "Deliverables"), ("/intents", "Intents"))
 
 SEEN_BOX = ('<span class="seenbox"><span id="newcount" class="age"></span>'
@@ -1558,6 +1558,7 @@ def drafts_page(v: dict[str, Any]) -> str:
         f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></div>'
         for label, n, cls, hint in (
             ("To go through", counts["waiting"], "k-you", "written, not yet in Drafts"),
+            ("Late", v.get("late", 0), "k-fail", "client waiting over 24h, not yet in Drafts"),
             ("Awaiting review", counts["review"], "k-info", "a dod_review must approve it first"),
             ("Queued", counts["queued"], "k-run", "master drafts it when idle"),
             ("In Drafts", counts["drafted"], "k-done", "already typed into Outlook"),
@@ -1590,13 +1591,14 @@ def drafts_page(v: dict[str, Any]) -> str:
         when_sent = (f'drafted {_age(d["drafted"]["at"], t)} · ' if d["drafted"] else "")
         # How long the client has waited is what orders the walk, so it leads.
         wait = _age(d["client_since"], t).removesuffix(" ago")
+        late = '<b class="st-failed">late</b> · ' if d.get("late") else ""
         waited = ("" if d["drafted"] else
                   f'<span class="order first" title="since the email it answers">client waiting {wait}</span> · '
                   if d["client_since_from"] == "email" else
                   f'<span class="order first" title="since the work on it began; the result has no reply_date">'
                   f'open {wait}</span> · ')
         head = (f'<h2>{esc(d["client"])}: {esc(d["subject"][:90])}{pos}</h2>'
-                f'<div class="muted">{badge[d["state"]].format(esc(d["review"]["label"]) if d["review"] else "")} · {waited}{when_sent}written '
+                f'<div class="muted">{badge[d["state"]].format(esc(d["review"]["label"]) if d["review"] else "")} · {late}{waited}{when_sent}written '
                 f'{_age(d["completed_at"], t)} · <a class="drill" href="/board/task/{esc(d["task_id"])}">'
                 f'{esc(d["title"][:60])}</a> <code>{esc(d["task_id"][:8])}</code></div>')
         cards.append(f'<div class="card lane draft" id="d-{esc(d["task_id"])}" '
@@ -1608,6 +1610,63 @@ def drafts_page(v: dict[str, Any]) -> str:
             else '<p class="clear">Every draft in range is in Outlook Drafts.</p>')
     return page("Drafts", f'{"(" + str(len(todo)) + ") " if todo else ""}Drafts', "Email drafts", sub,
                 f'{kpi}{lead}{"".join(cards)}', actions=form + SEEN_BOX)
+
+
+QUEUE_JS = """<script>
+document.querySelectorAll('input.all').forEach(b => b.addEventListener('change', () =>
+  document.querySelectorAll('input[data-client="' + b.dataset.client + '"]').forEach(x => x.checked = b.checked)));
+</script>"""
+ROUTE_WORDS = {"agent": "agent work", "reply": "a reply an agent drafts", "ben": "sent by you"}
+
+
+def queue_page(v: dict[str, Any], done: str = "") -> str:
+    """Every loose end only Ben can settle, on one page, cleared in batches.
+
+    Tick items and press one action for all of them: Send to agent hands
+    each to its task's client (master tasks it on the minder's next pass),
+    Defer and Drop are recorded here in Ben's name, and Send answers takes
+    whatever he typed under each item to master as one prompt. Below, what
+    routing moved off his queue this week, so nothing leaves it unseen.
+    """
+    t = v["as_of"]
+    sub = (f'{v["total"]} open, grouped by client, the longest-waiting client first. Tick, then act on all '
+           'ticked at once. Typed answers go to master in one prompt; nothing here mails a client.')
+    flash = f'<p class="clear">{esc(done)}</p>' if done else ""
+    groups = []
+    for g in v["groups"]:
+        c = g["client"]
+        rows = []
+        for d in g["items"]:
+            hint = (f' <span class="order" title="routing would send this to {esc(c)}">looks like '
+                    f'{esc(ROUTE_WORDS[d["route"]])}</span>' if d["route"] else "")
+            asked = ' <b class="st-waiting">presented</b>' if d["presented"] else ""
+            rows.append(
+                f'<li data-since="{int(d["created_at"])}"><label><input type="checkbox" name="id" '
+                f'value="{esc(d["id"])}" data-client="{esc(c)}"> {esc(d["what"])}</label>{hint}{asked}'
+                f'<div class="muted">{_age(d["created_at"], t)} · {_task_link(d["task_id"], d["title"][:60])} '
+                f'<code>{esc(d["id"])}</code></div>'
+                f'<textarea name="a.{esc(d["id"])}" rows="1" maxlength="1000" placeholder="answer (optional)">'
+                f'</textarea></li>')
+        groups.append(
+            f'<div class="card lane"><h2>{esc(c)} <span class="count">{len(g["items"])}</span> '
+            f'<label class="muted"><input type="checkbox" class="all" data-client="{esc(c)}"> all</label></h2>'
+            f'<ul class="queue">{"".join(rows)}</ul></div>')
+    acts = ('<div class="btns sticky">'
+            '<button name="action" value="answer" class="primary">Send answers</button>'
+            '<button name="action" value="agent">Send to agent</button>'
+            '<button name="action" value="defer">Defer</button>'
+            '<button name="action" value="drop">Drop (done or moot)</button>'
+            '<input name="note" maxlength="300" placeholder="note for the batch (optional)" size="40"></div>')
+    body = (f'<form method="post" action="/api/queue">{acts}{"".join(groups)}{acts}</form>' if groups
+            else '<p class="clear">Nothing waits on you.</p>')
+    if v["moved"]:
+        body += ('<div class="card lane"><h2>Sent to agents this week '
+                 f'<span class="count">{len(v["moved"])}</span></h2><ul>' + "".join(
+                     f'<li>{esc(m["client"])} · {esc(ROUTE_WORDS.get(m["why"], m["why"]))} · {esc(m["state"])} · '
+                     f'{esc(m["what"][:160])} <span class="muted">{_age(m["created_at"], t)} · '
+                     f'{_task_link(m["task_id"])}</span></li>' for m in v["moved"]) + '</ul></div>')
+    return page("Queue", f'({v["total"]}) Queue' if v["total"] else "Queue", "Your queue", sub,
+                flash + body, actions=SEEN_BOX, tail=QUEUE_JS)
 
 
 def intents_page(v: dict[str, Any]) -> str:
@@ -2161,6 +2220,25 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     self.send_header("Location", back)
                     self.end_headers()
                     return
+                if path == "/api/queue":  # the batch on /queue: Ben's own clicks
+                    from . import queue
+                    act = (form.get("action") or [""])[0]
+                    ids = form.get("id") or []
+                    answers = {k[2:]: v[0] for k, v in form.items() if k.startswith("a.")}
+                    try:
+                        r = queue.apply(conn, act, ids, answers, (form.get("note") or [""])[0])
+                    except (ValueError, KeyError) as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    if "json" in (self.headers.get("Accept") or ""):
+                        self._json(200, r)
+                        return
+                    word = {"agent": "sent to agents", "defer": "deferred", "drop": "dropped",
+                            "answer": "answers sent to master"}[act]
+                    self.send_response(303)
+                    self.send_header("Location", "/queue?done=" + quote(f'{r["count"]} {word}'))
+                    self.end_headers()
+                    return
                 if path == "/api/promote":  # Promote on /deliverables: Ben's click, never an agent's
                     try:
                         r = store.promote(conn, (form.get("task") or [""])[0].strip())
@@ -2227,6 +2305,9 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v = store.deliverables(conn, days=max(1, min(window, 365)), client=client)
                 v["q"] = (self._query.get("q") or [""])[0].strip()
                 return deliverables_page(v).encode("utf-8")
+            if path == "/queue":
+                from . import queue
+                return queue_page(queue.ben_queue(conn), (self._query.get("done") or [""])[0][:200]).encode("utf-8")
             if path == "/drafts":
                 window = int((self._query.get("days") or ["30"])[0] or 30)
                 client = (self._query.get("client") or [""])[0].strip() or None

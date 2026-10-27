@@ -50,7 +50,11 @@ def create_task(
         (tid, parent_id, kind, title, json.dumps(spec), assigned_to, from_intent, now(),
          pipeline_task_id),
     )
-    return {"task_id": tid, "kind": kind, "expected_result_shape": contracts.expected_shape(kind)}
+    out = {"task_id": tid, "kind": kind, "expected_result_shape": contracts.expected_shape(kind)}
+    from . import queue
+    if warnings := queue.create_warnings(conn, kind, spec, pipeline_task_id, parent_id):
+        out["warnings"] = warnings
+    return out
 
 
 def _event(conn: sqlite3.Connection, task_id: str, event: str, client: str | None) -> None:
@@ -191,6 +195,11 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
     out = {"ok": True, "task_id": task_id, "state": state}
     if fus:
         out["follow_ups"] = len(fus)
+        # Agent work and replies handed to Ben come back to this client, so
+        # they never reach his queue (queue.route_for says which).
+        from . import queue
+        if moved := queue.route_new(conn, task_id):
+            out["routed_to_you"] = moved
     return out
 
 
@@ -879,7 +888,7 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
     from . import gate
     from .outlook import draft_from_result
     t = now()
-    sql = ("SELECT id, title, assigned_to, result, completed_at FROM tasks "
+    sql = ("SELECT id, title, assigned_to, result, spec, completed_at FROM tasks "
            "WHERE kind = 'draft_reply' AND state = 'done' AND completed_at >= ?")
     args: list[Any] = [t - days * 86400]
     if client:
@@ -912,7 +921,11 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
         sent = landed.get(r["id"])
         g = gate.stage(conn, r["id"])
         unreviewed = g is not None and g["stage"] != "approved"
-        since, since_from = _client_since(conn, r["id"], d["reply_date"])
+        try:  # the spec's reply_date when the result left it off
+            spec_date = (json.loads(r["spec"] or "{}") or {}).get("reply_date")
+        except (ValueError, AttributeError):
+            spec_date = None
+        since, since_from = _client_since(conn, r["id"], d["reply_date"] or spec_date)
         d.update({"client": r["assigned_to"] or "—", "completed_at": r["completed_at"],
                   "client_since": since, "client_since_from": since_from,
                   "summary": res.get("summary", ""), "ben": ben.get(r["id"], []),
@@ -921,6 +934,8 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
                   "review": g and {**g, "label": STAGES[g["stage"]]},
                   "state": ("drafted" if sent else "queued" if r["id"] in live
                             else "missing" if not d["exists"] else "review" if unreviewed else "waiting")})
+        from .queue import REPLY_LATE
+        d["late"] = not sent and t - since > REPLY_LATE
         out.append(d)
     rank = {"waiting": 0, "review": 0, "missing": 0, "queued": 0, "drafted": 1}
     # A draft that waits on another follows every unworked one that does
@@ -928,7 +943,8 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
     out.sort(key=lambda d: (rank[d["state"]], not rank[d["state"]] and bool(d["waits_on"]),
                             -d["completed_at"] if rank[d["state"]] else d["client_since"]))
     return {"drafts": out, "days": days, "client": client, "as_of": t,
-            "open": sum(1 for d in out if d["state"] != "drafted")}
+            "open": sum(1 for d in out if d["state"] != "drafted"),
+            "late": sum(1 for d in out if d["late"])}
 
 
 def deliverable_path(conn: sqlite3.Connection, task_id: str, path: str, root: Path | None = None) -> Path | None:
@@ -1280,6 +1296,10 @@ OPERATOR_ACTIONS = {
     "intent": ("Go on intent {intent_id} ({summary}): decide what work it warrants -- write the spec, "
                "create and dispatch the task(s) and coord_resolve_intent with their ids, or dismiss it "
                "with a note -- then reply Done / Next for you."),
+    # Ben's typed answers from /queue, several at once. {answers} is one
+    # line per loose end, built from board rows and his text.
+    "batch": ("Batch answers from /queue ({n}): handle each as Ben's answer on that loose end -- record the "
+              "decision, resolve it, task what it calls for -- then reply Done / Next for you.\n{answers}"),
     "draft": ("Draft in Outlook: task {task_id} ({client}: {subject}): run `python -m coord_mcp.outlook "
               "{task_id}` for the {how}, wait for Outlook to autosave it to Drafts, never press Send, then reply "
               "Done / Next for you."),
@@ -1297,7 +1317,7 @@ DRAFT_HOW = {
     False: "compose URL and body, open the URL in the Claude browser, type the body into the editor",
 }
 # Actions a page or the band may queue. The rest are the watcher's.
-PAGE_ACTIONS = frozenset(k for k in OPERATOR_ACTIONS if k != "minder")
+PAGE_ACTIONS = frozenset(k for k in OPERATOR_ACTIONS if k not in ("minder", "batch"))
 COMMENT_MAX = 2000
 PROMPT_TTL = 30 * 60  # an untaken click older than this is stale, not owed
 
@@ -1518,14 +1538,20 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
              AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id AND c.kind = 'dod_review')
            ORDER BY t.completed_at""", (now_ts - MINDER_UNREAD * 60,))
         if gate.is_gated(conn, r) and json.loads(r["result"] or "{}").get("done")]
+    from . import queue
+    undrafted = queue.undrafted(conn, now_ts, MINDER_UNREAD * 60)
+    pipeline = queue.pipeline_owed(conn, now_ts)
     return {"parked": parked, "undelivered": undelivered, "unread": unread, "loose": loose,
-            "failed": failed, "intents": intents, "unreviewed": unreviewed}
+            "failed": failed, "intents": intents, "unreviewed": unreviewed,
+            "undrafted": undrafted, "pipeline": pipeline}
 
 
 _MINDER_LABELS = (("parked", "parked awaiting re-dispatch"), ("undelivered", "never delivered"),
                   ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids)"),
                   ("failed", "failed with no decision"), ("intents", "open intents"),
-                  ("unreviewed", "client deliverables with no dod_review (CVC code, emails)"))
+                  ("unreviewed", "client deliverables with no dod_review (CVC code, emails)"),
+                  ("undrafted", "finished drafts not yet in Outlook (draft each, never send)"),
+                  ("pipeline", "client-visible work with no SharePoint pipeline note"))
 
 
 def minder_text(owed: dict[str, list[str]], now_ts: int) -> str:
