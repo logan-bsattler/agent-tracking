@@ -89,6 +89,8 @@ def draft(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
     res = json.loads(r["result"]) if r["result"] else None
     if not res or not res.get("done"):
         raise ValueError(f"task {task_id} has no finished draft")
+    from .gate import require_approved
+    require_approved(conn, task_id, "Draft in Outlook")
     return draft_from_result(r["id"], r["assigned_to"], r["title"], res)
 
 

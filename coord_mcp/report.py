@@ -1395,6 +1395,9 @@ def _draft_card(d: dict[str, Any], queued: bool) -> str:
     sent = ('<b class="st-done">Sent. Master drafts it when idle.</b>' if queued
             else '<span class="muted">master types it into Outlook on the web; it lands in Drafts, unsent</span>')
     btns = (_button("draft", "Draft in Outlook", task=d["id"], primary=True) if dr["exists"] else "")
+    rev = d.get("review")
+    if rev and rev["stage"] != "approved":  # the gate: no Outlook until a dod_review approves it
+        btns, sent = "", f'<b class="st-{esc(rev["stage"])}">{esc(store.STAGES[rev["stage"]])}: no Draft in Outlook until a dod_review approves it</b>'
     return (f'<div class="card go draft"><h2>Draft reply</h2>{_draft_envelope(dr, body_link)}'
             f'<div class="btns">{btns}{sent}{_compose_link(dr)}</div></div>')
 
@@ -1461,7 +1464,7 @@ def deliverables_page(v: dict[str, Any]) -> str:
     final = [d for d in files if d["stage"] == "final"]
     working = [d for d in files if d["stage"] != "final"]
     owed_n = sum(1 for d in working if d["ben"])
-    ready = sum(1 for d in working if d["stage"] == "approved")
+    ready = sum(1 for d in working if d["stage"] == "approved" and d["kind"] == "deliverable")
     missing = sum(1 for d in files if not d["exists"])
     fresh = sum(1 for d in working if t - d["completed_at"] <= 86400)
     kpi = '<div class="kpis">' + "".join(
@@ -1489,7 +1492,7 @@ def deliverables_page(v: dict[str, Any]) -> str:
         elif d["reviews"]:
             stage += f' · {d["reviews"]} review{"s" if d["reviews"] > 1 else ""}'
         name += f' <span class="state st-{esc(d["stage"])}">{esc(stage)}</span>'
-        if d["stage"] == "approved" and d["exists"]:
+        if d["stage"] == "approved" and d["exists"] and d["kind"] == "deliverable":
             name += (f'<form method="post" action="/api/promote" class="act" style="display:inline">'
                      f'<input type="hidden" name="task" value="{esc(d["task_id"])}">'
                      f'<button class="primary" title="Copy to {esc(c)}/deliverables as the next version">'
@@ -1549,12 +1552,13 @@ def drafts_page(v: dict[str, Any]) -> str:
                     f'<p class="empty">No drafts in the last {v["days"]} days.</p>',
                     actions=form + SEEN_BOX)
     todo = [d for d in rows if d["state"] != "drafted"]
-    counts = {k: sum(1 for d in rows if d["state"] == k) for k in ("waiting", "queued", "missing", "drafted")}
+    counts = {k: sum(1 for d in rows if d["state"] == k) for k in ("waiting", "review", "queued", "missing", "drafted")}
     kpi = '<div class="kpis">' + "".join(
         f'<div class="kpi {cls}{" zero" if not n else ""}"><span class="n">{n}</span>'
         f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></div>'
         for label, n, cls, hint in (
             ("To go through", counts["waiting"], "k-you", "written, not yet in Drafts"),
+            ("Awaiting review", counts["review"], "k-info", "a dod_review must approve it first"),
             ("Queued", counts["queued"], "k-run", "master drafts it when idle"),
             ("In Drafts", counts["drafted"], "k-done", "already typed into Outlook"),
             ("Body missing", counts["missing"], "k-fail", "the file the result named is gone"),
@@ -1562,6 +1566,7 @@ def drafts_page(v: dict[str, Any]) -> str:
     badge = {"waiting": '<b class="st-open">to go through</b>',
              "queued": '<b class="st-waiting">queued for master</b>',
              "missing": '<b class="st-failed">body missing</b>',
+             "review": '<b class="st-review">{}</b>',
              "drafted": '<b class="st-done">in Drafts</b>'}
     cards = []
     for d in rows:
@@ -1575,7 +1580,7 @@ def drafts_page(v: dict[str, Any]) -> str:
         # twice leaves two drafts in the folder.
         btns = (_button("draft", "Draft again" if d["drafted"] else "Draft in Outlook",
                         task=d["task_id"], primary=d["state"] == "waiting")
-                if d["exists"] and d["state"] != "queued" else "")
+                if d["exists"] and d["state"] not in ("queued", "review") else "")
         body_link = file_link(d["task_id"], d["body_path"], d["exists"], Path(d["body_path"]).name)
         why = f'<div class="note">{esc(d["summary"][:300])}</div>' if d["summary"] else ""
         why = _order_chips(d) + why
@@ -1591,7 +1596,7 @@ def drafts_page(v: dict[str, Any]) -> str:
                   f'<span class="order first" title="since the work on it began; the result has no reply_date">'
                   f'open {wait}</span> · ')
         head = (f'<h2>{esc(d["client"])}: {esc(d["subject"][:90])}{pos}</h2>'
-                f'<div class="muted">{badge[d["state"]]} · {waited}{when_sent}written '
+                f'<div class="muted">{badge[d["state"]].format(esc(d["review"]["label"]) if d["review"] else "")} · {waited}{when_sent}written '
                 f'{_age(d["completed_at"], t)} · <a class="drill" href="/board/task/{esc(d["task_id"])}">'
                 f'{esc(d["title"][:60])}</a> <code>{esc(d["task_id"][:8])}</code></div>')
         cards.append(f'<div class="card lane draft" id="d-{esc(d["task_id"])}" '

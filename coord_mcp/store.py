@@ -40,6 +40,8 @@ def create_task(
         )
     if len(title) > 80:
         raise ValueError(f"title is {len(title)} chars; cap is 80")
+    from . import gate
+    gate.check_checkin(conn, kind, spec)  # a CVC check-in needs its code approved
     tid = _id()
     conn.execute(
         """INSERT INTO tasks(id, parent_id, kind, title, spec, state, assigned_to,
@@ -753,6 +755,11 @@ STAGES = {"draft": "in progress", "review": "awaiting review", "changes": "chang
           "stale": "changed since approval", "promoted": "promoted", "final": "final"}
 
 
+def _reviews(conn: sqlite3.Connection, task_id: str) -> int:
+    return conn.execute("SELECT COUNT(*) FROM tasks WHERE parent_id=? AND kind='dod_review' AND state='done'",
+                        (task_id,)).fetchone()[0]
+
+
 def latest_review(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
     """The newest finished dod_review of a deliverable task, with its verdict."""
     r = conn.execute("SELECT id, result, completed_at FROM tasks WHERE parent_id=? AND kind='dod_review' "
@@ -765,7 +772,9 @@ def latest_review(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | No
 
 def _stage(conn: sqlite3.Connection, task_id: str, kind: str, path: Path) -> dict[str, Any]:
     if kind != "deliverable":
-        return {"stage": "draft", "reviews": 0}
+        from . import gate
+        g = gate.stage(conn, task_id)  # CVC code and client emails: reviewed, never promoted
+        return {"stage": "draft", "reviews": 0} if g is None else {**g, "reviews": _reviews(conn, task_id)}
     n = conn.execute("SELECT COUNT(*) FROM tasks WHERE parent_id=? AND kind='dod_review' AND state='done'",
                      (task_id,)).fetchone()[0]
     rev = latest_review(conn, task_id)
@@ -867,6 +876,7 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
     first, so one pass down the page empties the backlog in follow-up order;
     drafted ones follow, newest first, as a record.
     """
+    from . import gate
     from .outlook import draft_from_result
     t = now()
     sql = ("SELECT id, title, assigned_to, result, completed_at FROM tasks "
@@ -900,16 +910,19 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
         except (KeyError, OSError):
             continue  # off-contract or unreadable: there is no draft to show
         sent = landed.get(r["id"])
+        g = gate.stage(conn, r["id"])
+        unreviewed = g is not None and g["stage"] != "approved"
         since, since_from = _client_since(conn, r["id"], d["reply_date"])
         d.update({"client": r["assigned_to"] or "—", "completed_at": r["completed_at"],
                   "client_since": since, "client_since_from": since_from,
                   "summary": res.get("summary", ""), "ben": ben.get(r["id"], []),
                   "queued": r["id"] in live, "drafted": sent,
                   "waits_on": held_by.get(r["id"], []), "blocks": holds.get(r["id"], []),
+                  "review": g and {**g, "label": STAGES[g["stage"]]},
                   "state": ("drafted" if sent else "queued" if r["id"] in live
-                            else "missing" if not d["exists"] else "waiting")})
+                            else "missing" if not d["exists"] else "review" if unreviewed else "waiting")})
         out.append(d)
-    rank = {"waiting": 0, "missing": 0, "queued": 0, "drafted": 1}
+    rank = {"waiting": 0, "review": 0, "missing": 0, "queued": 0, "drafted": 1}
     # A draft that waits on another follows every unworked one that does
     # not, so the walk reaches its blocker first.
     out.sort(key=lambda d: (rank[d["state"]], not rank[d["state"]] and bool(d["waits_on"]),
@@ -1061,6 +1074,8 @@ def task_detail(conn: sqlite3.Connection, task_id: str, root: Path | None = None
     d["files"] = task_files(conn, task_id, root)
     d["next_for_client"] = next_for_client(conn, d)
     d["deps"] = task_deps(conn, task_id)
+    from . import gate
+    d["review"] = gate.stage(conn, task_id)
     return d
 
 
@@ -1494,13 +1509,23 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     intents = [r["id"] for r in conn.execute(
         "SELECT id FROM intents WHERE state='open' AND created_at <= ? ORDER BY created_at",
         (now_ts - MINDER_INTENTS * 60,))]
+    # CVC code and client emails since the gate started: finished, and no
+    # dod_review asked for. Same wait as an unread result.
+    from . import gate
+    unreviewed = [r["id"] for r in conn.execute(
+        """SELECT t.* FROM tasks t
+           WHERE t.state='done' AND t.kind IN ('code_change','draft_reply') AND t.completed_at <= ?
+             AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id AND c.kind = 'dod_review')
+           ORDER BY t.completed_at""", (now_ts - MINDER_UNREAD * 60,))
+        if gate.is_gated(conn, r) and json.loads(r["result"] or "{}").get("done")]
     return {"parked": parked, "undelivered": undelivered, "unread": unread, "loose": loose,
-            "failed": failed, "intents": intents}
+            "failed": failed, "intents": intents, "unreviewed": unreviewed}
 
 
 _MINDER_LABELS = (("parked", "parked awaiting re-dispatch"), ("undelivered", "never delivered"),
                   ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids)"),
-                  ("failed", "failed with no decision"), ("intents", "open intents"))
+                  ("failed", "failed with no decision"), ("intents", "open intents"),
+                  ("unreviewed", "client deliverables with no dod_review (CVC code, emails)"))
 
 
 def minder_text(owed: dict[str, list[str]], now_ts: int) -> str:

@@ -275,7 +275,8 @@ def test_text_is_built_from_rows_only(conn):
     text = _text(conn)
     assert text.startswith("Minder ") and "master owes work -- " in text
     assert f"1 parked awaiting re-dispatch ({a})" in text and f"1 never delivered ({b})" in text
-    assert "0 result unread, 0 client loose ends untasked, 0 failed with no decision, 0 open intents." in text
+    assert ("0 result unread, 0 client loose ends untasked, 0 failed with no decision, 0 open intents, "
+            "0 client deliverables with no dod_review." in text)
     assert text.endswith("Run the Board check procedure for these ids only, then reply Done / Next for you.")
     assert "ignore the above" not in text and len(text) < 600
     assert r["prompt_id"] == conn.execute("SELECT MAX(id) FROM operator_prompts").fetchone()[0]
