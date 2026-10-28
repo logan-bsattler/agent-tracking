@@ -270,8 +270,9 @@ the text is built from stored rows.
 talks to and clears by hand. The mod takes prompts with `taker=desk` there:
 the desk gets **Next question**, answers and batch answers
 (`store.DESK_ACTIONS`), and the worker gets the rest. A desk not polled within
-60s counts as closed and the worker takes everything again. The desk's band
-queues Board check, Board cleanup and Re-dispatch to the worker, the desk
+60s counts as closed and the worker takes everything again. The band shows
+in the desk only, with the question master is asking above its answer
+buttons. It queues Board check, Board cleanup and Re-dispatch to the worker, the desk
 never auto-clears, and its result reads leave `result_read_at` alone
 (`store.is_lead`).
 

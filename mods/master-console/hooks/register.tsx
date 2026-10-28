@@ -26,6 +26,8 @@ import type { Parked, Question } from '../types'
 //    answers; the board decides which) and never auto-clears. Its band's
 //    Board check, Board cleanup and Re-dispatch queue to the worker instead
 //    of running in the desk. With no desk open the worker takes everything.
+//    The band shows in the desk only (Ben, 2026-10-28): the worker still takes
+//    queued prompts and auto-clears, but Ben clicks from the desk.
 // Master and desk only: client sessions load the mod and it does nothing there.
 
 const DASH = 'http://127.0.0.1:8765'
@@ -131,21 +133,19 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if ((!isMaster && !isDesk) || e.props.hasSurvey) return next(e)
+    if (!isDesk || e.props.hasSurvey) return next(e)
     const list = await read($, parked)
     const texts = await read($, actions)
     const q = await read($, question)
     const { Box, Button, Link, Text } = $.ui.resolve(e)
     const send = (text: string) => () => { void $.prompt.submit({ text, asUser: true }) }
-    // The worker's work: runs here in the worker, is queued to it from the desk.
-    const work = (text: string, action: string, task?: string) => isDesk
-      ? () => {
-          void $.http.fetch(`${DASH}/api/prompt`, {
-            method: 'POST', headers: { ...FORM, Accept: 'application/json' },
-            body: `action=${action}` + (task ? `&task=${task}` : ''),
-          }).catch(() => { /* dashboard down: the press is lost, as a page's would be */ })
-        }
-      : send(text)
+    // The worker's work, queued to it from the desk.
+    const work = (action: string, task?: string) => () => {
+      void $.http.fetch(`${DASH}/api/prompt`, {
+        method: 'POST', headers: { ...FORM, Accept: 'application/json' },
+        body: `action=${action}` + (task ? `&task=${task}` : ''),
+      }).catch(() => { /* dashboard down: the press is lost, as a page's would be */ })
+    }
     const answer = (q: Question, i: number) => () => {
       void (async () => {
         await update($, question, () => null)
@@ -163,15 +163,16 @@ export const register: Register = on => {
       <Box flexDirection="column" rowGap={1}>
         <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
           <Button key="next" variant="primary" onPress={send(texts.next ?? FALLBACK.next)}>Next question</Button>
-          <Button key="board" onPress={work(texts.board ?? FALLBACK.board, 'board')}>Board check</Button>
-          <Button key="cleanup" onPress={work(texts.cleanup ?? FALLBACK.cleanup, 'cleanup')}>Board cleanup</Button>
+          <Button key="board" onPress={work('board')}>Board check</Button>
+          <Button key="cleanup" onPress={work('cleanup')}>Board cleanup</Button>
           {list.slice(0, MAX_BUTTONS).map(d => (
-            <Button key={`re-${d.id}`} onPress={work(d.prompt, 'redispatch', d.id)}>
+            <Button key={`re-${d.id}`} onPress={work('redispatch', d.id)}>
               Re-dispatch {d.client} <Text dimColor>{d.id.slice(0, 8)}</Text>
             </Button>
           ))}
           {list.length > MAX_BUTTONS ? <Text dimColor>+{list.length - MAX_BUTTONS} parked on /board</Text> : null}
         </Box>
+        {q ? <Text>{q.question}</Text> : null}
         {q ? (
           <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
             <Text dimColor>
