@@ -125,7 +125,10 @@ client-ready rather than "the agent stopped":
 1. `deliverable`: the client agent writes the file in its working folder
    and returns `path`, `deliverable_type`, `dod_path` (the definition-of-done
    checklist it worked to) and `self_check`, one `{item, met, note}` per
-   checklist line.
+   checklist line. The file is HTML, with an `.xlsx` of the same name beside
+   it when there is a lot of data, or the Logan format its type already has
+   (an FDD stays `.docx`). Markdown is for agents only: a Markdown `path` is
+   refused, and `coord_create_task` warns when the spec names no `format`.
 2. `dod_review`: created with `parent_id` = the deliverable task, in a
    session that did not write it. It returns `verdict` (`approve`,
    `request_changes`, `escalate`), `criteria` judging every checklist item,
@@ -134,7 +137,9 @@ client-ready rather than "the agent stopped":
 3. **Promote**, on `/deliverables`: Ben's click, never an agent's. It copies
    the file to `<client>/deliverables/<name>-vN` (a `-draft` in the name is
    dropped), never overwriting, and records a decision. It refuses unless the
-   newest review approves and the file is unchanged since that review.
+   newest review approves and the file is unchanged since that review, and
+   refuses a Markdown file outright. An HTML file's same-name workbook is
+   copied with it, at the same version.
 
 `/deliverables` shows **Final** (promoted copies) apart from **In progress**,
 and labels each deliverable's stage: awaiting review, changes requested,

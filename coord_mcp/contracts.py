@@ -17,6 +17,7 @@ Field spec keys:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 CONTRACT_VERSION = 1
@@ -168,8 +169,22 @@ def _dod_review_rules(r: dict[str, Any]) -> list[str]:
     return errors
 
 
+# Markdown is for agents only (Ben, 2026-10-28). A client reads HTML, backed by
+# Excel when there is a lot of data, or the Logan format the document type
+# already has (an FDD stays .docx).
+MARKDOWN = re.compile(r"\.(?:md|markdown)(?=$|[\s)`'\",;])", re.I)
+FORMAT_RULE = ("a client deliverable is HTML (with an .xlsx beside it when there is a lot of data), "
+               "or the Logan format its type already has, such as .docx for an FDD; Markdown is for agents only")
+
+
+def _deliverable_rules(r: dict[str, Any]) -> list[str]:
+    if r.get("done") and MARKDOWN.search(str(r.get("path") or "")):
+        return [f"path {r['path']!r} is Markdown: {FORMAT_RULE}"]
+    return []
+
+
 # Checks across fields, run once the shape is valid.
-RULES = {"dod_review": _dod_review_rules}
+RULES = {"dod_review": _dod_review_rules, "deliverable": _deliverable_rules}
 
 # Any kind may report failure with this shape instead of its contract.
 FAILURE: dict[str, dict[str, Any]] = {

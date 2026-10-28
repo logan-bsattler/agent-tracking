@@ -30,6 +30,7 @@ import sqlite3
 import sys
 from typing import Any
 
+from . import contracts
 from .db import connect, now
 
 # ------------------------------------------------------------------ routing
@@ -299,6 +300,11 @@ def create_warnings(conn: sqlite3.Connection, kind: str, spec: dict[str, Any],
     if kind == "draft_reply" and not spec.get("reply_date"):
         out.append("spec has no reply_date: the client's wait cannot be measured from the email. "
                    "Add reply_date and reply_from when it answers a thread.")
+    if kind == "deliverable":
+        fmt = str(spec.get("format") or "")
+        if not fmt or re.fullmatch(r"\.?(md|markdown)", fmt.strip(), re.I):
+            out.append(f"spec format is {fmt or 'missing'}: {contracts.FORMAT_RULE}. "
+                       "Name it as format (e.g. \"html\", \"html + xlsx\", \"docx\"); a Markdown path is refused at completion.")
     return out
 
 

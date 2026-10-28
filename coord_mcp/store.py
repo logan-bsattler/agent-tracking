@@ -863,8 +863,13 @@ def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None) ->
     src = _resolve(_clean_path(json.loads(r["result"])["path"]), client, root)
     if not src.is_file():
         raise ValueError(f"{src} is not on disk")
-    if int(src.stat().st_mtime) > rev["completed_at"]:
-        raise ValueError(f"{src.name} changed after review {rev['id']} approved it; review it again")
+    if contracts.MARKDOWN.search(src.name):
+        raise ValueError(f"{src.name} is Markdown: {contracts.FORMAT_RULE}. Revise it before promoting")
+    # The workbook an HTML deliverable is backed by travels with it.
+    book = next((b for b in (src.with_suffix(x) for x in (".xlsx", ".xlsm")) if b.is_file()), None)         if src.suffix.lower() in (".html", ".htm") else None
+    for f in [src] + ([book] if book else []):
+        if int(f.stat().st_mtime) > rev["completed_at"]:
+            raise ValueError(f"{f.name} changed after review {rev['id']} approved it; review it again")
     sha = hashlib.sha256(src.read_bytes()).hexdigest()
     same = conn.execute("SELECT dest, version FROM promotions WHERE task_id=? AND sha256=?",
                         (task_id, sha)).fetchone()
@@ -874,17 +879,21 @@ def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None) ->
     out_dir.mkdir(exist_ok=True)
     stem = re.sub(r"[-_ ]draft(?=$|[-_ ])", "", src.stem, flags=re.I) or src.stem
     v = 1
-    while (out_dir / f"{stem}-v{v}{src.suffix}").exists():
+    while (out_dir / f"{stem}-v{v}{src.suffix}").exists() or (book and (out_dir / f"{stem}-v{v}{book.suffix}").exists()):
         v += 1
     dest = out_dir / f"{stem}-v{v}{src.suffix}"
     shutil.copy2(src, dest)
+    book_dest = out_dir / f"{stem}-v{v}{book.suffix}" if book else None
+    if book:
+        shutil.copy2(book, book_dest)
     pid = _id()
     conn.execute("INSERT INTO promotions(id, task_id, review_id, client, src, dest, version, sha256, created_at) "
                  "VALUES (?,?,?,?,?,?,?,?,?)", (pid, task_id, rev["id"], client, str(src), str(dest), v, sha, now()))
-    dec = record_decision(conn, f"Promoted {src.name} to {client}/deliverables as {dest.name}"[:200],
+    also = f" with {book_dest.name}" if book_dest else ""
+    dec = record_decision(conn, f"Promoted {src.name} to {client}/deliverables as {dest.name}{also}"[:200],
                           f"dod_review {rev['id']} approved it; Ben promoted it from /deliverables", task_id)
     return {"ok": True, "duplicate": False, "promotion_id": pid, "dest": str(dest), "version": v,
-            "decision_id": dec["decision_id"]}
+            "decision_id": dec["decision_id"], **({"workbook": str(book_dest)} if book_dest else {})}
 
 
 def _client_since(conn: sqlite3.Connection, task_id: str, reply_date: str | None) -> tuple[int, str]:
