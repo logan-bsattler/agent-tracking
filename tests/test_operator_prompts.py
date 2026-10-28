@@ -209,3 +209,45 @@ def test_intents_page_has_go_per_email(conn, tmp_path):
     v["queued"] = open_
     html = report.intents_page(v)
     assert "Sent. Master picks it up" in html and html.count('value="intent"') == 2
+
+
+# ------------------------------------------------------------ desk and worker
+
+
+def test_with_no_desk_the_worker_takes_everything(conn):
+    store.queue_operator_prompt(conn, "next")
+    store.queue_operator_prompt(conn, "board")
+    assert not store.desk_live(conn)
+    assert [store.take_operator_prompt(conn)["action"] for _ in range(2)] == ["next", "board"]
+
+
+def test_a_live_desk_takes_bens_prompts_and_the_worker_the_rest(conn):
+    assert store.take_operator_prompt(conn, "desk") is None  # the poll alone marks it live
+    assert store.desk_live(conn)
+    store.queue_operator_prompt(conn, "next")
+    store.queue_operator_prompt(conn, "board")
+    store.queue_operator_prompt(conn, "cleanup")
+    assert store.take_operator_prompt(conn)["action"] == "board"
+    assert store.take_operator_prompt(conn, "desk")["action"] == "next"
+    assert store.take_operator_prompt(conn, "desk") is None
+    assert store.take_operator_prompt(conn)["action"] == "cleanup"
+
+
+def test_a_desk_gone_quiet_hands_bens_prompts_back_to_the_worker(conn):
+    store.take_operator_prompt(conn, "desk")
+    store.queue_operator_prompt(conn, "next")
+    assert store.take_operator_prompt(conn) is None
+    conn.execute("UPDATE meta SET value=? WHERE key='desk_seen'", (str(store.now() - store.DESK_STALE - 1),))
+    assert not store.desk_live(conn)
+    assert store.take_operator_prompt(conn)["action"] == "next"
+
+
+def test_desk_reads_leave_result_unread_for_the_minder(conn):
+    tid = store.create_task(conn, "investigation", "t", {"q": "x"}, assigned_to="MAG")["task_id"]
+    store.get_task(conn, tid, reader="MAG")
+    store.complete_task(conn, tid, {"done": True, "verdict": "v", "confidence": "high", "evidence": ["e"]})
+    assert not store.is_lead(conn, "desk") and store.is_lead(conn, "agents")
+    store.get_task_result(conn, tid, ["verdict"], reader="Desk")
+    assert conn.execute("SELECT result_read_at FROM tasks WHERE id=?", (tid,)).fetchone()[0] is None
+    store.get_task_result(conn, tid, ["verdict"], reader="agents")
+    assert conn.execute("SELECT result_read_at FROM tasks WHERE id=?", (tid,)).fetchone()[0] is not None

@@ -259,6 +259,17 @@ idle: **Next question**, **Board check**, **Board cleanup**, **Re-dispatch** on 
 is currently asking. A page never writes prompt text; it picks an action and
 the text is built from stored rows.
 
+**The desk.** Master can run as two sessions: the worker in
+`C:\development\agents`, and **Master - Desk** in `C:\development\agents\desk`
+(`examples/desk/`: its `CLAUDE.md` and `.mcp.json`), the one the operator
+talks to and clears by hand. The mod takes prompts with `taker=desk` there:
+the desk gets **Next question**, answers and batch answers
+(`store.DESK_ACTIONS`), and the worker gets the rest. A desk not polled within
+60s counts as closed and the worker takes everything again. The desk's band
+queues Board check, Board cleanup and Re-dispatch to the worker, the desk
+never auto-clears, and its result reads leave `result_read_at` alone
+(`store.is_lead`).
+
 **The master-minder** uses the same queue without a click. Each ingest pass
 (`store.minder_check`) looks for work master owes and is not acting on: a
 task parked and awaiting re-dispatch (10 min), one created and never

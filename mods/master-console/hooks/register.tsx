@@ -20,13 +20,21 @@ import type { Parked, Question } from '../types'
 //    120k) each prompt carries a note: finish the turn, record the handoff
 //    decision, clear_session "self" last. coord-rules allows that clear once a
 //    decision was recorded in the same turn.
-// Master only: client sessions load the mod and it does nothing there.
+// 4. Desk. Master runs as two sessions: the worker in the agents folder, and
+//    Master - Desk in agents\desk, the one Ben talks to and clears by hand.
+//    The desk takes only Ben-facing prompts (Next question, answers, batch
+//    answers; the board decides which) and never auto-clears. Its band's
+//    Board check, Board cleanup and Re-dispatch queue to the worker instead
+//    of running in the desk. With no desk open the worker takes everything.
+// Master and desk only: client sessions load the mod and it does nothing there.
 
 const DASH = 'http://127.0.0.1:8765'
 // The master folder itself. Not its children: a side session working in
 // agent-tracking is not master, and must neither auto-clear nor take Ben's
 // queued prompts.
 const MASTER_ROOT = /^c:[\\/]development[\\/]agents[\\/]?$/i
+const DESK_ROOT = /^c:[\\/]development[\\/]agents[\\/]desk[\\/]?$/i
+const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' }
 const MAX_BUTTONS = 5
 const FALLBACK: Record<string, string> = {
   next: 'Next question: rebuild my queue from coord_board and present its head.',
@@ -45,15 +53,18 @@ const numOr = (v: string | undefined, d: number) => (v && Number.isFinite(Number
 const k = (n: number) => `${Math.round(n / 1000)}k`
 
 export const register: Register = on => {
-  let isMaster = false
+  let isMaster = false  // the worker
+  let isDesk = false
   let busy = false
   let ctx = 0
   let clearAt = 120000
   let refresh: () => Promise<void> = async () => {}
 
   on('session.start', async ($, e, next) => {
-    isMaster = MASTER_ROOT.test(await $.session.root())
-    if (!isMaster) return next(e)
+    const root = await $.session.root()
+    isMaster = MASTER_ROOT.test(root)
+    isDesk = DESK_ROOT.test(root)
+    if (!isMaster && !isDesk) return next(e)
     clearAt = numOr(await $.env.get('COORD_MASTER_CLEAR'), 120000)
     ctx = (await $.session.usage()).context.tokens ?? 0
     refresh = async () => {
@@ -74,7 +85,9 @@ export const register: Register = on => {
         await refresh()  // ~20 ms; a question master just presented shows within 10s
         if (busy) return
         try {
-          const r = await $.http.fetch(`${DASH}/api/prompts/take`, { method: 'POST' })
+          const r = await $.http.fetch(`${DASH}/api/prompts/take`, {
+            method: 'POST', headers: FORM, body: `taker=${isDesk ? 'desk' : 'master'}`,
+          })
           if (!r.ok) return
           const p = (JSON.parse(r.text) as { prompt: { text: string } | null }).prompt
           if (p) {
@@ -93,9 +106,9 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if (!isMaster) return next(e)
+    if (!isMaster && !isDesk) return next(e)
     busy = true
-    if (ctx < clearAt) return next(e)
+    if (isDesk || ctx < clearAt) return next(e)  // Ben clears the desk himself
     const note = `master-console AUTO-CLEAR: context is ${k(ctx)}, over the ${k(clearAt)} threshold. ` +
       'Do this turn\'s work, then coord_record_decision the handoff (live state plus Ben\'s question queue, ' +
       'naming any client you are waiting on), and make clear_session "self" the last call of the turn. ' +
@@ -104,7 +117,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId || !isMaster) return next(e)
+    if (e.agentId || (!isMaster && !isDesk)) return next(e)
     busy = false
     await refresh()  // the turn may have presented a question
     return next(e)
@@ -113,17 +126,26 @@ export const register: Register = on => {
   // A self-clear is the last call of its turn, and that turn never reports
   // turn.complete: without this, busy stays set and no queued prompt is taken.
   on('session.end', async ($, e, next) => {
-    if (isMaster && e.reason === 'clear') busy = false
+    if ((isMaster || isDesk) && e.reason === 'clear') busy = false
     return next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!isMaster || e.props.hasSurvey) return next(e)
+    if ((!isMaster && !isDesk) || e.props.hasSurvey) return next(e)
     const list = await read($, parked)
     const texts = await read($, actions)
     const q = await read($, question)
     const { Box, Button, Link, Text } = $.ui.resolve(e)
     const send = (text: string) => () => { void $.prompt.submit({ text, asUser: true }) }
+    // The worker's work: runs here in the worker, is queued to it from the desk.
+    const work = (text: string, action: string, task?: string) => isDesk
+      ? () => {
+          void $.http.fetch(`${DASH}/api/prompt`, {
+            method: 'POST', headers: { ...FORM, Accept: 'application/json' },
+            body: `action=${action}` + (task ? `&task=${task}` : ''),
+          }).catch(() => { /* dashboard down: the press is lost, as a page's would be */ })
+        }
+      : send(text)
     const answer = (q: Question, i: number) => () => {
       void (async () => {
         await update($, question, () => null)
@@ -131,7 +153,7 @@ export const register: Register = on => {
         try {
           await $.http.fetch(`${DASH}/api/question/close`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            headers: FORM,
             body: `question=${q.id}`,
           })
         } catch { /* dashboard down: master's next question closes it anyway */ }
@@ -141,10 +163,10 @@ export const register: Register = on => {
       <Box flexDirection="column" rowGap={1}>
         <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
           <Button key="next" variant="primary" onPress={send(texts.next ?? FALLBACK.next)}>Next question</Button>
-          <Button key="board" onPress={send(texts.board ?? FALLBACK.board)}>Board check</Button>
-          <Button key="cleanup" onPress={send(texts.cleanup ?? FALLBACK.cleanup)}>Board cleanup</Button>
+          <Button key="board" onPress={work(texts.board ?? FALLBACK.board, 'board')}>Board check</Button>
+          <Button key="cleanup" onPress={work(texts.cleanup ?? FALLBACK.cleanup, 'cleanup')}>Board cleanup</Button>
           {list.slice(0, MAX_BUTTONS).map(d => (
-            <Button key={`re-${d.id}`} onPress={send(d.prompt)}>
+            <Button key={`re-${d.id}`} onPress={work(d.prompt, 'redispatch', d.id)}>
               Re-dispatch {d.client} <Text dimColor>{d.id.slice(0, 8)}</Text>
             </Button>
           ))}

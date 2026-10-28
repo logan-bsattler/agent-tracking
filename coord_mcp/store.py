@@ -268,8 +268,13 @@ def client_keys(conn: sqlite3.Connection) -> set[str]:
 def is_lead(conn: sqlite3.Connection, reader: str | None) -> bool:
     """A named reader that is not a client is the lead (master). The reader
     is the session's folder name or COORD_CLIENT; the master's is neither a
-    client key nor an assignee. An unnamed reader is nobody."""
-    return bool(reader) and reader.strip().casefold() not in client_keys(conn)
+    client key nor an assignee. An unnamed reader is nobody. The desk is not
+    the lead either: it reads results to answer Ben, and its read must not
+    tell the minder the worker has acted on them."""
+    if not reader:
+        return False
+    r = reader.strip().casefold()
+    return r != DESK and r not in client_keys(conn)
 
 
 def board(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -1431,13 +1436,42 @@ def _enqueue(conn: sqlite3.Connection, action: str, task_id: str | None, text: s
     return {"ok": True, "id": cur.lastrowid, "duplicate": False}
 
 
-def take_operator_prompt(conn: sqlite3.Connection) -> dict[str, Any] | None:
-    """Claim the oldest live queued prompt, or None. Stale ones are dropped."""
+# Master runs as two sessions. The worker (the agents folder itself) does the
+# board work and clears itself often; the desk (Master - Desk, in agents\desk)
+# is the one Ben talks to and clears by hand. Prompts that ask Ben something or
+# carry his answer go to the desk, the rest to the worker. The desk's mod polls
+# every 10s; a desk not seen for DESK_STALE seconds is closed, and the worker
+# takes everything again, so a press never waits on a session nobody opened.
+DESK = "desk"
+DESK_ACTIONS = frozenset({"next", "answer", "batch"})
+DESK_STALE = 60
+
+
+def desk_live(conn: sqlite3.Connection, t: int | None = None) -> bool:
+    r = conn.execute("SELECT value FROM meta WHERE key='desk_seen'").fetchone()
+    return bool(r) and int(r["value"]) >= (now() if t is None else t) - DESK_STALE
+
+
+def take_operator_prompt(conn: sqlite3.Connection, taker: str = "master") -> dict[str, Any] | None:
+    """Claim the oldest live queued prompt for `taker`, or None. Stale ones are dropped.
+
+    taker "desk" takes DESK_ACTIONS only and marks the desk live; "master"
+    takes the rest, and DESK_ACTIONS too while no desk is live."""
     t = now()
     conn.execute("UPDATE operator_prompts SET taken_at = -1 WHERE taken_at IS NULL AND created_at < ?",
                  (t - PROMPT_TTL,))
+    desk = sorted(DESK_ACTIONS)
+    marks = ",".join("?" * len(desk))
+    if taker == DESK:
+        conn.execute("INSERT INTO meta(key, value) VALUES ('desk_seen', ?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(t),))
+        where, args = f"AND action IN ({marks})", desk
+    elif desk_live(conn, t):
+        where, args = f"AND action NOT IN ({marks})", desk
+    else:
+        where, args = "", []
     r = conn.execute("SELECT id, action, task_id, text FROM operator_prompts WHERE taken_at IS NULL "
-                     "ORDER BY created_at, id LIMIT 1").fetchone()
+                     f"{where} ORDER BY created_at, id LIMIT 1", args).fetchone()
     if r is None:
         return None
     if conn.execute("UPDATE operator_prompts SET taken_at = ? WHERE id = ? AND taken_at IS NULL",
