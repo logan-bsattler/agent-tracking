@@ -96,7 +96,10 @@ def draft(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
 
 def draft_from_result(task_id: str, client: str | None, title: str, res: dict[str, Any]) -> dict[str, Any]:
     """The draft from a validated draft_reply result (see draft)."""
-    path = Path(res["body_path"]).expanduser()
+    from .store import DOCS_ROOT, _resolve  # lazy: store imports this module lazily too
+
+    # Agents write body_path relative to their client folder, not our cwd.
+    path = _resolve(str(Path(res["body_path"]).expanduser()), client, DOCS_ROOT)
     exists = path.is_file()
     body = body_text(path.read_text(encoding="utf-8", errors="replace")) if exists else ""
     reply_from = (res.get("reply_from") or "").strip()
