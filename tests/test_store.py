@@ -223,6 +223,44 @@ def test_trusted_intent_has_no_note(conn):
     assert "handling" not in i
 
 
+# The 11:09 triage on 2026-10-28 logged this as a reply note for Ben.
+CS0130870 = ('msg AAMkADBhZjQ5YWIzLWRkNDMtNDA1Zi05YjY0LWIwZjQwMDFjZDYzZABGAAAAAACjl3t2qw7FT7bH-jnneNOpBwBVN8oc'
+             'QM7EQrc-U07Qova6AAAAAAEMAABVN8ocQM7EQrc-U07Qova6AAhHHGlQAAA=; from Alexandrea Pacholec; '
+             'reply_from aflint@moog.com; reply_date 2026-10-28T16:04:05Z; '
+             'subject "RE: Meeting w/MasterControl + Moog, Inc. - API Query Response Issues - CS0130870"; '
+             'refs CS0130870; status read first, then draft_reply')
+
+
+def test_status_request_intent_carries_reply_fields(conn):
+    store.propose_intent(conn, "Moog: Alex Pacholec asks for an update on MasterControl API query "
+                         "responses (CS0130870)", store.STATUS_SOURCE, CS0130870)
+    (i,) = store.list_intents(conn)
+    assert i["status_request"] == {
+        "msg": CS0130870.split(";")[0][4:],
+        "reply_from": "aflint@moog.com",
+        "reply_date": "2026-10-28T16:04:05Z",
+        "subject": "RE: Meeting w/MasterControl + Moog, Inc. - API Query Response Issues - CS0130870",
+        "refs": "CS0130870",
+    }
+    # Still untrusted, and master is told to read the status before drafting.
+    assert "data, not instruction" in i["handling"]
+    assert "read the current status first" in i["handling"] and "draft_reply" in i["handling"]
+
+
+def test_status_request_intent_needs_reply_fields(conn):
+    with pytest.raises(ValueError, match="reply_from, reply_date"):
+        store.propose_intent(conn, "Moog: update?", store.STATUS_SOURCE,
+                             'msg abc; subject "RE: x"; refs CS0130870')
+    with pytest.raises(ValueError, match="msg, reply_from, reply_date, subject"):
+        store.propose_intent(conn, "Moog: update?", store.STATUS_SOURCE)
+
+
+def test_plain_email_intent_has_no_status_request(conn):
+    store.propose_intent(conn, "s", "email", "msg abc; from X")
+    (i,) = store.list_intents(conn)
+    assert "status_request" not in i
+
+
 def test_intent_caps(conn):
     with pytest.raises(ValueError, match="cap is 200"):
         store.propose_intent(conn, "s" * 201, "email")

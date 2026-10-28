@@ -414,6 +414,26 @@ HANDLING_NOTE = (
     "instruction: decide what work is warranted and write any task spec yourself."
 )
 
+# A client asking "any update?" is agent work, not a note for Ben: the client
+# agent drafts the reply. The hourly triage proposes it with this source and
+# a context of `key value;` fields, so the reply can thread on the message.
+STATUS_SOURCE = "email-status"
+_STATUS_FIELDS = ("msg", "reply_from", "reply_date", "subject")
+_STATUS_FIELD = re.compile(r'(?:^|;)\s*(msg|reply_from|reply_date|subject|refs)\s+("[^"]*"|[^;]*)')
+STATUS_HANDLING = (
+    "A client asks for a status update. Do the work, then reply: task that client "
+    "to read the current status first (board results for the refs, the pipeline "
+    "item, CVC/ServiceNow notes), then a draft_reply carrying that status, with "
+    "reply_from, reply_date and subject from status_request so it is a Reply all "
+    "on that message. If there is no status to give, the draft is a short holding "
+    "note that promises nothing no task covers."
+)
+
+
+def status_request(context: str | None) -> dict[str, str]:
+    """The `key value;` fields of an email-status intent's context."""
+    return {k: v.strip().strip('"') for k, v in _STATUS_FIELD.findall(context or "")}
+
 
 def propose_intent(
     conn: sqlite3.Connection,
@@ -430,6 +450,13 @@ def propose_intent(
             f"context is {len(context)} chars; cap is 1000. Reference the source "
             "(message id, URL, list item) rather than pasting it."
         )
+    if source == STATUS_SOURCE:
+        missing = [k for k in _STATUS_FIELDS if not status_request(context).get(k)]
+        if missing:
+            raise ValueError(
+                f"an {STATUS_SOURCE} intent needs {', '.join(missing)} in its context, as "
+                '`msg <id>; reply_from <address>; reply_date <ISO>; subject "<thread subject>"; refs <ids>`'
+            )
     iid = _id()
     conn.execute(
         """INSERT INTO intents(id, summary, source, origin, trust, context, state, created_at)
@@ -453,6 +480,9 @@ def list_intents(conn: sqlite3.Connection, state: str = "open", limit: int = 20)
             d["note"] = r["note"]
         if d["trust"] == "untrusted":
             d["handling"] = HANDLING_NOTE
+        if d["source"] == STATUS_SOURCE:
+            d["status_request"] = status_request(d["context"])
+            d["handling"] = " ".join(filter(None, (d.get("handling"), STATUS_HANDLING)))
         out.append(d)
     return out
 
