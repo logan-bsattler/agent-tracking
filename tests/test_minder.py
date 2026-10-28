@@ -243,6 +243,32 @@ def test_at_most_one_per_window_then_again(conn):
     assert r["fired"] and r["last_fired"] == now() + (t0 + store.MINDER_EVERY + 1) * MIN
 
 
+def test_a_changed_list_fires_soon_after_master_took_the_last(conn):
+    b = _parked(conn)
+    a = store.propose_intent(conn, "LNK: asks", "email", origin="team", trust="trusted")["intent_id"]
+    t0 = max(store.MINDER_PARKED, store.MINDER_INTENTS) + 1
+    assert _fires(conn, t0)["fired"]
+    store.take_operator_prompt(conn)
+    conn.execute("UPDATE operator_prompts SET taken_at=? WHERE action='minder'", (now() + t0 * MIN,))
+    store.resolve_intent(conn, a, note="no")  # master cleared one of the two
+    assert _fires(conn, t0 + store.MINDER_SOON - 1)["reason"] == "rate limit"
+    r = _fires(conn, t0 + store.MINDER_SOON + 1)
+    assert r["fired"] and r["owed"]["parked"] == [b]
+    assert r["next_eligible"] == now() + (t0 + store.MINDER_SOON + 1 + store.MINDER_EVERY) * MIN
+
+
+def test_a_changed_list_counts_soon_from_the_take_not_the_queue(conn):
+    _parked(conn)
+    t0 = store.MINDER_PARKED + 1
+    assert _fires(conn, t0)["fired"]
+    store.take_operator_prompt(conn)
+    took = t0 + 20  # master was busy; it took the prompt 20 minutes later
+    conn.execute("UPDATE operator_prompts SET taken_at=? WHERE action='minder'", (now() + took * MIN,))
+    _task(conn, "LNK")  # new work lands
+    assert _fires(conn, took + store.MINDER_SOON - 1)["reason"] == "rate limit"
+    assert _fires(conn, took + store.MINDER_SOON + 1)["fired"]
+
+
 def test_holds_while_any_operator_prompt_is_queued(conn):
     _parked(conn)
     store.queue_operator_prompt(conn, "board")

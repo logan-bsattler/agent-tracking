@@ -1480,7 +1480,8 @@ MINDER_LOOSE = _env_minutes("LOOSE", 30)              # open client follow-up wi
 MINDER_FAILED = _env_minutes("FAILED", 30)            # failed, no decision since
 MINDER_INTENTS = _env_minutes("INTENTS", 15)          # open intent
 MINDER_HOLD = _env_minutes("HOLD", 7 * 24 * 60)       # undelivered with a decision this recent is held
-MINDER_EVERY = _env_minutes("EVERY", 30)              # at most one minder prompt per this
+MINDER_EVERY = _env_minutes("EVERY", 30)              # same owed list again: at most one per this
+MINDER_SOON = _env_minutes("SOON", 5)                 # owed list changed: this after master took the last
 MINDER_IDS = 5                                        # ids listed per condition; the rest is a count
 
 
@@ -1574,13 +1575,33 @@ def minder_last(conn: sqlite3.Connection) -> int | None:
     return conn.execute("SELECT MAX(created_at) t FROM operator_prompts WHERE action='minder'").fetchone()["t"]
 
 
-def minder_state(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any]:
-    """One line's worth for the board: enabled, last fired, next eligible."""
+def _minder_body(text: str) -> str:
+    """A minder prompt without its 'Minder HH:MM: ' head, so two passes compare."""
+    return text.split(": ", 1)[-1]
+
+
+def minder_state(conn: sqlite3.Connection, now_ts: int | None = None,
+                 owed: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """One line's worth for the board: enabled, last fired, next eligible.
+
+    The same owed list as the last prompt waits MINDER_EVERY from when that
+    prompt was queued: master saw those ids and left them, so asking again
+    soon only loops it. A different list (master cleared some, or new work
+    landed) waits only MINDER_SOON from when master took the last prompt, so
+    a wake that clears 1 of 10 drafts is followed by another, not by half an
+    hour of idle. Without `owed` it assumes the list is unchanged."""
     now_ts = now() if now_ts is None else now_ts
-    last = minder_last(conn)
-    nxt = (last + MINDER_EVERY * 60) if last else now_ts
+    r = conn.execute("SELECT created_at, taken_at, text FROM operator_prompts WHERE action='minder' "
+                     "ORDER BY created_at DESC, id DESC LIMIT 1").fetchone()
+    last = r["created_at"] if r else None
+    if r is None:
+        nxt = now_ts
+    elif owed is not None and _minder_body(minder_text(owed, now_ts)) != _minder_body(r["text"]):
+        nxt = max(last, r["taken_at"] or 0) + MINDER_SOON * 60
+    else:
+        nxt = last + MINDER_EVERY * 60
     return {"enabled": MINDER_ENABLED, "last_fired": last, "next_eligible": max(nxt, now_ts),
-            "every_min": MINDER_EVERY}
+            "every_min": MINDER_EVERY, "soon_min": MINDER_SOON}
 
 
 def minder_status(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any]:
@@ -1589,7 +1610,7 @@ def minder_status(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[s
     which reads the same things in its own order."""
     now_ts = now() if now_ts is None else now_ts
     owed = minder_owed(conn, now_ts)
-    return {**minder_state(conn, now_ts), "owed": sum(len(v) for v in owed.values()),
+    return {**minder_state(conn, now_ts, owed), "owed": sum(len(v) for v in owed.values()),
             "queued": queued_operator_prompts(conn)}
 
 
@@ -1598,27 +1619,28 @@ def minder_check(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[st
 
     Silent when disabled (COORD_MINDER=off), when nothing is past its
     threshold, when any operator prompt is already queued (master is about to
-    be woken anyway), or within MINDER_EVERY of the last minder prompt. The
-    text dedup in _enqueue applies on top.
+    be woken anyway), or before minder_state's next_eligible: MINDER_EVERY
+    for the same owed list, MINDER_SOON once it changed. The text dedup in
+    _enqueue applies on top.
 
     Returns {fired, reason, owed, ...} for the caller's log or page; nothing
     here raises for an empty board.
     """
     now_ts = now() if now_ts is None else now_ts
-    state = minder_state(conn, now_ts)
     if not MINDER_ENABLED:
-        return {"fired": False, "reason": "disabled", "owed": {}, **state}
+        return {"fired": False, "reason": "disabled", "owed": {}, **minder_state(conn, now_ts)}
     owed = minder_owed(conn, now_ts)
+    state = minder_state(conn, now_ts, owed)
     if not any(owed.values()):
         return {"fired": False, "reason": "nothing owed", "owed": owed, **state}
-    if state["last_fired"] and now_ts - state["last_fired"] < MINDER_EVERY * 60:
+    if state["next_eligible"] > now_ts:
         return {"fired": False, "reason": "rate limit", "owed": owed, **state}
     if queued_operator_prompts(conn):
         return {"fired": False, "reason": "a prompt is already queued", "owed": owed, **state}
     r = _enqueue(conn, "minder", None, minder_text(owed, now_ts), t=now_ts)
     fired = not r["duplicate"]
     return {"fired": fired, "reason": "queued" if fired else "duplicate", "owed": owed,
-            "prompt_id": r["id"], **minder_state(conn, now_ts)}
+            "prompt_id": r["id"], **minder_state(conn, now_ts, owed)}
 
 
 # ------------------------------------------------------------------ questions
