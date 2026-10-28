@@ -226,3 +226,13 @@ def test_queue_posts_through_the_server(tmp_path, monkeypatch):
         assert json.loads(r.read())["count"] == 1
     assert _ids(c) == []
     c.close()
+
+
+def test_queue_page_leads_with_client_cards_that_filter_it(conn):
+    _done(conn, "LNK", follow_ups=[_ben("Approve LNK thing")])
+    _done(conn, "MAG", follow_ups=[_ben("Approve MAG thing")])
+    fleet = store.fleet(conn, store.operator_view(conn), ("LNK", "MAG"))
+    html = report.queue_page(queue.ben_queue(conn), fleet=fleet, client="MAG")
+    assert html.index('class="fleet"') < html.index('action="/api/queue"')
+    assert 'href="/queue?client=LNK"' in html and 'href="/queue"' in html
+    assert "Approve MAG thing" in html and "Approve LNK thing" not in html

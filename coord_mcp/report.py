@@ -889,9 +889,9 @@ def _kpis(v: dict[str, Any], n_needs: int, n_done: int) -> str:
         for href, label, n, cls, hint in tiles) + "</div>"
 
 
-def _fleet(rows: list[dict[str, Any]], t: int, selected: str | None) -> str:
+def _fleet(rows: list[dict[str, Any]], t: int, selected: str | None, base: str = "/board") -> str:
     """One tile per client: a status light, what it is on, and what it owes.
-    A click narrows the page to that client; a second click widens it again."""
+    A click narrows the page (`base`) to that client; a second click widens it again."""
     if not rows:
         return ""
     tiles = []
@@ -911,7 +911,7 @@ def _fleet(rows: list[dict[str, Any]], t: int, selected: str | None) -> str:
             bits.append(f'<span class="c-done">{r["done"]} done</span>')
         last = f'last activity {_age(r["last"], t)}' if r["last"] else "no activity yet"
         task = f'<div class="doing">{esc(r["task"][:70])}</div>' if r["task"] else ""
-        href = "/board" if selected == r["client"] else f'/board?client={quote(r["client"])}'
+        href = base if selected == r["client"] else f'{base}?client={quote(r["client"])}'
         tiles.append(
             f'<a class="fleet-tile st-{r["state"]}{" selected" if selected == r["client"] else ""}" href="{href}">'
             f'<div class="head"><i class="light"></i><span class="name">{esc(r["client"])}</span>'
@@ -1619,7 +1619,8 @@ document.querySelectorAll('input.all').forEach(b => b.addEventListener('change',
 ROUTE_WORDS = {"agent": "agent work", "reply": "a reply an agent drafts", "ben": "sent by you"}
 
 
-def queue_page(v: dict[str, Any], done: str = "") -> str:
+def queue_page(v: dict[str, Any], done: str = "", fleet: list[dict[str, Any]] | None = None,
+               client: str | None = None) -> str:
     """Every loose end only Ben can settle, on one page, cleared in batches.
 
     Tick items and press one action for all of them: Send to agent hands
@@ -1632,8 +1633,13 @@ def queue_page(v: dict[str, Any], done: str = "") -> str:
     sub = (f'{v["total"]} open, grouped by client, the longest-waiting client first. Tick, then act on all '
            'ticked at once. Typed answers go to master in one prompt; nothing here mails a client.')
     flash = f'<p class="clear">{esc(done)}</p>' if done else ""
+    if client:
+        sub += f' Showing <b>{esc(client)}</b> · <a href="/queue">all clients</a>.'
+    flash = _fleet(fleet or [], t, client, "/queue") + flash
     groups = []
     for g in v["groups"]:
+        if client and g["client"] != client:
+            continue
         c = g["client"]
         rows = []
         for d in g["items"]:
@@ -2307,7 +2313,9 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 return deliverables_page(v).encode("utf-8")
             if path == "/queue":
                 from . import queue
-                return queue_page(queue.ben_queue(conn), (self._query.get("done") or [""])[0][:200]).encode("utf-8")
+                fleet = store.fleet(conn, store.operator_view(conn), hours.CLIENTS)
+                return queue_page(queue.ben_queue(conn), (self._query.get("done") or [""])[0][:200], fleet,
+                                  (self._query.get("client") or [""])[0].strip() or None).encode("utf-8")
             if path == "/drafts":
                 window = int((self._query.get("days") or ["30"])[0] or 30)
                 client = (self._query.get("client") or [""])[0].strip() or None
