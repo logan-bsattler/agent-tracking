@@ -873,12 +873,12 @@ def _items(rows: list[dict[str, Any]], t: int, empty: str, client: bool = True, 
 
 def _kpis(v: dict[str, Any], n_needs: int, n_done: int) -> str:
     """Six numbers across the top, each a link to the lane it counts."""
-    parked = [d for d in v["master_owes"] if d.get("parked")]
+    parked = [d for d in v["master_owes"] if d.get("parked") or d.get("stalled")]
     failed = [d for d in v["needs_you"] if d.get("failed")]
     tiles = (
         ("#flight", "Running", len(v["running"]), "k-run", "agents working now"),
         ("#flight", "Waiting", len(v["waiting"]), "k-wait", "created, not picked up"),
-        ("#flight", "Parked", len(parked), "k-park", "owed a re-dispatch"),
+        ("#flight", "Parked", len(parked), "k-park", "parked or stalled, owed a re-dispatch"),
         ("#needs", "Failed", len(failed), "k-fail", "needs a fix or a ruling"),
         ("#needs", "Waiting on you", n_needs, "k-you", "last 7 days"),
         ("#done", "Done today", n_done, "k-done", "last 24h"),
@@ -899,6 +899,8 @@ def _fleet(rows: list[dict[str, Any]], t: int, selected: str | None, base: str =
         bits = []
         if r["running"]:
             bits.append(f'<b class="c-run">{r["running"]} running</b>')
+        if r.get("stalled"):
+            bits.append(f'<b class="c-park">{r["stalled"]} stalled</b>')
         if r["parked"]:
             bits.append(f'<b class="c-park">{r["parked"]} parked</b>')
         if r["waiting"]:
@@ -1134,7 +1136,7 @@ body.wide main { max-width:1500px; }
 .fleet-tile .light { width:10px; height:10px; border-radius:50%; background:var(--l); flex:none; }
 .fleet-tile.st-running { --l:var(--s1); }
 .fleet-tile.st-running .light { box-shadow:0 0 0 3px color-mix(in srgb, var(--s1) 25%, transparent); animation:pulse 1.6s ease-in-out infinite; }
-.fleet-tile.st-parked { --l:var(--serious); } .fleet-tile.st-failed { --l:var(--critical); }
+.fleet-tile.st-parked, .fleet-tile.st-stalled { --l:var(--serious); } .fleet-tile.st-failed { --l:var(--critical); }
 .fleet-tile.st-waiting { --l:var(--s4); } .fleet-tile.st-idle { --l:var(--muted); }
 .fleet-tile.st-idle .name { color:var(--ink2); }
 @keyframes pulse { 50% { box-shadow:0 0 0 6px color-mix(in srgb, var(--s1) 10%, transparent); } }

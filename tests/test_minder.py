@@ -41,6 +41,12 @@ def _done(conn, client="MAG", follow_ups=None):
     return tid
 
 
+def _working(conn, client, minutes):
+    """An API request from the client's folder `minutes` from now: its session is at it."""
+    conn.execute("INSERT INTO requests(request_id, ts, session_id, cwd, model) VALUES (?,?,?,?,?)",
+                 (f"r{client}{minutes}", now() + minutes * MIN, "s", rf"C:\Docs\{client}", "m"))
+
+
 def _fires(conn, minutes):
     return store.minder_check(conn, now() + minutes * MIN)
 
@@ -233,6 +239,7 @@ def test_loose_ends_for_ben_or_master_or_tasked_are_not_the_minders(conn):
     store.get_task_result(conn, tid, ["verdict"], reader="agents")
     child = store.create_task(conn, "investigation", "child", {"q": "x"}, assigned_to="LNK", parent_id=tid)["task_id"]
     store.get_task(conn, child, reader="LNK")  # delivered, so it is not owed either
+    _working(conn, "LNK", store.MINDER_LOOSE)
     assert _fires(conn, store.MINDER_LOOSE + 1)["reason"] == "nothing owed"
 
 
@@ -242,6 +249,7 @@ def test_loose_end_whose_children_all_finished_is_owed_again(conn):
     fid = conn.execute("SELECT id FROM follow_ups WHERE task_id=?", (tid,)).fetchone()[0]
     child = store.create_task(conn, "investigation", "child", {"q": "x"}, assigned_to="MAG", parent_id=tid)["task_id"]
     store.get_task(conn, child, reader="MAG")
+    _working(conn, "MAG", store.MINDER_LOOSE)
     assert _fires(conn, store.MINDER_LOOSE + 1)["reason"] == "nothing owed"  # child still going
     store.complete_task(conn, child, INV)
     store.get_task_result(conn, child, ["verdict"], reader="agents")
@@ -400,3 +408,36 @@ def test_board_line_says_why_it_is_not_firing(conn):
     store.minder_check(conn, later)
     line = report.minder_line(store.minder_status(conn, later + MIN), later + MIN)
     assert "rate limit until " in line and line.endswith(", 1 owed")
+
+
+# ------------------------------------------------------------ stalled
+
+
+def test_picked_up_then_silent_is_stalled(conn):
+    tid = _task(conn)
+    store.get_task(conn, tid, reader="MAG")
+    assert _fires(conn, store.MINDER_STALLED - 1)["reason"] == "nothing owed"  # fresh pickup
+    _working(conn, "MAG", store.MINDER_STALLED)
+    assert _fires(conn, store.MINDER_STALLED + 1)["reason"] == "nothing owed"  # session at it
+    r = _fires(conn, 2 * store.MINDER_STALLED + 1)
+    assert r["fired"] and r["owed"]["stalled"] == [tid]
+    assert "went silent" in _text(conn)
+
+
+def test_stalled_task_leaves_running_and_shows_on_the_board(conn, monkeypatch):
+    tid = _task(conn)
+    store.get_task(conn, tid, reader="MAG")
+    later = now() + (store.MINDER_STALLED + 1) * MIN
+    monkeypatch.setattr(store, "now", lambda: later)
+    v = store.operator_view(conn)
+    assert not v["running"] and [d["id"] for d in v["master_owes"] if d.get("stalled")] == [tid]
+    assert [d for d in store.board(conn)["live"] if d["id"] == tid][0]["stalled"]
+    assert [r for r in store.fleet(conn, v) if r["client"] == "MAG"][0]["state"] == "stalled"
+
+
+def test_board_lists_open_tasks_ahead_of_old_failures(conn):
+    for _ in range(50):
+        f = _task(conn)
+        store.complete_task(conn, f, {"done": False, "reason": "x", "retryable": False})
+    tid = _task(conn)
+    assert tid in [d["id"] for d in store.board(conn)["live"]]

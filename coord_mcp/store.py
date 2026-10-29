@@ -9,7 +9,7 @@ import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from . import contracts
@@ -256,6 +256,54 @@ def _open_status(last_park: int | None, picked_up_at: int | None) -> str:
     return "running" if picked_up_at is not None else "open"
 
 
+def client_last_seen(conn: sqlite3.Connection, since: int) -> dict[str, int]:
+    """Casefolded client key -> its latest API request since `since`.
+
+    A pickup only says the client read the task once. Whether its session is
+    still at it shows in the transcripts the usage ingest reads: any request
+    whose cwd sits in the client's folder. Without this a task picked up and
+    then dropped (a pause, a crash, a lost turn) read as running forever and
+    the session sat idle with work queued behind it.
+    """
+    keys = client_keys(conn)
+    out: dict[str, int] = {}
+    for r in conn.execute(
+        "SELECT cwd, MAX(ts) ts FROM requests WHERE ts >= ? AND cwd IS NOT NULL GROUP BY cwd", (since,)
+    ):
+        for part in PureWindowsPath(r["cwd"]).parts:
+            k = part.casefold()
+            if k in keys:
+                out[k] = max(out.get(k, 0), r["ts"])
+                break
+    return out
+
+
+def stalled_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, int]:
+    """Running tasks whose client has been silent MINDER_STALLED: id -> silent since.
+
+    Silent since is the client's last request, or the pickup when there is
+    none after it. A task picked up less than MINDER_STALLED ago is never
+    stalled, so a fresh dispatch is not flagged before the ingest catches up.
+    """
+    cutoff = now_ts - MINDER_STALLED * 60
+    rows = conn.execute(
+        """SELECT t.id, t.assigned_to, t.picked_up_at, MAX(p.created_at) last_park
+           FROM tasks t LEFT JOIN task_parks p ON p.task_id = t.id
+           WHERE t.state='open' AND t.picked_up_at IS NOT NULL AND t.picked_up_at <= ?
+           GROUP BY t.id""", (cutoff,)).fetchall()
+    if not rows:
+        return {}
+    seen = client_last_seen(conn, min(r["picked_up_at"] for r in rows))
+    out = {}
+    for r in rows:
+        if _open_status(r["last_park"], r["picked_up_at"]) != "running":
+            continue
+        last = max(seen.get((r["assigned_to"] or "").casefold(), 0), r["picked_up_at"])
+        if last <= cutoff:
+            out[r["id"]] = last
+    return out
+
+
 def client_keys(conn: sqlite3.Connection) -> set[str]:
     """Casefolded client keys: the wired list plus every assignee on the board."""
     from . import hours  # hours imports nothing of store's; keep it that way
@@ -290,13 +338,17 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
     # context since the client announced the park. If the board does not carry
     # that, the announcement was the only record of it and a lost message means
     # the task sits open forever. Which is the bug parking existed to fix.
+    # Open tasks first: the cap is for old failures. Ordered by age alone, a
+    # backlog of 50 failures pushed every new open task off the list and the
+    # master could not see work it had created.
+    stalled = stalled_tasks(conn, now())
     live = []
     for r in conn.execute(
         """SELECT t.id, t.kind, t.title, t.state, t.assigned_to,
                   MAX(p.created_at) last_park, t.picked_up_at
            FROM tasks t LEFT JOIN task_parks p ON p.task_id = t.id
            WHERE t.state IN ('open','failed')
-           GROUP BY t.id ORDER BY t.created_at LIMIT 50"""
+           GROUP BY t.id ORDER BY t.state = 'failed', t.created_at LIMIT 50"""
     ):
         d = dict(r)
         status = _open_status(d.pop("last_park"), d.pop("picked_up_at"))
@@ -304,6 +356,8 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
             d["awaiting_redispatch"] = True
         elif d["state"] == "open" and status == "running":
             d["picked_up"] = True
+            if d["id"] in stalled:
+                d["stalled"] = True
         live.append(d)
     open_intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
     # Done is not finished when the result named next steps. Without this the
@@ -554,6 +608,7 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
     waiting: list[dict[str, Any]] = []
     recent: list[dict[str, Any]] = []
     acknowledged: list[dict[str, Any]] = []
+    stalled = stalled_tasks(conn, t)
     # A failure the master has recorded a decision on since it failed has been
     # dealt with: retried, superseded or dropped. Without this every failure
     # sat in Needs you forever, since a failed task never changes state again.
@@ -583,6 +638,13 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
             if status == "parked":
                 d["note"] = f"parked {r['parks']}x, awaiting re-dispatch"
                 d["parked"] = True
+                master_owes.append(d)
+            elif r["id"] in stalled:
+                # Picked up, then the client went quiet: not running, and
+                # nobody is going to finish it unless the master looks.
+                d["note"] = (f"stalled · {d['client']} silent {(t - stalled[r['id']]) // 60} min; "
+                             "check get_session, then re-dispatch")
+                d["stalled"] = True
                 master_owes.append(d)
             elif status == "running":
                 d["since"] = r["picked_up_at"]
@@ -639,7 +701,7 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
 
 # A client's standing on the fleet strip, worst first. Running beats parked:
 # a client with one task going and one parked shows as working.
-FLEET_STATES = ("running", "parked", "failed", "waiting", "idle")
+FLEET_STATES = ("running", "stalled", "parked", "failed", "waiting", "idle")
 
 
 def activity(conn: sqlite3.Connection, hours: int = 24, limit: int = 200) -> list[dict[str, Any]]:
@@ -676,15 +738,16 @@ def fleet(conn: sqlite3.Connection, v: dict[str, Any], clients: tuple[str, ...] 
     for c in names:
         mine = lambda key: [d for d in v.get(key, []) if d.get("client") == c]  # noqa: E731
         parked = [d for d in mine("master_owes") if d.get("parked")]
+        stalled = [d for d in mine("master_owes") if d.get("stalled")]
         failed = [d for d in mine("needs_you") if d.get("failed")]
         needs = [d for d in mine("needs_you") if t - d["since"] <= 7 * 86400]
         done = [d for d in mine("recent") if t - d["since"] <= hours * 3600]
         running, waiting = mine("running"), mine("waiting")
-        state = ("running" if running else "parked" if parked else "failed" if failed
+        state = ("running" if running else "stalled" if stalled else "parked" if parked else "failed" if failed
                  else "waiting" if waiting else "idle")
         rows.append({"client": c, "state": state, "running": len(running), "waiting": len(waiting),
-                     "parked": len(parked), "failed": len(failed), "needs": len(needs), "done": len(done),
-                     "last": last.get(c), "task": (running or parked or waiting or [{}])[0].get("title", "")})
+                     "parked": len(parked), "stalled": len(stalled), "failed": len(failed), "needs": len(needs), "done": len(done),
+                     "last": last.get(c), "task": (running or stalled or parked or waiting or [{}])[0].get("title", "")})
     return rows
 
 
@@ -1545,6 +1608,7 @@ def _env_minutes(name: str, default: int) -> int:
 MINDER_ENABLED = os.environ.get("COORD_MINDER", "on").strip().lower() not in ("off", "0", "false", "no")
 MINDER_PARKED = _env_minutes("PARKED", 10)            # parked, awaiting re-dispatch
 MINDER_UNDELIVERED = _env_minutes("UNDELIVERED", 15)  # open, never picked up, never parked
+MINDER_STALLED = _env_minutes("STALLED", 20)          # picked up, client session silent since
 MINDER_UNREAD = _env_minutes("UNREAD", 10)            # done or failed, no lead read since
 MINDER_LOOSE = _env_minutes("LOOSE", 30)              # open client follow-up with no child task still going
 MINDER_FAILED = _env_minutes("FAILED", 30)            # failed, no decision since
@@ -1553,20 +1617,6 @@ MINDER_HOLD = _env_minutes("HOLD", 7 * 24 * 60)       # undelivered with a decis
 MINDER_EVERY = _env_minutes("EVERY", 30)              # same owed list again: at most one per this
 MINDER_SOON = _env_minutes("SOON", 5)                 # owed list changed: this after master took the last
 MINDER_IDS = 5                                        # ids listed per condition; the rest is a count
-
-
-def client_last_seen(conn: sqlite3.Connection, since: int) -> dict[str, int]:
-    """Client -> the last time it did anything after `since`: a task event,
-    or a request from a session in its folder (a turn that moved no task,
-    such as the self-clear before a review)."""
-    from . import hours
-    keys = hours._clients(conn)
-    last = {r[0]: r[1] for r in conn.execute(
-        "SELECT client, MAX(ts) FROM task_events WHERE client IS NOT NULL AND ts > ? GROUP BY client", (since,))}
-    for r in conn.execute("SELECT cwd, MAX(ts) FROM requests WHERE ts > ? GROUP BY cwd", (since,)):
-        if (c := hours.client_of(r[0], keys)):
-            last[c] = max(last.get(c, 0), r[1])
-    return last
 
 
 def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any]]:
@@ -1588,14 +1638,19 @@ def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any
     busy = {r[0] for r in conn.execute(
         """SELECT DISTINCT t.assigned_to FROM tasks t WHERE t.state='open' AND t.assigned_to IS NOT NULL
              AND (t.picked_up_at IS NOT NULL OR EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id))""")}
+    # Active is any request from the client's folder (a turn that moved no
+    # task, such as the self-clear before a review) or a task event.
     seen = client_last_seen(conn, now_ts - MINDER_HOLD * 60)
+    for r in conn.execute("SELECT client, MAX(ts) FROM task_events WHERE client IS NOT NULL AND ts > ? "
+                          "GROUP BY client", (now_ts - MINDER_HOLD * 60,)):
+        seen[r[0].casefold()] = max(seen.get(r[0].casefold(), 0), r[1])
     out = {}
     for r in conn.execute(
         """SELECT t.id task_id, t.assigned_to, d.id, d.statement, MAX(d.created_at) created_at
            FROM tasks t JOIN decisions d ON d.task_id = t.id
            WHERE t.state='open' AND t.picked_up_at IS NULL AND d.created_at > ?
            GROUP BY t.id""", (now_ts - MINDER_HOLD * 60,)):
-        last = seen.get(r["assigned_to"] or "")
+        last = seen.get((r["assigned_to"] or "").casefold())
         free = (r["assigned_to"] not in busy and last is not None
                 and r["created_at"] < last <= now_ts - MINDER_UNDELIVERED * 60)
         if not free:
@@ -1616,6 +1671,7 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
              AND NOT EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id)
            ORDER BY t.created_at""", (now_ts - MINDER_UNDELIVERED * 60,))
         if r["id"] not in held and r["id"] not in waiting]
+    stalled = list(stalled_tasks(conn, now_ts))
     # A decision on the task or a child task since it finished is the master
     # acting on the result, whether or not it fetched the result itself.
     unread = [r["id"] for r in conn.execute(
@@ -1659,12 +1715,14 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     from . import queue
     undrafted = queue.undrafted(conn, now_ts, MINDER_UNREAD * 60)
     pipeline = queue.pipeline_owed(conn, now_ts)
-    return {"parked": parked, "undelivered": undelivered, "unread": unread, "loose": loose,
+    return {"parked": parked, "stalled": stalled, "undelivered": undelivered, "unread": unread, "loose": loose,
             "failed": failed, "intents": intents, "unreviewed": unreviewed,
             "undrafted": undrafted, "pipeline": pipeline}
 
 
-_MINDER_LABELS = (("parked", "parked awaiting re-dispatch"), ("undelivered", "never delivered"),
+_MINDER_LABELS = (("parked", "parked awaiting re-dispatch"),
+                  ("stalled", "picked up but the client session went silent (get_session; if idle, re-dispatch)"),
+                  ("undelivered", "never delivered"),
                   ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids)"),
                   ("failed", "failed with no decision"), ("intents", "open intents"),
                   ("unreviewed", "client deliverables with no dod_review (CVC code, emails)"),
