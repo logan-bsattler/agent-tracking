@@ -569,6 +569,7 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
            GROUP BY t.id ORDER BY COALESCE(t.completed_at, t.created_at) DESC""",
         (t - recent_h * 3600,),
     )
+    held = held_tasks(conn, t)
     for r in rows:
         d = {"id": r["id"], "kind": r["kind"], "title": r["title"], "client": r["assigned_to"] or "—",
              "since": r["completed_at"] or r["created_at"]}
@@ -587,12 +588,8 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
                 d["since"] = r["picked_up_at"]
                 running.append(d)
             else:
-                # Held the way the minder reads it: a decision on the task
-                # within MINDER_HOLD is master keeping it back on purpose.
-                hold = conn.execute(
-                    "SELECT id, statement FROM decisions WHERE task_id=? AND created_at > ? "
-                    "ORDER BY created_at DESC LIMIT 1", (r["id"], t - MINDER_HOLD * 60)).fetchone()
-                if hold:
+                # Held the way the minder reads it (held_tasks()).
+                if (hold := held.get(r["id"])):
                     d["held"] = True
                     d["note"] = f"held · {hold['statement']} ({hold['id']})"
                 else:
@@ -1558,20 +1555,67 @@ MINDER_SOON = _env_minutes("SOON", 5)                 # owed list changed: this 
 MINDER_IDS = 5                                        # ids listed per condition; the rest is a count
 
 
+def client_last_seen(conn: sqlite3.Connection, since: int) -> dict[str, int]:
+    """Client -> the last time it did anything after `since`: a task event,
+    or a request from a session in its folder (a turn that moved no task,
+    such as the self-clear before a review)."""
+    from . import hours
+    keys = hours._clients(conn)
+    last = {r[0]: r[1] for r in conn.execute(
+        "SELECT client, MAX(ts) FROM task_events WHERE client IS NOT NULL AND ts > ? GROUP BY client", (since,))}
+    for r in conn.execute("SELECT cwd, MAX(ts) FROM requests WHERE ts > ? GROUP BY cwd", (since,)):
+        if (c := hours.client_of(r[0], keys)):
+            last[c] = max(last.get(c, 0), r[1])
+    return last
+
+
+def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any]]:
+    """Undelivered open tasks master is keeping back on purpose: task id -> its
+    newest decision.
+
+    A decision on an undelivered task within MINDER_HOLD is a hold (waiting on
+    a refresh, an access grant, the task ahead of it). A week, not hours:
+    holds wait on people outside the board, and a 12 h window had master
+    restating the same hold, and asking Ben, every day.
+
+    A hold lapses early once its client has gone free after it: active since
+    the decision, then quiet for MINDER_UNDELIVERED with nothing running or
+    parked. Many holds are "after X finishes" or "once the client has
+    cleared", and the client that finishes X cannot wake master by itself
+    (a self-clear has no turn left to announce in). Restating a hold that
+    still stands quiets it until the client next goes free.
+    """
+    busy = {r[0] for r in conn.execute(
+        """SELECT DISTINCT t.assigned_to FROM tasks t WHERE t.state='open' AND t.assigned_to IS NOT NULL
+             AND (t.picked_up_at IS NOT NULL OR EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id))""")}
+    seen = client_last_seen(conn, now_ts - MINDER_HOLD * 60)
+    out = {}
+    for r in conn.execute(
+        """SELECT t.id task_id, t.assigned_to, d.id, d.statement, MAX(d.created_at) created_at
+           FROM tasks t JOIN decisions d ON d.task_id = t.id
+           WHERE t.state='open' AND t.picked_up_at IS NULL AND d.created_at > ?
+           GROUP BY t.id""", (now_ts - MINDER_HOLD * 60,)):
+        last = seen.get(r["assigned_to"] or "")
+        free = (r["assigned_to"] not in busy and last is not None
+                and r["created_at"] < last <= now_ts - MINDER_UNDELIVERED * 60)
+        if not free:
+            out[r["task_id"]] = {"id": r["id"], "statement": r["statement"], "created_at": r["created_at"]}
+    return out
+
+
 def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     """Ids per condition, each past its threshold. Empty lists mean nothing owed."""
     parked = [d["id"] for d in parked_tasks(conn) if d["parked_at"] <= now_ts - MINDER_PARKED * 60]
-    # A recent decision on an undelivered task is master holding it on purpose
-    # (waiting on a refresh, an access grant). It comes back once the decision
-    # is MINDER_HOLD old, so a hold nobody restates is not forgotten either.
-    # A week, not hours: holds wait on people outside the board, and a 12 h
-    # window had master restating the same hold, and asking Ben, every day.
+    # A held task is not owed (held_tasks()), nor one with a wait on the board
+    # that still holds (task_deps): its blocker going done is the signal.
+    held = held_tasks(conn, now_ts)
+    waiting = waiting_on(conn)
     undelivered = [r["id"] for r in conn.execute(
         """SELECT t.id FROM tasks t
            WHERE t.state='open' AND t.picked_up_at IS NULL AND t.created_at <= ?
              AND NOT EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id)
-             AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.task_id = t.id AND d.created_at > ?)
-           ORDER BY t.created_at""", (now_ts - MINDER_UNDELIVERED * 60, now_ts - MINDER_HOLD * 60))]
+           ORDER BY t.created_at""", (now_ts - MINDER_UNDELIVERED * 60,))
+        if r["id"] not in held and r["id"] not in waiting]
     # A decision on the task or a child task since it finished is the master
     # acting on the result, whether or not it fetched the result itself.
     unread = [r["id"] for r in conn.execute(

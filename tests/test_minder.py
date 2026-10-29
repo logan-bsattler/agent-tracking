@@ -85,6 +85,50 @@ def test_held_task_is_quiet_until_the_hold_ages(conn):
     assert r["fired"] and r["owed"]["undelivered"] == [tid]
 
 
+def _request(conn, client, ts):
+    """A turn in the client's Local session that moved no task (a self-clear)."""
+    conn.execute("INSERT INTO requests(request_id, ts, session_id, cwd, model) VALUES (?,?,?,?,?)",
+                 (f"r{ts}{client}", ts, f"s-{client}",
+                  rf"C:\Users\b\OneDrive - Logan Consulting\Documents\{client}", "m"))
+
+
+def test_a_hold_lapses_once_the_client_goes_free_after_it(conn):
+    # "Dispatch once MAG has cleared": MAG's clear turn comes after the hold,
+    # then nothing. The clear has no turn left to announce in, so the minder
+    # is what wakes master.
+    tid = _task(conn, "MAG")
+    store.record_decision(conn, "dispatch once MAG has cleared", task_id=tid)
+    _request(conn, "MAG", now() + 1)
+    assert _fires(conn, store.MINDER_UNDELIVERED - 1)["reason"] == "nothing owed"
+    r = _fires(conn, store.MINDER_UNDELIVERED + 2)
+    assert r["fired"] and r["owed"]["undelivered"] == [tid]
+
+
+def test_a_hold_stands_while_the_client_is_busy_or_quiet_since(conn):
+    held = _task(conn, "Royal")
+    other = _task(conn, "Royal")
+    store.get_task(conn, other, reader="Royal")  # running: Royal is not free
+    store.record_decision(conn, "hold until DEVL refresh", task_id=held)
+    _request(conn, "Royal", now() + 1)
+    assert _fires(conn, store.MINDER_UNDELIVERED + 2)["reason"] == "nothing owed"
+    store.complete_task(conn, other, INV)  # free now, and active since the hold
+    conn.execute("UPDATE task_events SET ts = ? WHERE task_id = ?", (now() + 2, other))
+    store.get_task_result(conn, other, ["verdict"], reader="agents")
+    r = _fires(conn, store.MINDER_UNDELIVERED + 3)
+    assert r["fired"] and r["owed"]["undelivered"] == [held]
+    # Master restates the hold: quiet again until Royal next does something.
+    store.record_decision(conn, "still holding: no refresh yet", task_id=held)
+    conn.execute("UPDATE decisions SET created_at = ? WHERE task_id = ?", (now() + 4, held))
+    assert _fires(conn, store.MINDER_UNDELIVERED + 10)["owed"]["undelivered"] == []
+
+
+def test_a_task_waiting_on_an_open_blocker_is_not_undelivered(conn):
+    first = _task(conn, "LNK", "first")
+    second = _task(conn, "LNK", "second")
+    store.add_dep(conn, second, first)
+    assert _fires(conn, store.MINDER_UNDELIVERED + 1)["owed"]["undelivered"] == [first]
+
+
 def test_board_shows_a_held_task_as_held_with_its_decision(conn):
     held = _task(conn, "Royal", "re-verify after refresh")
     plain = _task(conn, "LNK", "never sent")
