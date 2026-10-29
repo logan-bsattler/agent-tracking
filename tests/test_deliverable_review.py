@@ -161,6 +161,26 @@ def test_promote_carries_the_workbook_behind_an_html_deliverable(conn, tmp_path)
     assert any("with sizing-v1.xlsx" in d["statement"] for d in store.get_decisions(conn, tid))
 
 
+def test_promote_takes_both_files_a_result_path_names(conn, tmp_path):
+    """'page.html ; book.xlsx (notes)': both listed, the workbook under its own
+    name, promoted beside the page under the page's name."""
+    work = tmp_path / "MAG" / "work"
+    work.mkdir(parents=True)
+    (work / "Plan-Timeline.html").write_text("<p>t</p>", encoding="utf-8")
+    (work / "Plan-Breakdown.xlsx").write_bytes(b"PK")
+    tid = store.create_task(conn, "deliverable", "Timeline", {"q": "x"}, assigned_to="MAG")["task_id"]
+    store.complete_task(conn, tid, {"done": True, "summary": "s", "dod_path": "dod/t.md",
+                                    "path": "work/Plan-Timeline.html ; work/Plan-Breakdown.xlsx (build: work/b.py)",
+                                    "deliverable_type": "timeline", "self_check": CHECK})
+    files = {d["name"]: d["exists"] for d in store.deliverables(conn, root=tmp_path)["files"] if d["task_id"] == tid}
+    assert files == {"Plan-Timeline.html": True, "Plan-Breakdown.xlsx": True}
+    _review(conn, tid)
+    r = store.promote(conn, tid, root=tmp_path)
+    out = tmp_path / "MAG" / "deliverables"
+    assert r["dest"] == str(out / "Plan-Timeline-v1.html")
+    assert (out / "Plan-Timeline-v1.xlsx").read_bytes() == b"PK"
+
+
 def test_create_warns_when_a_deliverable_names_no_format(conn):
     warn = lambda spec: [w for w in store.create_task(conn, "deliverable", "t", spec, assigned_to="MAG",
                                                       pipeline_task_id="SP-1").get("warnings", [])]

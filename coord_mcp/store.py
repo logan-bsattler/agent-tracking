@@ -767,10 +767,11 @@ def _clean_path(raw: str) -> str:
 
 
 def _split_paths(raw: str) -> list[str]:
-    """One pointer can name several files: 'a.csv / .md', 'dir/a.md, b.csv'.
-    A bare extension reuses the previous stem; a bare name its directory."""
+    """One pointer can name several files: 'a.csv / .md', 'dir/a.md, b.csv',
+    'a.html ; b.xlsx'. A bare extension reuses the previous stem; a bare name
+    its directory."""
     out: list[str] = []
-    for tok in re.split(r"\s*,\s+|\s+[\/|]\s+", _clean_path(raw)):
+    for tok in re.split(r"\s*[,;]\s+|\s+[\/|]\s+", _clean_path(raw)):
         tok = tok.strip()
         if not tok or "*" in tok:
             continue
@@ -920,13 +921,20 @@ def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None) ->
     folder = root / (client or "")
     if not client or not folder.is_dir():
         raise ValueError(f"no client folder for {client!r} under {root}")
-    src = _resolve(_clean_path(json.loads(r["result"])["path"]), client, root)
+    # 'page.html ; book.xlsx' names both files: the page is the deliverable.
+    named = [_resolve(p, client, root) for p in _split_paths(json.loads(r["result"])["path"])]
+    if not named:
+        raise ValueError("its result names no file")
+    src = next((p for p in named if p.suffix.lower() in (".html", ".htm")), named[0])
     if not src.is_file():
         raise ValueError(f"{src} is not on disk")
     if contracts.MARKDOWN.search(src.name):
         raise ValueError(f"{src.name} is Markdown: {contracts.FORMAT_RULE}. Revise it before promoting")
-    # The workbook an HTML deliverable is backed by travels with it.
-    book = next((b for b in (src.with_suffix(x) for x in (".xlsx", ".xlsm")) if b.is_file()), None)         if src.suffix.lower() in (".html", ".htm") else None
+    # The workbook an HTML deliverable is backed by travels with it, under the
+    # page's name: the one the result names, else the page's namesake.
+    book = next((b for b in [p for p in named if p.suffix.lower() in (".xlsx", ".xlsm")]
+                 + [src.with_suffix(x) for x in (".xlsx", ".xlsm")] if b.is_file()), None) \
+        if src.suffix.lower() in (".html", ".htm") else None
     for f in [src] + ([book] if book else []):
         if int(f.stat().st_mtime) > rev["completed_at"]:
             raise ValueError(f"{f.name} changed after review {rev['id']} approved it; review it again")
