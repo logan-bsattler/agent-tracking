@@ -13,7 +13,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from . import contracts
-from .db import ensure_deps, ensure_promotions, now
+from .db import ensure_deps, ensure_prompt_taker, ensure_promotions, now
 
 
 def _id() -> str:
@@ -1554,37 +1554,92 @@ DESK_ACTIONS = frozenset({"next", "answer", "batch"})
 DESK_STALE = 60
 
 
+# The worker's poll runs inside its own process, and that process is gone
+# after a self-clear or a long idle: nothing then takes its prompts until
+# something outside wakes it. Its polls are recorded as worker_seen, and the
+# desk, which is always open, asks claim_worker_wake each tick and wakes the
+# worker when its oldest prompt has waited WAKE_AFTER with no poll in
+# WORKER_STALE. One wake per WAKE_EVERY, so a wake still starting the worker
+# is not sent again.
+WORKER_STALE = 30  # three missed 10s polls
+WAKE_AFTER = 60
+WAKE_EVERY = 120
+
+
+def _mark(conn: sqlite3.Connection, key: str, t: int) -> None:
+    conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(t)))
+
+
+def _seen_at(conn: sqlite3.Connection, key: str) -> int | None:
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return int(r["value"]) if r else None
+
+
 def desk_live(conn: sqlite3.Connection, t: int | None = None) -> bool:
-    r = conn.execute("SELECT value FROM meta WHERE key='desk_seen'").fetchone()
-    return bool(r) and int(r["value"]) >= (now() if t is None else t) - DESK_STALE
+    seen = _seen_at(conn, "desk_seen")
+    return seen is not None and seen >= (now() if t is None else t) - DESK_STALE
+
+
+def worker_live(conn: sqlite3.Connection, t: int | None = None) -> bool:
+    seen = _seen_at(conn, "worker_seen")
+    return seen is not None and seen >= (now() if t is None else t) - WORKER_STALE
+
+
+def _takes(conn: sqlite3.Connection, taker: str, t: int) -> tuple[str, list[str]]:
+    """The WHERE clause for the prompts `taker` may take now."""
+    desk = sorted(DESK_ACTIONS)
+    marks = ",".join("?" * len(desk))
+    if taker == DESK:
+        return f"AND action IN ({marks})", desk
+    if desk_live(conn, t):
+        return f"AND action NOT IN ({marks})", desk
+    return "", []
 
 
 def take_operator_prompt(conn: sqlite3.Connection, taker: str = "master") -> dict[str, Any] | None:
     """Claim the oldest live queued prompt for `taker`, or None. Stale ones are dropped.
 
     taker "desk" takes DESK_ACTIONS only and marks the desk live; "master"
-    takes the rest, and DESK_ACTIONS too while no desk is live."""
+    takes the rest, and DESK_ACTIONS too while no desk is live, and marks the
+    worker live."""
     t = now()
+    ensure_prompt_taker(conn)
     conn.execute("UPDATE operator_prompts SET taken_at = -1 WHERE taken_at IS NULL AND created_at < ?",
                  (t - PROMPT_TTL,))
-    desk = sorted(DESK_ACTIONS)
-    marks = ",".join("?" * len(desk))
-    if taker == DESK:
-        conn.execute("INSERT INTO meta(key, value) VALUES ('desk_seen', ?) "
-                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(t),))
-        where, args = f"AND action IN ({marks})", desk
-    elif desk_live(conn, t):
-        where, args = f"AND action NOT IN ({marks})", desk
-    else:
-        where, args = "", []
+    _mark(conn, "desk_seen" if taker == DESK else "worker_seen", t)
+    where, args = _takes(conn, taker, t)
     r = conn.execute("SELECT id, action, task_id, text FROM operator_prompts WHERE taken_at IS NULL "
                      f"{where} ORDER BY created_at, id LIMIT 1", args).fetchone()
     if r is None:
         return None
-    if conn.execute("UPDATE operator_prompts SET taken_at = ? WHERE id = ? AND taken_at IS NULL",
-                    (t, r["id"])).rowcount != 1:
+    if conn.execute("UPDATE operator_prompts SET taken_at = ?, taker = ? WHERE id = ? AND taken_at IS NULL",
+                    (t, DESK if taker == DESK else "master", r["id"])).rowcount != 1:
         return None  # another taker won it
     return dict(r)
+
+
+def claim_worker_wake(conn: sqlite3.Connection, t: int | None = None) -> dict[str, Any] | None:
+    """Whether the desk should wake the worker now, claiming the wake if so.
+
+    {"id", "action", "waited"} for the oldest prompt the worker would take,
+    when it has waited WAKE_AFTER seconds, the worker has not polled in
+    WORKER_STALE, and no wake was claimed in the last WAKE_EVERY. Else None.
+    The wake carries no prompt: the worker's own poll takes it once awake."""
+    t = now() if t is None else t
+    if worker_live(conn, t):
+        return None
+    woken = _seen_at(conn, "worker_woken")
+    if woken is not None and woken > t - WAKE_EVERY:
+        return None
+    where, args = _takes(conn, "master", t)
+    r = conn.execute("SELECT id, action, created_at FROM operator_prompts WHERE taken_at IS NULL "
+                     f"AND created_at >= ? AND created_at <= ? {where} ORDER BY created_at, id LIMIT 1",
+                     [t - PROMPT_TTL, t - WAKE_AFTER, *args]).fetchone()
+    if r is None:
+        return None
+    _mark(conn, "worker_woken", t)
+    return {"id": r["id"], "action": r["action"], "waited": t - r["created_at"]}
 
 
 def queued_operator_prompts(conn: sqlite3.Connection) -> int:

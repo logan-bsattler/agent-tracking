@@ -2265,6 +2265,9 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     taker = (form.get("taker") or ["master"])[0]
                     self._json(200, {"prompt": store.take_operator_prompt(conn, taker)})
                     return
+                if path == "/api/worker/wake":  # the desk's tick: should it wake the worker?
+                    self._json(200, {"wake": store.claim_worker_wake(conn)})
+                    return
                 if path == "/api/question/close":  # the band answered it in chat
                     self._json(200, {"closed": store.close_question(conn, (form.get("question") or [None])[0])})
                     return

@@ -307,6 +307,14 @@ CREATE INDEX IF NOT EXISTS promotions_task ON promotions(task_id);
 """
 
 
+def ensure_prompt_taker(conn: sqlite3.Connection) -> None:
+    """Add operator_prompts.taker (who took it: master, desk, or NULL from
+    before the column) on first use, for the same reason as task_deps: no
+    SCHEMA_VERSION bump while older servers are still running."""
+    if "taker" not in {r[1] for r in conn.execute("PRAGMA table_info(operator_prompts)")}:
+        conn.execute("ALTER TABLE operator_prompts ADD COLUMN taker TEXT")
+
+
 def ensure_promotions(conn: sqlite3.Connection) -> None:
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='promotions'").fetchone() is None:
         conn.executescript(PROMOTIONS_DDL)

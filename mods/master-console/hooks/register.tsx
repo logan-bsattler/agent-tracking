@@ -28,6 +28,14 @@ import type { Parked, Question } from '../types'
 //    of running in the desk. With no desk open the worker takes everything.
 //    The band shows in the desk only (Ben, 2026-10-28): the worker still takes
 //    queued prompts and auto-clears, but Ben clicks from the desk.
+// 5. Wake. The worker's poll runs in its own process, which is gone after a
+//    self-clear or a long idle, so its queued prompts waited for an outside
+//    message (3-26 min by day, most of the night's minder prompts expired).
+//    The desk's tick asks the board whether a worker prompt has waited 60s
+//    with no worker poll and, if so, sends the worker WAKE_MARK through the
+//    app's send_message. That starts the worker's process; its mod drops the
+//    message (no turn) and its own poll takes the prompt as Ben's, as always.
+//    Off unless COORD_WORKER_WAKE names the worker's session id.
 // Master and desk only: client sessions load the mod and it does nothing there.
 
 const DASH = 'http://127.0.0.1:8765'
@@ -38,6 +46,7 @@ const MASTER_ROOT = /^c:[\\/]development[\\/]agents[\\/]?$/i
 const DESK_ROOT = /^c:[\\/]development[\\/]agents[\\/]desk[\\/]?$/i
 const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' }
 const MAX_BUTTONS = 5
+const WAKE_MARK = 'master-console wake:'
 const FALLBACK: Record<string, string> = {
   next: 'Next question: rebuild my queue from coord_board and present its head.',
   board: 'Board check: run coord_board, dispatch whatever an agent can do (loose ends, ' +
@@ -60,13 +69,23 @@ export const register: Register = on => {
   let busy = false
   let ctx = 0
   let clearAt = 120000
+  let wakeTo = ''  // the worker's session id, desk only; empty is off
   let refresh: () => Promise<void> = async () => {}
-
-  on('session.start', async ($, e, next) => {
+  // The role, resolved once by whichever hook runs first. A prompt that wakes
+  // a dead worker can reach prompt.submit before session.start has run: with
+  // the role unknown there, busy stayed false and the poll submitted a queued
+  // prompt into the running turn.
+  let role: Promise<void> | undefined
+  const resolve = ($: { session: { root: () => Promise<string> } }) => role ??= (async () => {
     const root = await $.session.root()
     isMaster = MASTER_ROOT.test(root)
     isDesk = DESK_ROOT.test(root)
+  })()
+
+  on('session.start', async ($, e, next) => {
+    await resolve($)
     if (!isMaster && !isDesk) return next(e)
+    if (isDesk) wakeTo = (await $.env.get('COORD_WORKER_WAKE'))?.trim() ?? ''
     clearAt = numOr(await $.env.get('COORD_MASTER_CLEAR'), 120000)
     ctx = (await $.session.usage()).context.tokens ?? 0
     refresh = async () => {
@@ -81,10 +100,31 @@ export const register: Register = on => {
         if (body.actions) await update($, actions, () => ({ ...FALLBACK, ...body.actions }))
       } catch { /* dashboard down: keep the last list; the band still has Next and Board */ }
     }
+    // Desk only: wake the worker when the board says its prompt is stuck.
+    const wake = async () => {
+      try {
+        const r = await $.http.fetch(`${DASH}/api/worker/wake`, { method: 'POST', headers: FORM, body: '' })
+        if (!r.ok) return
+        const w = (JSON.parse(r.text) as { wake: { id: number; action: string; waited: number } | null }).wake
+        if (!w) return
+        const sent = await $.mcp.call('ccd_session_mgmt', 'send_message', {
+          session_id: wakeTo,
+          message: `${WAKE_MARK} queued prompt ${w.id} (${w.action}) has waited ${w.waited}s ` +
+            'and your poll is not running. No action needed: the mod takes it once you are up.',
+        })
+        const text = sent.content.map(b => b.text ?? '').join(' ')
+        if (sent.isError || !/delivery: (delivered|queued)/.test(text)) {
+          $.ui.toast(`Worker wake not delivered: ${text.slice(0, 160)}`)
+        }
+      } catch (err) {
+        $.ui.toast(`Worker wake failed: ${String(err).slice(0, 160)}`)
+      }
+    }
     await refresh()
     $.clock.every(10_000, () => {
       void (async () => {
         await refresh()  // ~20 ms; a question master just presented shows within 10s
+        if (wakeTo) await wake()
         if (busy) return
         try {
           const r = await $.http.fetch(`${DASH}/api/prompts/take`, {
@@ -107,8 +147,18 @@ export const register: Register = on => {
     return next(e)
   })
 
+  on('session.receive', async ($, e, next) => {
+    await resolve($)
+    if (isMaster && e.text.includes(WAKE_MARK)) return { consumed: 'master-console wake' }
+    return next(e)
+  })
+
   on('prompt.submit', async ($, e, next) => {
+    await resolve($)
     if (!isMaster && !isDesk) return next(e)
+    // The desk's wake: starting this process was its whole job, and the poll
+    // takes the queued prompt within 10s. No turn, so busy stays clear.
+    if (isMaster && e.text.includes(WAKE_MARK)) return { drop: 'master-console: woken; queued prompt follows' }
     busy = true
     if (isDesk || ctx < clearAt) return next(e)  // Ben clears the desk himself
     const note = `master-console AUTO-CLEAR: context is ${k(ctx)}, over the ${k(clearAt)} threshold. ` +
@@ -119,6 +169,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    await resolve($)
     if (e.agentId || (!isMaster && !isDesk)) return next(e)
     busy = false
     await refresh()  // the turn may have presented a question

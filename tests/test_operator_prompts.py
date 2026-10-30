@@ -251,3 +251,109 @@ def test_desk_reads_leave_result_unread_for_the_minder(conn):
     assert conn.execute("SELECT result_read_at FROM tasks WHERE id=?", (tid,)).fetchone()[0] is None
     store.get_task_result(conn, tid, ["verdict"], reader="agents")
     assert conn.execute("SELECT result_read_at FROM tasks WHERE id=?", (tid,)).fetchone()[0] is not None
+
+
+# ------------------------------------------------------------ waking the worker
+
+
+def _age(conn, pid, seconds):
+    conn.execute("UPDATE operator_prompts SET created_at = ? WHERE id = ?", (store.now() - seconds, pid))
+
+
+def _meta(conn, key, value):
+    conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+
+def test_takes_record_who_took_and_when_each_side_last_polled(conn):
+    store.queue_operator_prompt(conn, "board")
+    assert not store.worker_live(conn)
+    store.take_operator_prompt(conn, "desk")
+    assert not store.worker_live(conn)  # the desk's poll is not the worker's
+    p = store.take_operator_prompt(conn)
+    assert store.worker_live(conn) and store.desk_live(conn)
+    assert conn.execute("SELECT taker FROM operator_prompts WHERE id=?", (p["id"],)).fetchone()[0] == "master"
+    store.queue_operator_prompt(conn, "next")
+    p = store.take_operator_prompt(conn, "desk")
+    assert conn.execute("SELECT taker FROM operator_prompts WHERE id=?", (p["id"],)).fetchone()[0] == "desk"
+
+
+def test_taker_column_is_added_to_a_board_from_before_it(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    connect(path).close()
+    raw = sqlite3.connect(str(path))
+    raw.execute("DROP TABLE operator_prompts")  # as the DDL had it before taker
+    raw.execute("CREATE TABLE operator_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, "
+                "task_id TEXT, text TEXT NOT NULL, created_at INTEGER NOT NULL, taken_at INTEGER)")
+    raw.commit()
+    raw.close()
+    c = connect(path)
+    store.queue_operator_prompt(c, "board")
+    assert store.take_operator_prompt(c)["action"] == "board"
+    assert c.execute("SELECT taker FROM operator_prompts").fetchone()[0] == "master"
+    c.close()
+
+
+def test_a_prompt_waiting_on_a_dead_worker_claims_one_wake(conn):
+    store.take_operator_prompt(conn, "desk")  # the desk asks, so it is live
+    pid = store.queue_operator_prompt(conn, "board")["id"]
+    assert store.claim_worker_wake(conn) is None  # not waited long enough
+    _age(conn, pid, store.WAKE_AFTER)
+    w = store.claim_worker_wake(conn)
+    assert w["id"] == pid and w["action"] == "board" and w["waited"] >= store.WAKE_AFTER
+    assert store.claim_worker_wake(conn) is None  # one wake per WAKE_EVERY
+    _meta(conn, "worker_woken", store.now() - store.WAKE_EVERY - 1)
+    assert store.claim_worker_wake(conn)["id"] == pid
+    assert conn.execute("SELECT taken_at FROM operator_prompts WHERE id=?", (pid,)).fetchone()[0] is None
+
+
+def test_no_wake_while_the_worker_polls_or_for_the_desks_own_prompts(conn):
+    store.take_operator_prompt(conn, "desk")
+    pid = store.queue_operator_prompt(conn, "next")["id"]  # the desk's to take
+    _age(conn, pid, store.WAKE_AFTER)
+    assert store.claim_worker_wake(conn) is None
+    pid = store.queue_operator_prompt(conn, "board")["id"]
+    _age(conn, pid, store.WAKE_AFTER)
+    _meta(conn, "worker_seen", store.now())
+    assert store.claim_worker_wake(conn) is None  # alive, just busy in a turn
+    _meta(conn, "worker_seen", store.now() - store.WORKER_STALE - 1)
+    assert store.claim_worker_wake(conn)["id"] == pid
+
+
+def test_no_wake_for_an_expired_prompt(conn):
+    pid = store.queue_operator_prompt(conn, "board")["id"]
+    _age(conn, pid, store.PROMPT_TTL + 1)
+    assert store.claim_worker_wake(conn) is None
+
+
+def test_wake_endpoint_answers_the_desks_tick(tmp_path, monkeypatch):
+    import functools
+    import json
+    import socket
+    import threading
+    import time
+    import urllib.request
+
+    from coord_mcp import usage
+
+    monkeypatch.setattr(usage, "ingest", lambda conn: None)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    make = functools.partial(connect, tmp_path / "srv.db")
+    c = make()
+    pid = store.queue_operator_prompt(c, "board")["id"]
+    _age(c, pid, store.WAKE_AFTER)
+    threading.Thread(target=report.serve, args=(make, port), daemon=True).start()
+    for _ in range(50):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    post = lambda: json.loads(urllib.request.urlopen(urllib.request.Request(  # noqa: E731
+        f"http://127.0.0.1:{port}/api/worker/wake", data=b""), timeout=10).read())["wake"]
+    assert post()["id"] == pid
+    assert post() is None
+    c.close()
