@@ -17,7 +17,7 @@ import type { Parked, Question } from '../types'
 //    and stored rows, so a page cannot write the prompt.
 // 3. Auto-clear. Fable fills context fast, and waiting on Ben's go left the
 //    master stalled at the limit. Over COORD_MASTER_CLEAR tokens (default
-//    120k) each prompt carries a note: finish the turn, record the handoff
+//    180k) each prompt carries a note: finish the turn, record the handoff
 //    decision, clear_session "self" last. coord-rules allows that clear once a
 //    decision was recorded in the same turn.
 // 4. Desk. Master runs as two sessions: the worker in the agents folder, and
@@ -68,7 +68,7 @@ export const register: Register = on => {
   let isDesk = false
   let busy = false
   let ctx = 0
-  let clearAt = 120000
+  let clearAt = 180000
   let wakeTo = ''  // the worker's session id, desk only; empty is off
   let refresh: () => Promise<void> = async () => {}
   // The role, resolved once by whichever hook runs first. A prompt that wakes
@@ -86,7 +86,7 @@ export const register: Register = on => {
     await resolve($)
     if (!isMaster && !isDesk) return next(e)
     if (isDesk) wakeTo = (await $.env.get('COORD_WORKER_WAKE'))?.trim() ?? ''
-    clearAt = numOr(await $.env.get('COORD_MASTER_CLEAR'), 120000)
+    clearAt = numOr(await $.env.get('COORD_MASTER_CLEAR'), 180000)
     ctx = (await $.session.usage()).context.tokens ?? 0
     refresh = async () => {
       try {
