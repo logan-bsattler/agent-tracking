@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 import type { Parked, Question } from '../types'
 
@@ -54,20 +54,25 @@ const question = atom({ plugin: 'master-console', key: 'question' } as const, nu
 const numOr = (v: string | undefined, d: number) => (v && Number.isFinite(Number(v)) ? Number(v) : d)
 const k = (n: number) => `${Math.round(n / 1000)}k`
 
-export const register: Register = on => {
-  let isMaster = false  // the worker
-  let isDesk = false
-  let busy = false
-  let tookAt = 'none'  // diagnostic: last prompt this process took
-  let ctx = 0
-  let clearAt = 180000
-  let refresh: () => Promise<void> = async () => {}
+let isMaster = false  // the worker
+let isDesk = false
+let busy = false
+let tookAt = 'none'  // diagnostic: last prompt this process took
+let ctx = 0
+let clearAt = 180000
+let refresh: () => Promise<void> = async () => {}
 
-  on('session.start', async ($, e, next) => {
+// Start-up, run once by whichever hook fires first (2026-11-01). Since
+// 10-30 neither master session ran its poll, as if session.start never
+// reached this mod, though coord-rules' tool.call hooks still ran. Any
+// hook now starts it, and a toast says it is polling.
+let started: Promise<void> | undefined
+function start($: EngineInterface): Promise<void> {
+  return started ??= (async () => {
     const root = await $.session.root()
     isMaster = MASTER_ROOT.test(root)
     isDesk = DESK_ROOT.test(root)
-    if (!isMaster && !isDesk) return next(e)
+    if (!isMaster && !isDesk) return
     clearAt = numOr(await $.env.get('COORD_MASTER_CLEAR'), 180000)
     ctx = (await $.session.usage()).context.tokens ?? 0
     refresh = async () => {
@@ -105,8 +110,13 @@ export const register: Register = on => {
         } catch { /* dashboard down: nothing queued reaches us, nothing lost */ }
       })()
     })
-    return next(e)
-  })
+    $.ui.toast(`master-console: ${isDesk ? 'desk' : 'worker'} polling for queued prompts`)
+  })()
+}
+
+export const register: Register = on => {
+  on('session.start', async ($, e, next) => { await start($); return next(e) })
+  on('tool.call', async ($, e, next) => { await start($); return next(e) })
 
   on('session.measure', async ($, e, next) => {
     if (isMaster) ctx = e.context.tokens ?? ctx
@@ -114,6 +124,7 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    await start($)
     if (!isMaster && !isDesk) return next(e)
     busy = true
     if (isDesk || ctx < clearAt) return next(e)  // Ben clears the desk himself
@@ -125,6 +136,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    await start($)
     if (e.agentId || (!isMaster && !isDesk)) return next(e)
     busy = false
     await refresh()  // the turn may have presented a question
