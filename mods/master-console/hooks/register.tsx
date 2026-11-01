@@ -58,6 +58,7 @@ export const register: Register = on => {
   let isMaster = false  // the worker
   let isDesk = false
   let busy = false
+  let tookAt = 'none'  // diagnostic: last prompt this process took
   let ctx = 0
   let clearAt = 180000
   let refresh: () => Promise<void> = async () => {}
@@ -85,6 +86,10 @@ export const register: Register = on => {
     $.clock.every(10_000, () => {
       void (async () => {
         await refresh()  // ~20 ms; a question master just presented shows within 10s
+        // Diagnostic (2026-11-01): since 10-30 neither session takes prompts.
+        // Shows whether this tick runs at all, and whether busy is what stops it.
+        const hhmm = () => new Date().toTimeString().slice(0, 5)
+        $.ui.status(`console ${isDesk ? 'desk' : 'worker'}: tick ${hhmm()}, ${busy ? 'busy' : 'idle'}, took ${tookAt}`)
         if (busy) return
         try {
           const r = await $.http.fetch(`${DASH}/api/prompts/take`, {
@@ -94,6 +99,7 @@ export const register: Register = on => {
           const p = (JSON.parse(r.text) as { prompt: { text: string } | null }).prompt
           if (p) {
             busy = true
+            tookAt = new Date().toTimeString().slice(0, 5)
             await $.prompt.submit({ text: p.text, asUser: true })
           }
         } catch { /* dashboard down: nothing queued reaches us, nothing lost */ }
