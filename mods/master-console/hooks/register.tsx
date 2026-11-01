@@ -28,6 +28,14 @@ import type { Parked, Question } from '../types'
 //    of running in the desk. With no desk open the worker takes everything.
 //    The band shows in the desk only (Ben, 2026-10-28): the worker still takes
 //    queued prompts and auto-clears, but Ben clicks from the desk.
+// 5. Wake. The worker's poll runs in its own process, which is gone after a
+//    self-clear, so its queued prompts waited for an outside message. The
+//    desk's tick asks the board (/api/worker/wake) whether a worker prompt has
+//    waited 60s with no worker poll and, if so, sends the worker WAKE_MARK:
+//    $.session.send first, and the app's send_message when that says the
+//    worker is not running (it does not start a stopped session). The worker
+//    consumes the marked message (no turn) and takes the prompt at once.
+//    Off unless the desk's COORD_WORKER_WAKE names the worker's session id.
 // Master and desk only: client sessions load the mod and it does nothing there.
 
 const DASH = 'http://127.0.0.1:8765'
@@ -38,6 +46,7 @@ const MASTER_ROOT = /^c:[\\/]development[\\/]agents[\\/]?$/i
 const DESK_ROOT = /^c:[\\/]development[\\/]agents[\\/]desk[\\/]?$/i
 const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' }
 const MAX_BUTTONS = 5
+const WAKE_MARK = 'master-console wake:'
 const FALLBACK: Record<string, string> = {
   next: 'Next question: rebuild my queue from coord_board and present its head.',
   board: 'Board check: run coord_board, dispatch whatever an agent can do (loose ends, ' +
@@ -60,7 +69,9 @@ let busy = false
 let tookAt = 'none'  // diagnostic: last prompt this process took
 let ctx = 0
 let clearAt = 180000
+let wakeTo = ''  // the worker's session id, desk only; empty is off
 let refresh: () => Promise<void> = async () => {}
+let take: () => Promise<void> = async () => {}
 
 // Start-up, run once by whichever hook fires first (2026-11-01). Since
 // 10-30 neither master session ran its poll, as if session.start never
@@ -74,6 +85,7 @@ function start($: EngineInterface): Promise<void> {
     isDesk = DESK_ROOT.test(root)
     if (!isMaster && !isDesk) return
     clearAt = numOr(await $.env.get('COORD_MASTER_CLEAR'), 180000)
+    if (isDesk) wakeTo = (await $.env.get('COORD_WORKER_WAKE'))?.trim() ?? ''
     ctx = (await $.session.usage()).context.tokens ?? 0
     refresh = async () => {
       try {
@@ -87,31 +99,58 @@ function start($: EngineInterface): Promise<void> {
         if (body.actions) await update($, actions, () => ({ ...FALLBACK, ...body.actions }))
       } catch { /* dashboard down: keep the last list; the band still has Next and Board */ }
     }
+    take = async () => {
+      if (busy) return
+      try {
+        const r = await $.http.fetch(`${DASH}/api/prompts/take`, {
+          method: 'POST', headers: FORM, body: `taker=${isDesk ? 'desk' : 'master'}`,
+        })
+        if (!r.ok) return
+        const p = (JSON.parse(r.text) as { prompt: { text: string } | null }).prompt
+        if (p) {
+          busy = true
+          tookAt = new Date().toTimeString().slice(0, 5)
+          await $.prompt.submit({ text: p.text, asUser: true })
+        }
+      } catch { /* dashboard down: nothing queued reaches us, nothing lost */ }
+    }
     await refresh()
     $.clock.every(10_000, () => {
       void (async () => {
         await refresh()  // ~20 ms; a question master just presented shows within 10s
+        if (wakeTo) await wake($)
         // Diagnostic (2026-11-01): since 10-30 neither session takes prompts.
         // Shows whether this tick runs at all, and whether busy is what stops it.
         const hhmm = () => new Date().toTimeString().slice(0, 5)
         $.ui.status(`console ${isDesk ? 'desk' : 'worker'}: tick ${hhmm()}, ${busy ? 'busy' : 'idle'}, took ${tookAt}`)
-        if (busy) return
-        try {
-          const r = await $.http.fetch(`${DASH}/api/prompts/take`, {
-            method: 'POST', headers: FORM, body: `taker=${isDesk ? 'desk' : 'master'}`,
-          })
-          if (!r.ok) return
-          const p = (JSON.parse(r.text) as { prompt: { text: string } | null }).prompt
-          if (p) {
-            busy = true
-            tookAt = new Date().toTimeString().slice(0, 5)
-            await $.prompt.submit({ text: p.text, asUser: true })
-          }
-        } catch { /* dashboard down: nothing queued reaches us, nothing lost */ }
+        await take()
       })()
     })
     $.ui.toast(`master-console: ${isDesk ? 'desk' : 'worker'} polling for queued prompts`)
   })()
+}
+
+// Desk only: wake the worker when the board says its prompt is stuck. The
+// board claims at most one wake per 120s, so a failure toasts that often.
+async function wake($: EngineInterface): Promise<void> {
+  try {
+    const r = await $.http.fetch(`${DASH}/api/worker/wake`, { method: 'POST', headers: FORM, body: '' })
+    if (!r.ok) return
+    const w = (JSON.parse(r.text) as { wake: { id: number; action: string; waited: number } | null }).wake
+    if (!w) return
+    const text = `${WAKE_MARK} queued prompt ${w.id} (${w.action}) has waited ${w.waited}s ` +
+      'and your poll is not running. No action needed: the mod takes it once you are up.'
+    const sent = await $.session.send({ to: { sessionId: wakeTo }, text })
+    if (sent.isDelivered) return
+    // Not running: only the app's send_message starts a stopped session.
+    const res = await $.mcp.call('ccd_session_mgmt', 'send_message', { session_id: wakeTo, message: text })
+    const said = res.content.map(b => ('text' in b ? b.text : '') ?? '').join(' ')
+    if (res.isError || !/delivered|queued/.test(said)) {
+      $.ui.toast(`Worker wake not delivered (${sent.reason}): ${said.slice(0, 160)}`)
+    }
+  } catch (err) {
+    $.ui.toast(`Worker wake failed: ${String(err).slice(0, 160)}`)
+  }
 }
 
 export const register: Register = on => {
@@ -123,9 +162,23 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // The desk's wake, on the worker: starting this process was its whole job.
+  // No turn, so busy stays clear and the prompt is taken now, not next tick.
+  on('session.receive', async ($, e, next) => {
+    await start($)
+    if (!isMaster || e.agentId || !e.text.includes(WAKE_MARK)) return next(e)
+    void take()
+    return { consumed: 'master-console wake' }
+  })
+
   on('prompt.submit', async ($, e, next) => {
     await start($)
     if (!isMaster && !isDesk) return next(e)
+    // The same wake, if the app hands it in as a prompt instead.
+    if (isMaster && e.text.includes(WAKE_MARK)) {
+      void take()
+      return { drop: 'master-console: woken; the queued prompt follows' }
+    }
     busy = true
     if (isDesk || ctx < clearAt) return next(e)  // Ben clears the desk himself
     const note = `master-console AUTO-CLEAR: context is ${k(ctx)}, over the ${k(clearAt)} threshold. ` +
