@@ -1470,16 +1470,29 @@ def deliverables_page(v: dict[str, Any]) -> str:
     ready = sum(1 for d in working if d["stage"] == "approved" and d["kind"] == "deliverable")
     missing = sum(1 for d in files if not d["exists"])
     fresh = sum(1 for d in working if t - d["completed_at"] <= 86400)
+    # Each tile filters the list to what it counts; a second click shows them all again.
     kpi = '<div class="kpis">' + "".join(
-        f'<div class="kpi {cls}{" zero" if not n else ""}"><span class="n">{n}</span>'
-        f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></div>'
-        for label, n, cls, hint in (
-            ("In progress", len(working), "k-info", f"last {v['days']} days"),
-            ("New today", fresh, "k-done", "finished in the last 24h"),
-            ("Ready to promote", ready, "k-you", "a dod_review approved it"),
-            ("Owed to you", owed_n, "k-you", "a result named a step for Ben"),
-            ("Final", len(final), "k-done", "promoted to a client deliverables folder"),
-            ("Missing", missing, "k-fail", "named in a result, not on disk"))) + "</div>"
+        f'<button type="button" class="kpi {cls}{" zero" if not n else ""}" data-k="{k}">'
+        f'<span class="n">{n}</span>'
+        f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></button>'
+        for k, label, n, cls, hint in (
+            ("working", "In progress", len(working), "k-info", f"last {v['days']} days"),
+            ("fresh", "New today", fresh, "k-done", "finished in the last 24h"),
+            ("ready", "Ready to promote", ready, "k-you", "a dod_review approved it"),
+            ("owed", "Owed to you", owed_n, "k-you", "a result named a step for Ben"),
+            ("final", "Final", len(final), "k-done", "promoted to a client deliverables folder"),
+            ("missing", "Missing", missing, "k-fail", "named in a result, not on disk"))) + "</div>"
+
+    def flags(d: dict[str, Any]) -> str:
+        """The tiles this row counts toward, matching the sums above."""
+        if d["stage"] == "final":
+            f = ["final"]
+        else:
+            f = ["working"]
+            f += ["fresh"] if t - d["completed_at"] <= 86400 else []
+            f += ["ready"] if d["stage"] == "approved" and d["kind"] == "deliverable" else []
+            f += ["owed"] if d["ben"] else []
+        return " ".join(f + ([] if d["exists"] else ["missing"]))
 
     def row(d: dict[str, Any]) -> str:
         c = d["client"]
@@ -1506,6 +1519,7 @@ def deliverables_page(v: dict[str, Any]) -> str:
         task = (f'<div class="muted">from task <a class="drill" href="/board/task/{esc(d["task_id"])}">'
                 f'{esc(d["title"])}</a> <code>{esc(d["task_id"])}</code></div>')
         return (f'<div class="item bare dl{" owes" if d["ben"] else ""}" data-s="{esc(hay)}" '
+                f'data-f="{flags(d)}" '
                 f'data-since="{int(d["completed_at"])}" data-age="{_age_bucket(d["completed_at"], t)}">'
                 f'<div class="what">{name}<div class="path">{esc(d["path"])}</div>{task}</div>'
                 f'<div class="age"><span class="size">{_size(d["size"])}</span>{_age(d["completed_at"], t)}</div>'
@@ -1525,11 +1539,13 @@ def deliverables_page(v: dict[str, Any]) -> str:
 
     body = kpi + '<p class="empty" id="dl-none" hidden>Nothing matches.</p>'
     if final:
-        body += ('<h2 class="section">Final</h2><p class="muted">In each client&#39;s <code>deliverables</code> '
-                 'folder: what the client may see. Only Promote puts a file here.</p>' + cards(final, " · final"))
-    body += ('<h2 class="section">In progress</h2><p class="muted">Working files. A <code>deliverable</code> task '
-             'goes to a <code>dod_review</code>; once one approves it, Promote copies it out.</p>'
-             + (cards(working, "") or '<p class="empty">Nothing in progress in this range.</p>'))
+        body += ('<div class="dls"><h2 class="section">Final</h2><p class="muted">In each client&#39;s '
+                 '<code>deliverables</code> folder: what the client may see. Only Promote puts a file here.</p>'
+                 + cards(final, " · final") + '</div>')
+    body += ('<div class="dls"><h2 class="section">In progress</h2><p class="muted">Working files. A '
+             '<code>deliverable</code> task goes to a <code>dod_review</code>; once one approves it, Promote '
+             'copies it out.</p>'
+             + (cards(working, "") or '<p class="empty">Nothing in progress in this range.</p>') + '</div>')
     return page("Deliverables", f"Deliverables ({len(files)})", "Deliverables", sub,
                 body, actions=form + SEEN_BOX, tail=DELIVERABLES_JS + FILE_JS)
 
@@ -1810,26 +1826,37 @@ INTENTS_JS = """<script>
 </script>"""
 
 # Live filter: every word typed must appear in the row's file, path, task,
-# client or what Ben owes. Kept in ?q= so a filtered view can be bookmarked.
+# client or what Ben owes; a KPI tile narrows to the rows it counts. Kept in
+# ?q= and ?k= so a filtered view can be bookmarked.
 DELIVERABLES_JS = """<script>
 (() => { const q = document.getElementById("dl-q"), n = document.getElementById("dl-n"),
-    none = document.getElementById("dl-none"), rows = [...document.querySelectorAll(".dl")];
+    none = document.getElementById("dl-none"), rows = [...document.querySelectorAll(".dl")],
+    tiles = [...document.querySelectorAll(".kpi[data-k]")];
   if (!q) return;
   q.form.addEventListener("submit", () => { if (!q.value.trim()) q.disabled = true; });
+  let k = "";
+  try { k = new URL(location.href).searchParams.get("k") || ""; } catch (e) {}
   const run = () => {
     const words = q.value.toLowerCase().split(/\\s+/).filter(Boolean);
     let shown = 0;
-    rows.forEach(r => { const hit = words.every(w => r.dataset.s.includes(w)); r.hidden = !hit; shown += hit; });
+    rows.forEach(r => { const hit = (!k || r.dataset.f.split(" ").includes(k)) &&
+      words.every(w => r.dataset.s.includes(w)); r.hidden = !hit; shown += hit; });
     document.querySelectorAll(".card.dlc").forEach(c => {
-      const k = c.querySelectorAll(".dl:not([hidden])").length;
-      c.hidden = !k; c.querySelector("h2 .count").textContent = k;
-      const o = c.querySelector("h2 .owed"), m = c.querySelectorAll(".owes:not([hidden])").length;
-      if (o) { o.textContent = m + " owed"; o.hidden = !m; } });
-    n.textContent = words.length ? shown + " of " + rows.length : "";
-    none.hidden = !(words.length && !shown);
+      const m = c.querySelectorAll(".dl:not([hidden])").length;
+      c.hidden = !m; c.querySelector("h2 .count").textContent = m;
+      const o = c.querySelector("h2 .owed"), w = c.querySelectorAll(".owes:not([hidden])").length;
+      if (o) { o.textContent = w + " owed"; o.hidden = !w; } });
+    document.querySelectorAll(".dls").forEach(s => {
+      s.hidden = !!(k || words.length) && !s.querySelector(".card.dlc:not([hidden])"); });
+    tiles.forEach(t => t.classList.toggle("selected", t.dataset.k === k));
+    const narrowed = words.length || k;
+    n.textContent = narrowed ? shown + " of " + rows.length : "";
+    none.hidden = !(narrowed && !shown);
     try { const u = new URL(location.href);
       words.length ? u.searchParams.set("q", q.value.trim()) : u.searchParams.delete("q");
+      k ? u.searchParams.set("k", k) : u.searchParams.delete("k");
       history.replaceState(null, "", u); } catch (e) {} };
+  tiles.forEach(t => t.addEventListener("click", () => { k = k === t.dataset.k ? "" : t.dataset.k; run(); }));
   q.addEventListener("input", run); run(); })();
 </script>"""
 
