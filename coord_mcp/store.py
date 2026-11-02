@@ -769,7 +769,10 @@ def _clean_path(raw: str) -> str:
 def _split_paths(raw: str) -> list[str]:
     """One pointer can name several files: 'a.csv / .md', 'dir/a.md, b.csv',
     'a.html ; b.xlsx'. A bare extension reuses the previous stem; a bare name
-    its directory."""
+    its directory. A string that is itself a file on disk stands whole: real
+    names carry ' (' and ', ' too ('FDD-1416 ... (35.16.13.2 xxoosold2.p).docx')."""
+    if Path(raw.strip()).is_absolute() and Path(raw.strip()).is_file():
+        return [raw.strip()]
     out: list[str] = []
     for tok in re.split(r"\s*[,;]\s+|\s+[\/|]\s+", _clean_path(raw)):
         tok = tok.strip()

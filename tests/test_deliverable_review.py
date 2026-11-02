@@ -231,3 +231,9 @@ def test_restate_replaces_a_pattern_path_with_the_files(conn, tmp_path):
     names = {d["name"]: d["exists"] for d in store.deliverables(conn, root=tmp_path)["files"] if d["task_id"] == tid}
     assert names == {"FDD-1415 - DRAFT.docx": True, "FDD-1423 - DRAFT.docx": True}
     assert any(d["id"] == r["decision_id"] for d in store.get_decisions(conn, tid))
+
+
+def test_a_full_path_with_parentheses_stands_whole(tmp_path):
+    f = tmp_path / "FDD-1416 Load Orders (35.16.13.2 xxoosold2.p) - DRAFT.docx"
+    f.write_bytes(b"x")
+    assert store._split_paths(str(f)) == [str(f)]
