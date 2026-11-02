@@ -824,6 +824,7 @@ def deliverables(conn: sqlite3.Connection, days: int = 14, root: Path | None = N
         res = json.loads(r["result"] or "{}")
         raw = (([res["output_path"]] if res.get("output_path") else [])
                + ([res["path"]] if r["kind"] == "deliverable" and res.get("path") else [])
+               + ([x for x in res.get("files") or [] if isinstance(x, str)] if r["kind"] == "deliverable" else [])
                + [f.get("path", "") for f in res.get("files_changed") or [] if isinstance(f, dict)]
                + [x for x in res.get("pointers") or [] if isinstance(x, str)])
         for path in [x for item in raw for x in _split_paths(item)]:
@@ -888,21 +889,33 @@ def _stage(conn: sqlite3.Connection, task_id: str, kind: str, path: Path) -> dic
     stage = {"approve": "approved", "request_changes": "changes", "escalate": "escalated"}[rev["verdict"]]
     if stage == "approved":
         ensure_promotions(conn)
-        if conn.execute("SELECT 1 FROM promotions WHERE task_id=? AND review_id=?",
-                        (task_id, rev["id"])).fetchone():
+        # Each file of a multi-file deliverable is promoted on its own; a
+        # workbook travels with its page, so any promotion covers it.
+        srcs = {s.lower() for (s,) in conn.execute("SELECT src FROM promotions WHERE task_id=? AND review_id=?",
+                                                   (task_id, rev["id"]))}
+        if srcs and (str(path).lower() in srcs or path.suffix.lower() in (".xlsx", ".xlsm")):
             stage = "promoted"
         elif path.is_file() and int(path.stat().st_mtime) > rev["completed_at"]:
             stage = "stale"
     return {"stage": stage, "reviews": n, "review_id": rev["id"]}
 
 
-def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None) -> dict[str, Any]:
+def _named_files(result: dict[str, Any], client: str | None, root: Path) -> list[Path]:
+    """Every file a deliverable result names: its path, then its files."""
+    raw = [result.get("path") or ""] + [f for f in result.get("files") or [] if isinstance(f, str)]
+    return [_resolve(p, client, root) for item in raw for p in _split_paths(item)]
+
+
+def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None,
+            path: str | None = None) -> dict[str, Any]:
     """Copy an approved deliverable into <client>/deliverables as <name>-vN.
 
     Ben's click on /deliverables, never an agent's: the client folder is what
     the client sees. Refused unless the task is a finished deliverable whose
     newest dod_review approves it and the file is unchanged since that review.
     Never overwrites: each promotion is a new version beside the last.
+    `path` picks one file of a deliverable that names several (a batch of
+    FDDs); without it the page, else the first file, is promoted.
     """
     import hashlib
     import shutil
@@ -922,10 +935,15 @@ def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None) ->
     if not client or not folder.is_dir():
         raise ValueError(f"no client folder for {client!r} under {root}")
     # 'page.html ; book.xlsx' names both files: the page is the deliverable.
-    named = [_resolve(p, client, root) for p in _split_paths(json.loads(r["result"])["path"])]
+    named = _named_files(json.loads(r["result"]), client, root)
     if not named:
         raise ValueError("its result names no file")
-    src = next((p for p in named if p.suffix.lower() in (".html", ".htm")), named[0])
+    if path:
+        src = next((p for p in named if str(p).lower() == str(Path(path)).lower()), None)
+        if src is None:
+            raise ValueError(f"{path} is not a file this deliverable names")
+    else:
+        src = next((p for p in named if p.suffix.lower() in (".html", ".htm")), named[0])
     if not src.is_file():
         raise ValueError(f"{src} is not on disk")
     if contracts.MARKDOWN.search(src.name):
@@ -945,7 +963,7 @@ def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None) ->
         return {"ok": True, "duplicate": True, "dest": same["dest"], "version": same["version"]}
     out_dir = folder / "deliverables"
     out_dir.mkdir(exist_ok=True)
-    stem = re.sub(r"[-_ ]draft(?=$|[-_ ])", "", src.stem, flags=re.I) or src.stem
+    stem = re.sub(r"[-_ ]+draft(?=$|[-_ ])", "", src.stem, flags=re.I) or src.stem
     v = 1
     while (out_dir / f"{stem}-v{v}{src.suffix}").exists() or (book and (out_dir / f"{stem}-v{v}{book.suffix}").exists()):
         v += 1
@@ -962,6 +980,36 @@ def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None) ->
                           f"dod_review {rev['id']} approved it; Ben promoted it from /deliverables", task_id)
     return {"ok": True, "duplicate": False, "promotion_id": pid, "dest": str(dest), "version": v,
             "decision_id": dec["decision_id"], **({"workbook": str(book_dest)} if book_dest else {})}
+
+
+def restate_files(conn: sqlite3.Connection, task_id: str, paths: list[str],
+                  root: Path | None = None) -> dict[str, Any]:
+    """Replace a finished deliverable's pattern path with the files it meant.
+
+    For results written before the placeholder rule: 'FDD-<1413|1414> <title>
+    - DRAFT.docx' names nothing, so nothing could be promoted. The first file
+    becomes `path`, the rest `files`. Every file must exist, and the old path
+    is kept in a decision. Reviews and completed_at are untouched, so the stage
+    still follows the review that approved these files.
+    """
+    root = root or DOCS_ROOT
+    r = conn.execute("SELECT kind, state, assigned_to, result FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if r is None or r["kind"] != "deliverable" or r["state"] != "done":
+        raise ValueError("only a finished deliverable task can have its files restated")
+    if not paths:
+        raise ValueError("name at least one file")
+    full = [_resolve(p, r["assigned_to"], root) for p in paths]
+    gone = [str(p) for p in full if not p.is_file()]
+    if gone:
+        raise ValueError(f"not on disk: {'; '.join(gone)}")
+    res = json.loads(r["result"])
+    old = res.get("path") or ""
+    res["path"], res["files"] = str(full[0]), [str(p) for p in full[1:]]
+    contracts.validate("deliverable", res)  # the placeholder and Markdown rules hold for the restatement too
+    conn.execute("UPDATE tasks SET result=? WHERE id=?", (json.dumps(res), task_id))
+    dec = record_decision(conn, f"Restated deliverable {task_id} files: {len(full)} named in place of {old}"[:200],
+                          "the result named a pattern, not files; paths found and checked on disk", task_id)
+    return {"ok": True, "task_id": task_id, "files": [str(p) for p in full], "decision_id": dec["decision_id"]}
 
 
 def _client_since(conn: sqlite3.Connection, task_id: str, reply_date: str | None) -> tuple[int, str]:

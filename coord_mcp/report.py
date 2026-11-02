@@ -1498,6 +1498,7 @@ def deliverables_page(v: dict[str, Any]) -> str:
         if d["stage"] == "approved" and d["exists"] and d["kind"] == "deliverable":
             name += (f'<form method="post" action="/api/promote" class="act" style="display:inline">'
                      f'<input type="hidden" name="task" value="{esc(d["task_id"])}">'
+                     f'<input type="hidden" name="path" value="{esc(d["path"])}">'
                      f'<button class="primary" title="Copy to {esc(c)}/deliverables as the next version">'
                      f'Promote</button></form>')
         owed = "".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"])
@@ -2250,7 +2251,8 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     return
                 if path == "/api/promote":  # Promote on /deliverables: Ben's click, never an agent's
                     try:
-                        r = store.promote(conn, (form.get("task") or [""])[0].strip())
+                        r = store.promote(conn, (form.get("task") or [""])[0].strip(),
+                                          path=(form.get("path") or [""])[0].strip() or None)
                     except ValueError as e:
                         self._json(400, {"ok": False, "error": str(e)})
                         return

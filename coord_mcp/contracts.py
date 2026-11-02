@@ -132,6 +132,9 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
         "done": {"type": "bool", "required": True},
         "summary": {"type": "str", "max": 300, "required": True},
         "path": {"type": "str", "max": 400, "required": True},
+        # More files of the same deliverable, one full path each, when `path`
+        # cannot hold them all (a batch of FDDs). Each is promoted on its own.
+        "files": {"type": "list", "max": 30, "items": {"type": "str", "max": 400}},
         "deliverable_type": {"type": "str", "max": 60, "required": True},
         "dod_path": {"type": "str", "max": 400, "required": True},
         "self_check": {"type": "list", "max": 30, "required": True,
@@ -177,10 +180,20 @@ FORMAT_RULE = ("a client deliverable is HTML (with an .xlsx beside it when there
                "or the Logan format its type already has, such as .docx for an FDD; Markdown is for agents only")
 
 
+# A pattern in place of file names ('FDD-<1413|1414> <title>.docx', 'FDD-1415
+# ... .docx') names nothing on disk, so /deliverables shows it missing and
+# nothing can be promoted (MAG, 2026-11-02).
+PLACEHOLDER = re.compile(r"\.\.\.|…|[<>]")
+PLACEHOLDER_RULE = "name every file by its full path: one in path, the rest in files"
+
+
 def _deliverable_rules(r: dict[str, Any]) -> list[str]:
-    if r.get("done") and MARKDOWN.search(str(r.get("path") or "")):
-        return [f"path {r['path']!r} is Markdown: {FORMAT_RULE}"]
-    return []
+    if not r.get("done"):
+        return []
+    named = [str(r.get("path") or "")] + [str(f) for f in r.get("files") or []]
+    errors = [f"path {p!r} is Markdown: {FORMAT_RULE}" for p in named if MARKDOWN.search(p)]
+    errors += [f"path {p!r} is a pattern, not a file: {PLACEHOLDER_RULE}" for p in named if PLACEHOLDER.search(p)]
+    return errors
 
 
 # Checks across fields, run once the shape is valid.

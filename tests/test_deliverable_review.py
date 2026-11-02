@@ -187,3 +187,47 @@ def test_create_warns_when_a_deliverable_names_no_format(conn):
     assert "missing" in warn({"q": "x"})[0]
     assert "Markdown is for agents only" in warn({"format": "md"})[0]
     assert warn({"format": "html + xlsx"}) == []
+
+
+def test_a_pattern_path_is_refused_and_each_named_file_promotes_alone(conn, tmp_path):
+    """'FDD-<1413|1414> <title>.docx' names nothing (MAG, 2026-11-02): refused
+    at completion; a batch lists each file and Ben promotes them one by one."""
+    work = tmp_path / "MAG" / "work"
+    work.mkdir(parents=True)
+    for n in ("FDD-1413 - DRAFT.docx", "FDD-1414 - DRAFT.docx"):
+        (work / n).write_bytes(n.encode())
+    tid = store.create_task(conn, "deliverable", "FDDs", {"q": "x"}, assigned_to="MAG")["task_id"]
+    base = {"done": True, "summary": "s", "dod_path": "dod/fdd.md", "deliverable_type": "fdd", "self_check": CHECK}
+    for bad in ("work/FDD-<1413|1414> <title> - DRAFT.docx", "work/FDD-1413 ... - DRAFT.docx"):
+        with pytest.raises(contracts.ValidationError, match="pattern, not a file"):
+            store.complete_task(conn, tid, {**base, "path": bad})
+    store.complete_task(conn, tid, {**base, "path": "work/FDD-1413 - DRAFT.docx",
+                                    "files": ["work/FDD-1414 - DRAFT.docx"]})
+    _review(conn, tid)
+    files = {d["name"]: d["stage"] for d in store.deliverables(conn, root=tmp_path)["files"] if d["task_id"] == tid}
+    assert files == {"FDD-1413 - DRAFT.docx": "approved", "FDD-1414 - DRAFT.docx": "approved"}
+    r = store.promote(conn, tid, root=tmp_path, path=str(work / "FDD-1414 - DRAFT.docx"))
+    assert r["dest"] == str(tmp_path / "MAG" / "deliverables" / "FDD-1414-v1.docx")
+    files = {d["name"]: d["stage"] for d in store.deliverables(conn, root=tmp_path)["files"]
+             if d["task_id"] == tid and d["stage"] != "final"}
+    assert files == {"FDD-1413 - DRAFT.docx": "approved", "FDD-1414 - DRAFT.docx": "promoted"}
+    with pytest.raises(ValueError, match="not a file this deliverable names"):
+        store.promote(conn, tid, root=tmp_path, path=str(work / "other.docx"))
+
+
+def test_restate_replaces_a_pattern_path_with_the_files(conn, tmp_path):
+    work = tmp_path / "MAG" / "work"
+    work.mkdir(parents=True)
+    (work / "FDD-1415 - DRAFT.docx").write_bytes(b"a")
+    (work / "FDD-1423 - DRAFT.docx").write_bytes(b"b")
+    tid = store.create_task(conn, "deliverable", "FDDs", {"q": "x"}, assigned_to="MAG")["task_id"]
+    # A result from before the rule, written straight to the row.
+    conn.execute("UPDATE tasks SET state='done', completed_at=?, result=? WHERE id=?",
+                 (now(), '{"done": true, "summary": "s", "path": "MAG/work/FDD-1415 ... - DRAFT.docx", '
+                  '"deliverable_type": "fdd", "dod_path": "d", "self_check": []}', tid))
+    with pytest.raises(ValueError, match="not on disk"):
+        store.restate_files(conn, tid, ["work/nope.docx"], root=tmp_path)
+    r = store.restate_files(conn, tid, ["work/FDD-1415 - DRAFT.docx", "work/FDD-1423 - DRAFT.docx"], root=tmp_path)
+    names = {d["name"]: d["exists"] for d in store.deliverables(conn, root=tmp_path)["files"] if d["task_id"] == tid}
+    assert names == {"FDD-1415 - DRAFT.docx": True, "FDD-1423 - DRAFT.docx": True}
+    assert any(d["id"] == r["decision_id"] for d in store.get_decisions(conn, tid))
