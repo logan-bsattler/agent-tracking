@@ -472,6 +472,38 @@ def _span(sec: float) -> str:
     return f"{sec / 60:.0f} minutes" if sec < 7200 else f"{sec / 3600:.1f} hours" if sec < 172800 else f"{sec / 86400:.1f} days"
 
 
+def group_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per session title: a cleared agent restarts under the same title,
+    so per session it shows up as many rows. Spend and requests sum; context now
+    is the most recent session's, peak the highest; live if any session is."""
+    groups: dict[str, dict[str, Any]] = {}
+    for s in sessions:
+        key = s["title"] or s["session_id"]
+        g = groups.get(key)
+        if g is None:
+            groups[key] = {**s, "sessions": 1}
+            continue
+        g["sessions"] += 1
+        for f in ("cost", "cost_15m", "requests"):
+            g[f] += s[f]
+        g["peak_ctx"] = max(g["peak_ctx"], s["peak_ctx"])
+        g["active"] = g["active"] or s["active"]
+        if s["last_ts"] > g["last_ts"]:
+            g.update(last_ts=s["last_ts"], last_ctx=s["last_ctx"], session_id=s["session_id"], project=s["project"])
+    return sorted(groups.values(), key=lambda g: -g["cost"])
+
+
+def _live_row(s: dict[str, Any], tag: str) -> str:
+    title = s["title"] or s["session_id"][:8]
+    live = '<span class="dot" style="background:var(--good)"></span>' if s["active"] else ""
+    ctx = s["last_ctx"]
+    ctx_style = ' style="color:var(--critical)"' if ctx >= 300000 else ' style="color:var(--serious)"' if ctx >= 150000 else ""
+    return (f'<tr><td>{live}{esc(title[:60])}<br><span class="muted">{esc(s["project"])} · {esc(tag)}</span></td>'
+            f'<td class="n">{money(s["cost"])}</td><td class="n">{money(s["cost_15m"])}</td>'
+            f'<td class="n">{s["requests"]:,}</td><td class="n"{ctx_style}>{tokens(ctx)}</td>'
+            f'<td class="n">{tokens(s["peak_ctx"])}</td><td class="n">{when(s["last_ts"])}</td></tr>')
+
+
 def now_section(v: dict[str, Any]) -> str:
     """The current 5-hour window: burn per 15 minutes and who is spending it."""
     q, b = v["quota"], v["burn"]
@@ -509,19 +541,20 @@ def now_section(v: dict[str, Any]) -> str:
             parts.append(f'<text x="{PL + band_w * (i + 0.5):.1f}" y="{h_ - 8}" text-anchor="middle">{datetime.fromtimestamp(t0).strftime("%H:%M")}</text>')
     chart = f'<svg viewBox="0 0 {W} {h_}">{"".join(parts)}</svg>'
 
-    rows = []
-    for s in v["sessions"][:12]:
-        title = s["title"] or s["session_id"][:8]
-        live = '<span class="dot" style="background:var(--good)"></span>' if s["active"] else ""
-        ctx = s["last_ctx"]
-        ctx_style = ' style="color:var(--critical)"' if ctx >= 300000 else ' style="color:var(--serious)"' if ctx >= 150000 else ""
-        rows.append(f'<tr><td>{live}{esc(title[:60])}<br><span class="muted">{esc(s["project"])} · {esc(s["session_id"][:8])}</span></td>'
-                    f'<td class="n">{money(s["cost"])}</td><td class="n">{money(s["cost_15m"])}</td>'
-                    f'<td class="n">{s["requests"]:,}</td><td class="n"{ctx_style}>{tokens(ctx)}</td>'
-                    f'<td class="n">{tokens(s["peak_ctx"])}</td><td class="n">{when(s["last_ts"])}</td></tr>')
-    table = ('<div class="wrap"><table><tr><th>Session</th><th class="n">This window</th><th class="n">Last 15m</th>'
-             '<th class="n">Requests</th><th class="n">Context now</th><th class="n">Peak</th><th class="n">Last request</th></tr>'
-             + "".join(rows) + "</table></div>") if rows else '<div class="empty">No requests in this window.</div>'
+    groups = group_sessions(v["sessions"])
+    rows = [_live_row(g, f'{g["sessions"]} sessions' if g["sessions"] > 1 else g["session_id"][:8]) for g in groups]
+    head_row = ('<tr><th>Session</th><th class="n">This window</th><th class="n">Last 15m</th>'
+                '<th class="n">Requests</th><th class="n">Context now</th><th class="n">Peak</th><th class="n">Last request</th></tr>')
+    table = ('<div class="wrap"><table>' + head_row + "".join(rows) + "</table></div>") if rows else '<div class="empty">No requests in this window.</div>'
+    if len(groups) < len(v["sessions"]):
+        each = "".join(_live_row(s, s["session_id"][:8]) for s in v["sessions"])
+        table += (f'<details class="client" id="each-session"><summary>Each session<span class="count muted">{len(v["sessions"])}</span></summary>'
+                  f'<div class="wrap"><table>{head_row}{each}</table></div></details>'
+                  # the page auto-refreshes, so keep the drill-down open across reloads
+                  '<script>try { const d = document.getElementById("each-session"), k = "coord-each-session";'
+                  ' d.open = localStorage.getItem(k) === "1";'
+                  ' d.addEventListener("toggle", () => { try { localStorage.setItem(k, d.open ? "1" : "0"); } catch (e) {} });'
+                  ' } catch (e) {}</script>')
     return "".join(head) + chart + '<p class="sub" style="margin:12px 0 6px">Spend per 15 minutes across the window. Context in red is past the guard\'s hard limit; orange is past its warning.</p>' + table
 
 

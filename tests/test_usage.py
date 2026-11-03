@@ -176,3 +176,37 @@ def test_ingest_live_quota_keeps_resets(tmp_path, monkeypatch):
     assert _u.ingest_live_quota(c) == 0                     # idempotent
     r = c.execute("SELECT source, five_hour_pct, five_hour_reset, seven_day_pct FROM quota_snapshots").fetchone()
     assert tuple(r) == ("session", 12.5, 1790884800, 17)
+
+
+def _live(sid, title, cost, last_ts, last_ctx, peak, active=False, cost_15m=0.0, requests=10, project="P"):
+    return {"session_id": sid, "title": title, "project": project, "cost": cost, "cost_15m": cost_15m,
+            "requests": requests, "last_ts": last_ts, "last_ctx": last_ctx, "peak_ctx": peak, "active": active}
+
+
+def test_live_sessions_group_by_title():
+    """A cleared agent restarts under the same title, so the window showed six
+    'Master Agent' rows; one row per title, totals summed, the rest latest/max."""
+    rows = [_live("aaaaaaaa1", "Master Agent", 8.0, 100, 183_000, 183_000, cost_15m=0.0, requests=83),
+            _live("bbbbbbbb2", "MAG - Local", 9.0, 150, 277_000, 277_000, requests=41),
+            _live("cccccccc3", "Master Agent", 5.0, 300, 20_000, 160_000, active=True, cost_15m=3.5, requests=56),
+            _live("dddddddd4", None, 1.0, 50, 5_000, 5_000),
+            _live("eeeeeeee5", None, 0.5, 60, 5_000, 5_000)]
+    g = report.group_sessions(rows)
+    assert [x["title"] for x in g] == ["Master Agent", "MAG - Local", None, None]  # by spend, highest first
+    m = g[0]
+    assert m["sessions"] == 2 and m["cost"] == 13.0 and m["cost_15m"] == 3.5 and m["requests"] == 139
+    assert m["last_ctx"] == 20_000 and m["peak_ctx"] == 183_000 and m["last_ts"] == 300 and m["active"]
+    assert g[2]["sessions"] == g[3]["sessions"] == 1  # untitled sessions never merge
+
+
+def test_live_table_shows_grouped_rows_and_a_drill_down():
+    v = {"quota": None, "burn": {"spend_last_15m": 0, "spend_last_hour": 0}, "total": 13.0,
+         "buckets": [0.0] * 20, "window_start": 0,
+         "sessions": [_live("aaaaaaaa1", "Master Agent", 8.0, 100, 1, 1),
+                      _live("cccccccc3", "Master Agent", 5.0, 300, 1, 1, active=True)]}
+    html = report.now_section(v)
+    assert html.count("Master Agent") == 3  # one grouped row, two in the drill-down
+    assert "2 sessions" in html and 'id="each-session"' in html and "$13.00" in html
+    v["sessions"] = v["sessions"][:1]
+    html = report.now_section(v)
+    assert "each-session" not in html and "aaaaaaaa" in html  # nothing to drill into
