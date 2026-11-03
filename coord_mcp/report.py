@@ -1573,17 +1573,19 @@ def drafts_page(v: dict[str, Any]) -> str:
                     actions=form + SEEN_BOX)
     todo = [d for d in rows if d["state"] != "drafted"]
     counts = {k: sum(1 for d in rows if d["state"] == k) for k in ("waiting", "review", "queued", "missing", "drafted")}
+    # Each tile filters the cards to what it counts; Clients shows them all again.
     kpi = '<div class="kpis">' + "".join(
-        f'<div class="kpi {cls}{" zero" if not n else ""}"><span class="n">{n}</span>'
-        f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></div>'
-        for label, n, cls, hint in (
-            ("To go through", counts["waiting"], "k-you", "written, not yet in Drafts"),
-            ("Late", v.get("late", 0), "k-fail", "client waiting over 24h, not yet in Drafts"),
-            ("Awaiting review", counts["review"], "k-info", "a dod_review must approve it first"),
-            ("Queued", counts["queued"], "k-run", "master drafts it when idle"),
-            ("In Drafts", counts["drafted"], "k-done", "already typed into Outlook"),
-            ("Body missing", counts["missing"], "k-fail", "the file the result named is gone"),
-            ("Clients", len({d["client"] for d in rows}), "k-alt", "with a draft in range"))) + "</div>"
+        f'<button type="button" class="kpi {cls}{" zero" if not n else ""}" data-k="{k}">'
+        f'<span class="n">{n}</span>'
+        f'<span class="label">{esc(label)}</span><span class="hint">{esc(hint)}</span></button>'
+        for k, label, n, cls, hint in (
+            ("waiting", "To go through", counts["waiting"], "k-you", "written, not yet in Drafts"),
+            ("late", "Late", v.get("late", 0), "k-fail", "client waiting over 24h, not yet in Drafts"),
+            ("review", "Awaiting review", counts["review"], "k-info", "a dod_review must approve it first"),
+            ("queued", "Queued", counts["queued"], "k-run", "master drafts it when idle"),
+            ("drafted", "In Drafts", counts["drafted"], "k-done", "already typed into Outlook"),
+            ("missing", "Body missing", counts["missing"], "k-fail", "the file the result named is gone"),
+            ("", "Clients", len({d["client"] for d in rows}), "k-alt", "with a draft in range"))) + "</div>"
     badge = {"waiting": '<b class="st-open">to go through</b>',
              "queued": '<b class="st-waiting">queued for master</b>',
              "missing": '<b class="st-failed">body missing</b>',
@@ -1622,14 +1624,37 @@ def drafts_page(v: dict[str, Any]) -> str:
                 f'{_age(d["completed_at"], t)} · <a class="drill" href="/board/task/{esc(d["task_id"])}">'
                 f'{esc(d["title"][:60])}</a> <code>{esc(d["task_id"][:8])}</code></div>')
         cards.append(f'<div class="card lane draft" id="d-{esc(d["task_id"])}" '
+                     f'data-f="{esc(d["state"])}{" late" if d.get("late") else ""}" '
                      f'data-since="{int(d["completed_at"])}" data-age="{_age_bucket(d["completed_at"], t)}">'
                      f'{head}{why}{owed}{_draft_envelope(d, body_link)}'
                      f'<div class="btns">{btns}{_compose_link(d)}{nxt}</div></div>')
     lead = (f'<p class="sub">Start at the top: <a class="drill" href="#d-{esc(todo[0]["task_id"])}">'
             f'{esc(todo[0]["client"])}: {esc(todo[0]["subject"][:70])} →</a></p>' if todo
             else '<p class="clear">Every draft in range is in Outlook Drafts.</p>')
+    none = '<p class="empty" id="dr-none" hidden>Nothing matches.</p>'
     return page("Drafts", f'{"(" + str(len(todo)) + ") " if todo else ""}Drafts', "Email drafts", sub,
-                f'{kpi}{lead}{"".join(cards)}', actions=form + SEEN_BOX)
+                f'{kpi}{lead}{none}{"".join(cards)}', actions=form + SEEN_BOX, tail=DRAFTS_JS)
+
+
+# A KPI tile narrows the walk to the drafts it counts; a second click, or
+# Clients, shows them all. Kept in ?k= so a filtered view can be bookmarked.
+DRAFTS_JS = """<script>
+(() => { const cards = [...document.querySelectorAll(".card.draft[data-f]")],
+    tiles = [...document.querySelectorAll(".kpi[data-k]")], none = document.getElementById("dr-none");
+  if (!tiles.length) return;
+  let k = "";
+  try { k = new URL(location.href).searchParams.get("k") || ""; } catch (e) {}
+  const run = () => {
+    let shown = 0;
+    cards.forEach(c => { const hit = !k || c.dataset.f.split(" ").includes(k); c.hidden = !hit; shown += hit; });
+    tiles.forEach(t => t.classList.toggle("selected", t.dataset.k === k));
+    none.hidden = shown > 0;
+    try { const u = new URL(location.href);
+      k ? u.searchParams.set("k", k) : u.searchParams.delete("k");
+      history.replaceState(null, "", u); } catch (e) {} };
+  tiles.forEach(t => t.addEventListener("click", () => { k = k === t.dataset.k ? "" : t.dataset.k; run(); }));
+  run(); })();
+</script>"""
 
 
 QUEUE_JS = """<script>
