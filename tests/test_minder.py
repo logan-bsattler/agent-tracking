@@ -337,6 +337,47 @@ def test_a_changed_list_counts_soon_from_the_take_not_the_queue(conn):
     assert _fires(conn, took + store.MINDER_SOON + 1)["fired"]
 
 
+def _finished_at(conn, tid, minutes):
+    conn.execute("UPDATE tasks SET completed_at=? WHERE id=?", (now() + minutes * MIN, tid))
+
+
+def test_a_new_result_wakes_master_within_minutes(conn):
+    # Clients no longer message master when they finish: this sweep is the wake-up.
+    _parked(conn)
+    t0 = store.MINDER_PARKED + 1
+    assert _fires(conn, t0)["fired"]
+    store.take_operator_prompt(conn)
+    conn.execute("UPDATE operator_prompts SET taken_at=? WHERE action='minder'", (now() + t0 * MIN,))
+    done_at = t0 + 30
+    tid = _done(conn)
+    _finished_at(conn, tid, done_at)
+    assert store.MINDER_UNREAD <= 5
+    early = _fires(conn, done_at + store.MINDER_UNREAD - 1)
+    assert early["owed"]["unread"] == [] and not early["fired"]
+    r = _fires(conn, done_at + store.MINDER_UNREAD + 1)
+    assert r["fired"] and r["owed"]["unread"] == [tid]
+
+
+def test_the_list_left_after_a_result_is_read_keeps_its_backoff(conn):
+    b = _parked(conn)  # master is leaving this one alone
+    t0 = store.MINDER_PARKED + 1
+    assert _fires(conn, t0)["fired"]
+    _text(conn)
+    done_at = t0 + 30
+    tid = _done(conn)
+    _finished_at(conn, tid, done_at)
+    woke = done_at + store.MINDER_UNREAD + 1
+    assert _fires(conn, woke)["fired"]
+    _text(conn)
+    store.get_task_result(conn, tid, ["verdict"], reader="agents")  # master reads it
+    conn.execute("UPDATE tasks SET result_read_at=? WHERE id=?", (now() + woke * MIN, tid))
+    assert store.minder_owed(conn, now() + (woke + 1) * MIN)["unread"] == []
+    # What is left is the list master already saw: not SOON again, EVERY from the last wake.
+    assert _fires(conn, woke + store.MINDER_SOON + 1)["reason"] == "rate limit"
+    r = _fires(conn, woke + store.MINDER_EVERY + 1)
+    assert r["fired"] and r["owed"]["parked"] == [b] and r["owed"]["unread"] == []
+
+
 def test_holds_while_any_operator_prompt_is_queued(conn):
     _parked(conn)
     store.queue_operator_prompt(conn, "board")

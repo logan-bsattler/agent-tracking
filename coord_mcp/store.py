@@ -1702,7 +1702,7 @@ def queued_operator_prompts(conn: sqlite3.Connection) -> int:
 #
 # Master only acts when a prompt reaches it, and the board fills with work it
 # owes while no prompt comes: a park whose re-dispatch it forgot, a task it
-# created and never delivered, a result whose announcement was lost, a client
+# created and never delivered, a result nobody has read yet, a client
 # loose end nobody tasked, an intent nobody triaged. The minder runs inside the
 # dashboard's ingest pass and, when any of those has sat past its threshold,
 # queues one "Minder HH:MM" prompt through the operator queue. It is a wake-up
@@ -1723,7 +1723,7 @@ MINDER_ENABLED = os.environ.get("COORD_MINDER", "on").strip().lower() not in ("o
 MINDER_PARKED = _env_minutes("PARKED", 10)            # parked, awaiting re-dispatch
 MINDER_UNDELIVERED = _env_minutes("UNDELIVERED", 15)  # open, never picked up, never parked
 MINDER_STALLED = _env_minutes("STALLED", 20)          # picked up, client session silent since
-MINDER_UNREAD = _env_minutes("UNREAD", 10)            # done or failed, no lead read since
+MINDER_UNREAD = _env_minutes("UNREAD", 3)             # done or failed, no lead read since: the wake-up
 MINDER_LOOSE = _env_minutes("LOOSE", 30)              # open client follow-up with no child task still going
 MINDER_FAILED = _env_minutes("FAILED", 30)            # failed, no decision since
 MINDER_INTENTS = _env_minutes("INTENTS", 15)          # open intent
@@ -1884,7 +1884,14 @@ def minder_state(conn: sqlite3.Connection, now_ts: int | None = None,
     Each identical prompt in a row doubles the wait for the next, up to
     MINDER_MAX: a list master has left alone twice is one it is choosing to
     leave (a stalled session, a hold it has not recorded), and re-sending it
-    hourly cost a full worker turn each time for nothing."""
+    hourly cost a full worker turn each time for nothing.
+
+    A list one of the recent prompts already carried is not new either: a
+    result lands on top of a list master is leaving (the wake for it fires
+    SOON), master reads the result, and what is left is that old list again.
+    It keeps its backoff, counted by how often it was sent, rather than
+    firing SOON once per completion. Clients no longer message master when
+    they finish, so this is the path every result takes."""
     now_ts = now() if now_ts is None else now_ts
     recent = conn.execute("SELECT created_at, taken_at, text FROM operator_prompts WHERE action='minder' "
                           "ORDER BY created_at DESC, id DESC LIMIT 8").fetchall()
@@ -1892,12 +1899,17 @@ def minder_state(conn: sqlite3.Connection, now_ts: int | None = None,
     last = r["created_at"] if r else None
     if r is None:
         nxt = now_ts
-    elif owed is not None and _minder_body(minder_text(owed, now_ts)) != _minder_body(r["text"]):
-        nxt = max(last, r["taken_at"] or 0) + MINDER_SOON * 60
     else:
-        body = _minder_body(r["text"])
-        streak = next((i for i, p in enumerate(recent) if _minder_body(p["text"]) != body), len(recent))
-        nxt = last + min(MINDER_EVERY * 2 ** (streak - 1), max(MINDER_MAX, MINDER_EVERY)) * 60
+        body = _minder_body(r["text"]) if owed is None else _minder_body(minder_text(owed, now_ts))
+        bodies = [_minder_body(p["text"]) for p in recent]
+        if body == bodies[0]:
+            streak = next((i for i, b in enumerate(bodies) if b != body), len(bodies))
+        else:
+            streak = bodies.count(body)
+        if streak:
+            nxt = last + min(MINDER_EVERY * 2 ** (streak - 1), max(MINDER_MAX, MINDER_EVERY)) * 60
+        else:
+            nxt = max(last, r["taken_at"] or 0) + MINDER_SOON * 60
     return {"enabled": MINDER_ENABLED, "last_fired": last, "next_eligible": max(nxt, now_ts),
             "every_min": MINDER_EVERY, "soon_min": MINDER_SOON}
 
