@@ -1728,8 +1728,9 @@ MINDER_LOOSE = _env_minutes("LOOSE", 30)              # open client follow-up wi
 MINDER_FAILED = _env_minutes("FAILED", 30)            # failed, no decision since
 MINDER_INTENTS = _env_minutes("INTENTS", 15)          # open intent
 MINDER_HOLD = _env_minutes("HOLD", 7 * 24 * 60)       # undelivered with a decision this recent is held
-MINDER_EVERY = _env_minutes("EVERY", 30)              # same owed list again: at most one per this
-MINDER_SOON = _env_minutes("SOON", 5)                 # owed list changed: this after master took the last
+MINDER_EVERY = _env_minutes("EVERY", 60)              # same owed list again: at most one per this, doubling
+MINDER_MAX = _env_minutes("MAX", 4 * 60)              # ...per identical repeat, up to this
+MINDER_SOON = _env_minutes("SOON", 15)                # owed list changed: this after master took the last
 MINDER_IDS = 5                                        # ids listed per condition; the rest is a count
 
 
@@ -1878,17 +1879,25 @@ def minder_state(conn: sqlite3.Connection, now_ts: int | None = None,
     soon only loops it. A different list (master cleared some, or new work
     landed) waits only MINDER_SOON from when master took the last prompt, so
     a wake that clears 1 of 10 drafts is followed by another, not by half an
-    hour of idle. Without `owed` it assumes the list is unchanged."""
+    hour of idle. Without `owed` it assumes the list is unchanged.
+
+    Each identical prompt in a row doubles the wait for the next, up to
+    MINDER_MAX: a list master has left alone twice is one it is choosing to
+    leave (a stalled session, a hold it has not recorded), and re-sending it
+    hourly cost a full worker turn each time for nothing."""
     now_ts = now() if now_ts is None else now_ts
-    r = conn.execute("SELECT created_at, taken_at, text FROM operator_prompts WHERE action='minder' "
-                     "ORDER BY created_at DESC, id DESC LIMIT 1").fetchone()
+    recent = conn.execute("SELECT created_at, taken_at, text FROM operator_prompts WHERE action='minder' "
+                          "ORDER BY created_at DESC, id DESC LIMIT 8").fetchall()
+    r = recent[0] if recent else None
     last = r["created_at"] if r else None
     if r is None:
         nxt = now_ts
     elif owed is not None and _minder_body(minder_text(owed, now_ts)) != _minder_body(r["text"]):
         nxt = max(last, r["taken_at"] or 0) + MINDER_SOON * 60
     else:
-        nxt = last + MINDER_EVERY * 60
+        body = _minder_body(r["text"])
+        streak = next((i for i, p in enumerate(recent) if _minder_body(p["text"]) != body), len(recent))
+        nxt = last + min(MINDER_EVERY * 2 ** (streak - 1), max(MINDER_MAX, MINDER_EVERY)) * 60
     return {"enabled": MINDER_ENABLED, "last_fired": last, "next_eligible": max(nxt, now_ts),
             "every_min": MINDER_EVERY, "soon_min": MINDER_SOON}
 

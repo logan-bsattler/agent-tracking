@@ -295,6 +295,22 @@ def test_at_most_one_per_window_then_again(conn):
     assert r["fired"] and r["last_fired"] == now() + (t0 + store.MINDER_EVERY + 1) * MIN
 
 
+def test_an_unchanged_list_backs_off_doubling_to_the_cap(conn):
+    _parked(conn)
+    t = store.MINDER_PARKED + 1
+    assert _fires(conn, t)["fired"]
+    for n in range(5):  # each identical repeat doubles the wait, never past MINDER_MAX
+        _text(conn)
+        wait = min(store.MINDER_EVERY * 2 ** n, max(store.MINDER_MAX, store.MINDER_EVERY))
+        assert _fires(conn, t + wait - 1)["reason"] == "rate limit"
+        t += wait + 1
+        assert _fires(conn, t)["fired"]
+    _text(conn)
+    _task(conn, "LNK")  # the list changes: back to SOON, then one EVERY for the new list
+    r = _fires(conn, t + store.MINDER_SOON + 1)
+    assert r["fired"] and r["next_eligible"] == now() + (t + store.MINDER_SOON + 1 + store.MINDER_EVERY) * MIN
+
+
 def test_a_changed_list_fires_soon_after_master_took_the_last(conn):
     b = _parked(conn)
     a = store.propose_intent(conn, "LNK: asks", "email", origin="team", trust="trusted")["intent_id"]

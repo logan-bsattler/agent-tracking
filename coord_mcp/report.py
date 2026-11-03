@@ -1006,8 +1006,9 @@ try { const key = "coord-seen", seen = Number(localStorage.getItem(key) || 0); l
 
 MINDER_TITLE = ("Master-minder: the dashboard queues a wake prompt to master when the board shows work "
                 "it owes and is not acting on (parked, never delivered, result unread, client loose end "
-                "untasked, open intent). The same owed list waits COORD_MINDER_EVERY (30m); a changed one "
-                "COORD_MINDER_SOON (5m) after master took the last. Off with COORD_MINDER=off.")
+                "untasked, open intent). The same owed list waits COORD_MINDER_EVERY (60m), doubling per "
+                "identical repeat up to COORD_MINDER_MAX (4h); a changed one COORD_MINDER_SOON (15m) after "
+                "master took the last. Off with COORD_MINDER=off.")
 
 
 def minder_line(m: dict[str, Any] | None, t: int) -> str:

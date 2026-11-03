@@ -287,12 +287,13 @@ undelivered task with a decision on it (`task_id` set) in the last 7 days is
 held, not owed; restating the hold restarts the week. When any is past its
 threshold it queues `Minder HH:MM: master owes work -- ...` with the ids,
 never while another prompt is queued. The same list as the last prompt waits
-30 minutes from that prompt (master saw those ids and left them); a changed
-list (master cleared some, or new work landed) waits only 5 minutes from when
-master took the last one, so a wake that clears one of ten drafts is followed
-by another rather than by half an hour idle. Thresholds are minutes in
+60 minutes from that prompt (master saw those ids and left them), and each
+identical repeat doubles that, up to 4 hours; a changed list (master cleared
+some, or new work landed) waits 15 minutes from when master took the last one,
+so a wake that clears one of ten drafts is followed by another rather than by
+an hour idle. Thresholds are minutes in
 `COORD_MINDER_PARKED`, `_UNDELIVERED`, `_UNREAD`, `_LOOSE`, `_FAILED`,
-`_INTENTS`, `_HOLD`, `_EVERY` and `_SOON`; `COORD_MINDER=off` disables it. `/board` shows when
+`_INTENTS`, `_HOLD`, `_EVERY`, `_MAX` and `_SOON`; `COORD_MINDER=off` disables it. `/board` shows when
 it last fired and when it is next eligible; `/api/parked` carries the same
 under `minder`.
 
