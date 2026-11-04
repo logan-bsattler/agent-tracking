@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Iterable
 
 END = "# end"
+MAX_BATCH = 300  # lines per watch block, so a catch-up is several readable events
 TEAMS_PROC = "ms-teams.exe"
 LIVE_PROC = "LiveCaptions.exe"
 # HTML ids new Teams has used for the captions pane (WebView2 exposes an
@@ -731,11 +732,15 @@ def watch(path: Path, quiet: float, max_wait: float, poll: float = 1.0, out=sys.
         over = any(l.startswith(END) for l in lines) or superseded()
         if _speech(b.lines) and (b.due(t) or over):
             batch = b.take()
-            last = first + len(batch) - 1
-            out.write(f"== {path} lines {first}-{last} ==\n" + "".join(l + "\n" for l in batch))
-            out.flush()
-            st["line"], st["spoke"] = last, True
-            first = last + 1
+            # A catch-up (joined late, or a meeting missed whole) arrives at
+            # once; blocks of at most MAX_BATCH lines keep each event readable.
+            for i in range(0, len(batch), MAX_BATCH):
+                part = batch[i:i + MAX_BATCH]
+                last = first + len(part) - 1
+                out.write(f"== {path} lines {first}-{last} ==\n" + "".join(l + "\n" for l in part))
+                out.flush()
+                first = last + 1
+            st["line"], st["spoke"] = first - 1, True
         if over:
             st["offset"] = path.stat().st_size if path.exists() else off
             st["done"] = True
@@ -761,10 +766,28 @@ def follow(quiet: float, max_wait: float, poll: float = 2.0, out=sys.stdout,
     while not until():
         p = latest()
         if p is None or finished(p):
-            sleep(poll)
+            gone = missed()
+            if gone:  # ended while nobody watched: read it whole, then move on
+                watch(gone[0], quiet, max_wait, poll=1.0, out=out, clock=clock, sleep=sleep,
+                      superseded=lambda: True)
+            else:
+                sleep(poll)
             continue
         watch(p, quiet, max_wait, poll=1.0, out=out, clock=clock, sleep=sleep,
               superseded=lambda: latest() != p)
+
+
+def missed(days: float = 7.0) -> list[Path]:
+    """Transcripts from the last `days` that no watch ever opened (no
+    `.watch` state), oldest first, leaving out the newest, which `follow`
+    watches live. Capture runs without the meeting session; this is how a
+    meeting it slept through still reaches it."""
+    d = meetings_dir()
+    if not d.exists():
+        return []
+    cut = time.time() - days * 86400
+    ts = sorted((p for p in d.glob("*.txt") if p != skip_file()), key=lambda p: p.stat().st_mtime)
+    return [p for p in ts[:-1] if p.stat().st_mtime >= cut and not _state(p).exists()]
 
 
 # ============================================================ cli

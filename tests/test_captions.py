@@ -375,3 +375,26 @@ def test_follow_moves_to_the_next_meeting_and_drops_a_dead_one(home):
     s = out.getvalue()
     assert "before the crash" in s and f"meeting ended: {dead}" in s
     assert "hello" in s and f"meeting ended: {state['live']}" in s
+
+
+def test_follow_catches_up_a_meeting_nobody_watched(home):
+    """Capture runs without the meeting session; a meeting that ended while
+    it was off is read whole, in blocks, once nothing is live."""
+    gone = captions.new_transcript("missed", "teams")
+    captions.append(gone, [f"09:00:{i % 60:02d} A: line {i}" for i in range(captions.MAX_BATCH + 5)] + [captions.END])
+    newer = captions.new_transcript("quiet", "teams")
+    captions.end(newer)
+    run_watch(newer, Clock(), {})                      # the newest one was watched
+    assert captions.missed() == [gone]
+    out, clock = io.StringIO(), Clock()
+
+    def sleep(_):
+        clock.t += 5
+
+    captions.follow(quiet=10, max_wait=60, out=out, clock=clock, sleep=sleep,
+                    until=lambda: captions.finished(gone))
+    s = out.getvalue()
+    n = captions.MAX_BATCH
+    assert f"lines 1-{n} ==" in s and f"lines {n + 1}-" in s
+    assert f"line {n + 4}" in s and f"meeting ended: {gone}" in s
+    assert captions.missed() == []
