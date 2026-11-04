@@ -1481,6 +1481,16 @@ def _size(n: int | None) -> str:
     return f"{n} B" if n < 1024 else f"{n / 1024:.0f} KB" if n < 1024 ** 2 else f"{n / 1024 ** 2:.1f} MB"
 
 
+def promote_back(back: str, version: Any) -> str:
+    """Where Promote lands: /deliverables with the filters the click came from.
+
+    Only the page's own filter keys survive, so the redirect can never point
+    anywhere but /deliverables."""
+    from urllib.parse import parse_qsl, urlencode
+    keep = [(k, v) for k, v in parse_qsl(back.lstrip("?")) if k in ("days", "client", "q", "k") and v]
+    return "/deliverables?" + urlencode(keep + [("promoted", str(version))])
+
+
 def deliverables_page(v: dict[str, Any]) -> str:
     """Files finished tasks produced, by client, each beside what Ben owes on it."""
     from urllib.parse import urlencode
@@ -1546,6 +1556,7 @@ def deliverables_page(v: dict[str, Any]) -> str:
             name += (f'<form method="post" action="/api/promote" class="act" style="display:inline">'
                      f'<input type="hidden" name="task" value="{esc(d["task_id"])}">'
                      f'<input type="hidden" name="path" value="{esc(d["path"])}">'
+                     f'<input type="hidden" name="back" value="">'
                      f'<button class="primary" title="Copy to {esc(c)}/deliverables as the next version">'
                      f'Promote</button></form>')
         owed = "".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"])
@@ -1916,6 +1927,8 @@ DELIVERABLES_JS = """<script>
       k ? u.searchParams.set("k", k) : u.searchParams.delete("k");
       history.replaceState(null, "", u); } catch (e) {} };
   tiles.forEach(t => t.addEventListener("click", () => { k = k === t.dataset.k ? "" : t.dataset.k; run(); }));
+  // Promote comes back to this view, filters and all, not to a bare list.
+  document.querySelectorAll('form[action$="promote"] input[name="back"]').forEach(b => b.form.addEventListener("submit", () => { b.value = location.search; }));
   q.addEventListener("input", run); run(); })();
 </script>"""
 
@@ -2346,7 +2359,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         self._json(200, r)
                         return
                     self.send_response(303)
-                    self.send_header("Location", "/deliverables?promoted=" + str(r["version"]))
+                    self.send_header("Location", promote_back((form.get("back") or [""])[0], r["version"]))
                     self.end_headers()
                     return
                 if path == "/api/prompts/take":  # taker=desk from Master - Desk, else the worker

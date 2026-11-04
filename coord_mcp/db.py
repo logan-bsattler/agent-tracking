@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, created_at);
 CREATE INDEX IF NOT EXISTS tasks_kind ON tasks(kind, state);
+CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_id);
 
 CREATE TABLE IF NOT EXISTS decisions (
   id         TEXT PRIMARY KEY,
@@ -409,4 +410,9 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+    # Boards made before this index existed are already at SCHEMA_VERSION, so
+    # the DDL above never adds it. Without it every "has a child task" check
+    # (minder loose ends, unread, reviews) scans the whole tasks table: 9s per
+    # /board load at ~1,300 tasks and ~430 open loose ends (2026-11-04).
+    conn.execute("CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_id)")
     return conn
