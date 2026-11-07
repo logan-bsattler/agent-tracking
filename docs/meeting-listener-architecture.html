@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meeting Listener Architecture</title>
+<style>
+:root {
+  --bg: #f7f7f5; --surface: #ffffff; --band: #efeee9; --text: #1d1d1b; --muted: #66655f;
+  --line: #c9c7bf; --arrow: #8a887f; --py: #2f6f4f; --ai: #7a4fc4; --warn: #a3561b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171716; --surface: #222220; --band: #1d1d1b; --text: #ecebe6; --muted: #a09e96;
+    --line: #3d3c38; --arrow: #77756d; --py: #6fc39a; --ai: #b293f0; --warn: #e3a066;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #171716; --surface: #222220; --band: #1d1d1b; --text: #ecebe6; --muted: #a09e96;
+  --line: #3d3c38; --arrow: #77756d; --py: #6fc39a; --ai: #b293f0; --warn: #e3a066;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 6px; }
+.lede { color: var(--muted); margin: 0 0 28px; max-width: 70ch; }
+h2 { font-size: 17px; margin: 36px 0 12px; }
+figure { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+svg { display: block; width: 100%; height: auto; }
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--muted); padding: 8px 6px 2px; }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; border: 2px solid; }
+.legend .l-py::before { border-color: var(--py); }
+.legend .l-ai::before { border-color: var(--ai); }
+.legend .l-out::before { border-color: var(--line); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; border-top: 4px solid var(--line); }
+.card.py { border-top-color: var(--py); }
+.card.ai { border-top-color: var(--ai); }
+.card h3 { margin: 0 0 2px; font-size: 15px; }
+.card .where { font-size: 12.5px; color: var(--muted); margin: 0 0 10px; }
+.card ul { margin: 0; padding-left: 18px; }
+.card li { margin: 4px 0; }
+code { font: 12.5px ui-monospace, "Cascadia Mono", Consolas, monospace; background: var(--band); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.gaps .card { border-top-color: var(--warn); }
+footer { margin-top: 40px; font-size: 12.5px; color: var(--muted); }
+
+/* diagram */
+.band { fill: var(--band); }
+.lane { fill: var(--muted); font-size: 11px; letter-spacing: .08em; font-weight: 600; }
+.box { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+.box.py { stroke: var(--py); stroke-width: 2; }
+.box.ai { stroke: var(--ai); stroke-width: 2.5; }
+.t { fill: var(--text); font-size: 14px; font-weight: 600; }
+.s { fill: var(--muted); font-size: 12px; }
+.flow { stroke: var(--arrow); stroke-width: 1.6; fill: none; marker-end: url(#ah); }
+.ahead { fill: var(--arrow); }
+.tag { fill: var(--warn); font-size: 11px; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Meeting listener</h1>
+  <p class="lede">Three separate stages, and only the middle one uses a model. A Python process reads Teams captions off the screen into transcript files. A dedicated Claude session reads those files in batches, writes notes and proposes intents. Client agents read the notes through <code>coord_meeting_notes</code>.</p>
+
+  <figure>
+    <svg viewBox="0 0 760 710" role="img" aria-label="Pipeline from Teams captions to transcript file, listener session, notes and intents, then client agents and Master">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path class="ahead" d="M0,0 L10,5 L0,10 z"/>
+        </marker>
+      </defs>
+
+      <rect class="band" x="0" y="0" width="760" height="296" rx="8"/>
+      <rect class="band" x="0" y="402" width="760" height="186" rx="8"/>
+      <text class="lane" x="18" y="22">1 · CAPTURE — PYTHON, NO MODEL</text>
+      <text class="lane" x="18" y="322">2 · DELIVERY</text>
+      <text class="lane" x="18" y="424">3 · INTERPRETATION — CLAUDE</text>
+      <text class="lane" x="18" y="612">4 · DOWNSTREAM</text>
+
+      <!-- capture -->
+      <rect class="box" x="210" y="36" width="340" height="56" rx="10"/>
+      <text class="t" x="380" y="60" text-anchor="middle">Teams captions pane</text>
+      <text class="s" x="380" y="78" text-anchor="middle">read through UI Automation (comtypes)</text>
+
+      <rect class="box py" x="210" y="128" width="340" height="56" rx="10"/>
+      <text class="t" x="380" y="152" text-anchor="middle">captions auto</text>
+      <text class="s" x="380" y="170" text-anchor="middle">pythonw from logon · TeamsDiffer · Auto</text>
+
+      <rect class="box" x="210" y="220" width="340" height="56" rx="10"/>
+      <text class="t" x="380" y="244" text-anchor="middle">Transcript file</text>
+      <text class="s" x="380" y="262" text-anchor="middle">~/.coord/meetings/&lt;date&gt;-&lt;title&gt;.txt</text>
+
+      <!-- delivery -->
+      <rect class="box py" x="210" y="334" width="340" height="56" rx="10"/>
+      <text class="t" x="380" y="358" text-anchor="middle">captions watch --follow</text>
+      <text class="s" x="380" y="376" text-anchor="middle">Batcher 20s quiet / 90s max · resumes via .watch</text>
+
+      <!-- interpretation -->
+      <rect class="box ai" x="210" y="436" width="340" height="56" rx="10"/>
+      <text class="t" x="380" y="460" text-anchor="middle">Listener session</text>
+      <text class="s" x="380" y="478" text-anchor="middle">C:\development\meeting-listener · 2 tools only</text>
+
+      <rect class="box" x="80" y="526" width="280" height="56" rx="10"/>
+      <text class="t" x="220" y="550" text-anchor="middle">&lt;transcript&gt;.notes.md</text>
+      <text class="s" x="220" y="568" text-anchor="middle">client: line · ## Notes · ## Proposed</text>
+
+      <rect class="box" x="400" y="526" width="280" height="56" rx="10"/>
+      <text class="t" x="540" y="550" text-anchor="middle">coord_propose_intent</text>
+      <text class="s" x="540" y="568" text-anchor="middle">source: meeting · trust: untrusted</text>
+
+      <!-- downstream -->
+      <rect class="box" x="80" y="626" width="280" height="56" rx="10"/>
+      <text class="t" x="220" y="650" text-anchor="middle">Client agents</text>
+      <text class="s" x="220" y="668" text-anchor="middle">coord_meeting_notes, filtered by client</text>
+
+      <rect class="box" x="400" y="626" width="280" height="56" rx="10"/>
+      <text class="t" x="540" y="650" text-anchor="middle">Master</text>
+      <text class="s" x="540" y="668" text-anchor="middle">triages: writes the spec, or dismisses</text>
+
+      <!-- arrows -->
+      <path class="flow" d="M380,92 V126"/>
+      <path class="flow" d="M380,184 V218"/>
+      <path class="flow" d="M380,276 V332"/>
+      <path class="flow" d="M380,390 V434"/>
+      <path class="flow" d="M380,492 V509 H220 V524"/>
+      <path class="flow" d="M380,509 H540 V524"/>
+      <path class="flow" d="M220,582 V624"/>
+      <path class="flow" d="M540,582 V624"/>
+
+      <!-- side notes -->
+      <text class="s" x="560" y="114">every 1–2 s</text>
+      <text class="s" x="392" y="314">batches, never per line</text>
+      <text class="tag" x="560" y="520">untrusted: other people's words</text>
+    </svg>
+    <div class="legend">
+      <span class="l-py">Python process (tested, no model)</span>
+      <span class="l-ai">Claude session (costs tokens)</span>
+      <span class="l-out">File or board output</span>
+    </div>
+  </figure>
+
+  <h2>What each stage does</h2>
+  <div class="grid">
+    <div class="card py">
+      <h3>1 · Capture</h3>
+      <p class="where"><code>coord_mcp/captions.py</code> · <code>auto</code></p>
+      <ul>
+        <li>Teams has no live-transcript API, so it reads the captions pane through UI Automation. Windows Live Captions is a fallback without speaker names.</li>
+        <li><code>TeamsDiffer</code> and <code>teams_entries</code> decide what text is new and wait 4 s for a caption to settle. This logic is unit-tested; reading the screen only fetches text.</li>
+        <li><code>Auto</code> starts a transcript when captions show (unless the title matches <code>skip.txt</code>). It ends on window close or 60 s without captions. A generic title like "Microsoft Teams" never splits a meeting.</li>
+        <li>Started at logon by a Startup <code>.lnk</code>. Stops when <code>auto.stop</code> exists.</li>
+      </ul>
+    </div>
+    <div class="card py">
+      <h3>2 · Delivery</h3>
+      <p class="where"><code>captions watch --follow</code>, run by Monitor</p>
+      <ul>
+        <li><code>Batcher</code> sends lines after 20 s of quiet, or once the oldest has waited 90 s. Every batch is a model turn.</li>
+        <li>Saves its place in <code>&lt;transcript&gt;.watch</code>, so a re-armed Monitor (30 min max) sends nothing twice.</li>
+        <li><code>follow</code> tracks the newest transcript and replays meetings nobody watched (<code>missed()</code>).</li>
+      </ul>
+    </div>
+    <div class="card ai">
+      <h3>3 · Interpretation</h3>
+      <p class="where"><code>examples/meeting/CLAUDE.md</code></p>
+      <ul>
+        <li>Separate session with only <code>coord_propose_intent</code> and <code>coord_board_summary</code>. Lives outside <code>C:\development\agents</code> so it doesn't inherit Master's CLAUDE.md.</li>
+        <li>Notes: decisions and reasons, constraints, owners, open questions, with line numbers.</li>
+        <li>One intent per request, commitment, scope change or blocker. Checks <code>## Proposed</code> first so it doesn't propose the same item twice.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>4 · Downstream</h3>
+      <p class="where"><code>coord_mcp/notes.py</code>, <code>coord_mcp/meetings.py</code></p>
+      <ul>
+        <li><code>coord_meeting_notes</code> decides which client a meeting belongs to: the notes' <code>client:</code> line, then the calendar meeting running when captions started, then a subject rule.</li>
+        <li>Meetings with no client are visible to Master only. Internal meetings stay internal.</li>
+        <li>The calendar import also drives meeting-hours tracking, separate from transcripts.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>Known gaps (as of 2026-10-26)</h2>
+  <div class="grid gaps">
+    <div class="card">
+      <h3>Logon start unproven</h3>
+      <ul><li>The <code>.lnk</code> replaced a blocked <code>.cmd</code>, but hadn't yet been seen to start at a real logon.</li></ul>
+    </div>
+    <div class="card">
+      <h3>Dashboard has no logon start</h3>
+      <ul><li>Port 8765 has to be restarted by hand after a reboot.</li></ul>
+    </div>
+  </div>
+
+  <footer>From the coord-mcp source and session notes, 2026-11-06. The gaps have not been re-checked since 2026-10-26.</footer>
+</main>
+</body>
+</html>
