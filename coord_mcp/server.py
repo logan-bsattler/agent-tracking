@@ -687,6 +687,9 @@ async def coord_meeting_notes(params: MeetingNotesInput) -> str:
 
 
 def main() -> None:
+    from .backup import start_daily
+
+    start_daily()
     mcp.run()
 
 
