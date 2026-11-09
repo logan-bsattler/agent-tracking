@@ -321,6 +321,40 @@ def ensure_promotions(conn: sqlite3.Connection) -> None:
         conn.executescript(PROMOTIONS_DDL)
 
 
+# Client projects: the workstreams above the task (docs/client-projects.md).
+# Created on first use, like task_deps and promotions: no SCHEMA_VERSION bump
+# while older servers are still running. tasks.project_id is added the same
+# way; children inherit it, so only roots carry it.
+PROJECTS_DDL = """
+CREATE TABLE IF NOT EXISTS projects (
+  id           TEXT PRIMARY KEY,
+  client       TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  goal         TEXT,
+  state        TEXT NOT NULL CHECK (state IN ('active','waiting','done','dropped')),
+  pipeline_ids TEXT,
+  summary      TEXT,
+  summary_at   INTEGER,
+  summary_by   TEXT,
+  next_step    TEXT,
+  sp_snapshot  TEXT,
+  created_at   INTEGER NOT NULL,
+  closed_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS projects_client ON projects(client, state);
+"""
+
+
+def ensure_projects(conn: sqlite3.Connection) -> None:
+    """Create projects and tasks.project_id if this file has none yet. One
+    indexed read when both exist, so every reader can call it."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'").fetchone() is None:
+        conn.executescript(PROJECTS_DDL)
+    if "project_id" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+        conn.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT REFERENCES projects(id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project_id)")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Additive migrations. CREATE TABLE IF NOT EXISTS won't add a column to a
     table that already exists, so do it here."""

@@ -253,7 +253,8 @@ def pipeline_id(conn: sqlite3.Connection, task_id: str) -> str | None:
         except ValueError:
             spec = {}
         tid = r["parent_id"] or (spec.get("checkin_of") if isinstance(spec, dict) else None)
-    return None
+    from .projects import single_pipeline  # the project's one item, when it has exactly one
+    return single_pipeline(conn, task_id)
 
 
 PIPELINE_NOTE = "Pipeline note"  # the decision master records once it has added the note

@@ -1100,7 +1100,8 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
     queued_note = (f'<span class="age">{queued} queued for master</span>' if queued
                    else '<span class="age">sent to master when idle</span>')
     minder_note = f'<span class="age minder" title="{esc(MINDER_TITLE)}">{esc(minder_line(v.get("minder"), t))}</span>'
-    scope = (f'<span class="scope">showing <b>{esc(client)}</b> · <a href="/board">all clients</a></span>'
+    scope = (f'<span class="scope">showing <b>{esc(client)}</b> · '
+             f'<a href="/client/{quote(client, safe="")}">projects</a> · <a href="/board">all clients</a></span>'
              if client else "")
     def grp(title: str, rows: list, empty: str, cls: str = "", shut: bool = False) -> str:
         fold = ' data-fold="closed"' if shut else ""
@@ -1229,11 +1230,21 @@ button.kpi { font:inherit; text-align:left; cursor:pointer; width:100%; }
 """
 
 # Nav links in the order every page shows them; the current page is bold.
-NAV = (("/", "Usage"), ("/board", "Board"), ("/queue", "Queue"), ("/hours", "Hours"), ("/drafts", "Drafts"),
+NAV = (("/", "Usage"), ("/board", "Board"), ("/clients", "Clients"), ("/queue", "Queue"), ("/hours", "Hours"), ("/drafts", "Drafts"),
        ("/deliverables", "Deliverables"), ("/intents", "Intents"))
 
 SEEN_BOX = ('<span class="seenbox"><span id="newcount" class="age"></span>'
             '<button id="seen" type="button">Mark seen</button></span>')
+
+
+def client_keys(conn: sqlite3.Connection) -> list[str]:
+    """Every client with a page: the known keys in their usual order, then any
+    other assigned_to on the board. Master is not a client."""
+    seen = list(hours.CLIENTS)
+    for r in conn.execute("SELECT DISTINCT assigned_to FROM tasks WHERE assigned_to IS NOT NULL ORDER BY 1"):
+        if r[0] not in seen and r[0] != "Master":
+            seen.append(r[0])
+    return seen
 
 
 def page(current: str, title: str, h1: str, sub: str, body: str, actions: str = "",
@@ -1347,8 +1358,13 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
         meta["parent"] = d["parent_id"]
     if d["from_intent"]:
         meta["from intent"] = d["from_intent"]
+    proj = d.get("project")
     cards = ['<div class="card"><dl class="kv">' + "".join(
-        f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in meta.items()) + "</dl></div>"]
+        f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in meta.items())
+        + (f'<dt>project</dt><dd><a class="drill" href="/client/{quote(proj["client"], safe="")}#p-{esc(proj["id"])}">'
+           f'{esc(proj["title"])}</a>{"" if proj["own"] else " <span class=muted>(inherited)</span>"}</dd>'
+           if proj else "")
+        + "</dl></div>"]
     files = d.get("files") or []
     link = _linker(d["id"], files)
     if files:
@@ -2348,6 +2364,36 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     self.send_header("Location", "/queue?done=" + quote(f'{r["count"]} {word}'))
                     self.end_headers()
                     return
+                if path == "/api/project":  # /client/<key>: Ben's add, edit and attach
+                    from . import projects
+                    one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+                    act = one("action")
+                    try:
+                        if act == "add":
+                            if one("client") not in client_keys(conn):
+                                raise ValueError(f"unknown client {one('client')!r}")
+                            projects.add(conn, one("client"), one("title"), one("goal") or None, one("pipeline") or None)
+                        elif act == "set":
+                            projects.update(conn, one("project"), by="ben",
+                                            **{k: (form.get(k) or [None])[0] for k in
+                                               ("title", "goal", "state", "summary", "next_step")},
+                                            pipeline_ids=(form.get("pipeline") or [None])[0])
+                        elif act == "attach":
+                            if not form.get("task"):
+                                raise ValueError("tick at least one task")
+                            projects.attach(conn, one("project"), form["task"])
+                        else:
+                            raise ValueError(f"unknown action {act!r}")
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    back = one("back")
+                    if not re.fullmatch(r"/client/[\w%.-]+", back):
+                        back = "/clients"
+                    self.send_response(303)
+                    self.send_header("Location", back)
+                    self.end_headers()
+                    return
                 if path == "/api/promote":  # Promote on /deliverables: Ben's click, never an agent's
                     try:
                         r = store.promote(conn, (form.get("task") or [""])[0].strip(),
@@ -2412,6 +2458,17 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 tid = path.rsplit("/", 1)[1]
                 return task_page(store.task_detail(conn, tid), tid,
                                  queued="queued" in self._query).encode("utf-8")
+            if path == "/clients":
+                from . import client_pages, projects
+                t = int(time.time())
+                return client_pages.clients_page(projects.clients_overview(conn, client_keys(conn), t), t).encode("utf-8")
+            if path.startswith("/client/"):
+                from urllib.parse import unquote
+                from . import client_pages, projects
+                key = unquote(path[len("/client/"):])
+                if key not in client_keys(conn):
+                    return None
+                return client_pages.client_page(projects.client_view(conn, key)).encode("utf-8")
             if path == "/deliverables":
                 # Not `days`: assigning it here would shadow serve()'s and break "/".
                 window = int((self._query.get("days") or ["14"])[0] or 14)

@@ -1241,6 +1241,12 @@ def task_detail(conn: sqlite3.Connection, task_id: str, root: Path | None = None
     d["spec"] = json.loads(d["spec"] or "null")
     d["result"] = json.loads(d["result"]) if d["result"] else None
     d["parks"] = parks(conn, task_id)
+    from . import projects
+    pid = projects.project_of(conn, task_id)
+    d["project"] = None
+    if pid:
+        p = projects.get(conn, pid)
+        d["project"] = {"id": pid, "title": p["title"], "client": p["client"], "own": d.get("project_id") == pid}
     d["decisions"] = [dict(x) for x in conn.execute(
         "SELECT id, statement, because, supersedes, created_at FROM decisions WHERE task_id=? ORDER BY created_at",
         (task_id,))]

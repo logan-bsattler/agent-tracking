@@ -64,37 +64,40 @@ the 3%: link the project once and every task under it bills correctly.
 shown with its age, never edited on the board and never written back. Status,
 dates, estimates and percent complete remain Ben's.
 
-## Now: dashboard and CLI (no schema bump)
+## Now: dashboard and CLI (no schema bump) — shipped
 
 Same pattern as `task_deps` and `promotions`: created on first use, so live
 coord servers are untouched.
 
-1. **Storage.** `PROJECTS_DDL` plus `ensure_projects(conn)`, which creates
-   the table and adds `project_id` to `tasks` and `decisions` by
-   `ALTER TABLE ... ADD COLUMN` when missing. `SCHEMA_VERSION` stays 11.
+1. **Storage.** `db.PROJECTS_DDL` plus `db.ensure_projects(conn)`, which
+   creates `projects` and adds `tasks.project_id` (indexed) when missing.
+   `SCHEMA_VERSION` stays 11. `decisions.project_id` waits for the restart:
+   until then a project's decisions are the decisions on its tasks.
 2. **CLI** (master or Ben): `python -m coord_mcp.projects`
-   - `add <client> <title> [--goal ..] [--pipeline id,..]`
-   - `attach <project> <task>...` (sets `project_id` on root tasks)
-   - `set <project> --state|--summary|--next|--goal ..`
-   - `show <client>` (the rollup as text)
-3. **`/client/<key>` page.** One card per active or waiting project, newest
-   activity first:
-   - title, goal, state, `summary` with its age, `next_step`
-   - SharePoint snapshot with its age (stale over 7 days shown as such)
-   - open tasks (with waits from `task_deps`), open loose ends, last three
-     decisions
-   - deliverables and their stage (written, reviewed, promoted)
-   - hours to date and this week, from `hours.py` keyed by project
-   - Below the cards: **Unfiled**, the client's root tasks from the last 30
-     days with no project, each with an Attach dropdown (Ben's click, like
-     Promote). Done and dropped projects collapse into one line each.
-4. **`/clients` page.** One row per client: active projects, open tasks,
-   loose ends, unfiled count, oldest stale summary. The entry point for
-   "poor overall view".
-5. **Links in.** Board rows and the task page show the project as a link.
-   The board's client filter links to `/client/<key>`.
-6. **Hours.** `hours.py` gains a project column. The pipeline-keyed export
-   stays as is.
+   `add`, `set`, `attach`, `detach`, `list`, `show <client>`, and
+   `dump <client>` (root tasks, for the backfill).
+3. **Pipeline fallback.** `queue.pipeline_id` falls back to the project's
+   pipeline item when the project names exactly one, so `create_warnings`
+   and the minder's pipeline-note check see it.
+4. **`/client/<key>`.** One card per live project, active first, then by
+   latest activity: goal, summary with its age (stale after 7 days while
+   work is open), next step, SharePoint ids and snapshot, then open tasks
+   (with waits), loose ends, deliverables with stage (written, review
+   verdict, promoted vN), recent decisions, recently finished. Each list
+   shows six and folds the rest. An Edit form per card (Ben's edits stamp
+   `summary_by=ben`). An Add project form in the topbar. **Unfiled**: the
+   client's root tasks from the last 30 days with no project, with
+   checkboxes and one Attach control. Closed projects fold into one card.
+   Writes go through `POST /api/project` (`add`, `set`, `attach`).
+5. **`/clients`** (in the nav). One row per client: active, waiting, open
+   tasks, loose ends, unfiled roots, percent filed, stale summaries, oldest
+   summary, live project titles.
+6. **Links in.** The task page names the project (own or inherited). The
+   board's client scope line links to `/client/<key>`.
+7. **Not in phase one:** per-project hours. `hours.breakdown` takes about
+   8s for one client over 70 days, too slow for a page load; the client
+   page links to `/hours?client=` instead. Board rows do not show the
+   project yet.
 
 Nothing an agent sees changes in this phase.
 
