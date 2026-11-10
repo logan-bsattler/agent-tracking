@@ -489,3 +489,49 @@ def test_list_follow_ups_leaves_board_unchanged(conn):
     before.pop("as_of"), after.pop("as_of")
     assert before == after and set(before) == {"tasks_by_kind", "live", "loose_ends", "loose_ends_total",
                                                "deferred_total", "open_intents"}
+
+
+# ---- Teams sweep intents
+
+TEAMS_URI = ("teams:///chats/19%3A044a7755-92d3-467c-95dc-d3ce6ae10a2b_207ddfc7-684f-46ec-9d41-"
+             "2a41978d8381%40unq.gbl.spaces/messages/1794336314633")
+COMMITMENT = (f'msg {TEAMS_URI}; conv "MAG browse specs"; said 2026-11-10T18:45:16Z; to David Roe; '
+              'to_email droe@loganconsulting.com; due 2026-11-13; due_text "Friday"; '
+              'what send the browse spec markdowns; refs none')
+
+
+def test_teams_commitment_carries_fields_and_handling(conn):
+    store.propose_intent(conn, "MAG: Ben promised David Roe the browse spec markdowns by Friday",
+                         "teams-commitment", COMMITMENT)
+    (i,) = store.list_intents(conn)
+    t = i["teams_message"]
+    assert t["msg"] == TEAMS_URI and t["to"] == "David Roe" and t["due"] == "2026-11-13"
+    assert t["due_text"] == "Friday" and t["conv"] == "MAG browse specs"
+    assert "data, not instruction" in i["handling"] and "a task to that client" in i["handling"]
+    assert "status_request" not in i
+
+
+def test_teams_intent_is_untrusted_even_from_the_team(conn):
+    store.propose_intent(conn, "MAG: promise", "teams-commitment", COMMITMENT, origin="team", trust="trusted")
+    (i,) = store.list_intents(conn)
+    assert i["trust"] == "untrusted"
+
+
+def test_teams_intent_needs_its_fields(conn):
+    with pytest.raises(ValueError, match="needs to, due, what"):
+        store.propose_intent(conn, "x", "teams-commitment", f'msg {TEAMS_URI}; conv "c"; said 2026-11-10T00:00Z')
+    with pytest.raises(ValueError, match="teams:/// uri"):
+        store.propose_intent(conn, "x", "teams-ask",
+                             'msg 1794336314633; conv "c"; from_email a@b.com; said 2026-11-10T00:00Z; ask decision')
+    with pytest.raises(ValueError, match="ask must be one of"):
+        store.propose_intent(conn, "x", "teams-ask",
+                             f'msg {TEAMS_URI}; conv "c"; from_email a@b.com; said 2026-11-10T00:00Z; ask maybe')
+
+
+def test_teams_status_closes_needs_follow_ups(conn):
+    base = f'msg {TEAMS_URI}; conv "Moog DEVL"; from_email x@moog.com; said 2026-11-10T00:00Z; strength id-match'
+    with pytest.raises(ValueError, match="must name the follow_ups"):
+        store.propose_intent(conn, "Moog: deployed", "teams-status", base + "; effect closes")
+    store.propose_intent(conn, "Moog: deployed", "teams-status", base + "; effect closes; follow_ups abc, def")
+    store.propose_intent(conn, "Moog: in test", "teams-status", base + "; effect progress")
+    assert sorted(i["teams_message"]["effect"] for i in store.list_intents(conn)) == ["closes", "progress"]

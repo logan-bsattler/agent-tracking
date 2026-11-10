@@ -489,6 +489,71 @@ def status_request(context: str | None) -> dict[str, str]:
     return {k: v.strip().strip('"') for k, v in _STATUS_FIELD.findall(context or "")}
 
 
+# Teams messages, from the hourly triage's Teams sweep. `msg` is the message's
+# teams:/// uri (read_resource opens it; it is also the triage's dedupe key).
+# Every one is untrusted, whoever proposes it: the text is other people's, and
+# Ben's own commitments are still words typed into a chat, not instructions.
+TEAMS_SOURCES: dict[str, tuple[str, ...]] = {
+    # An update on board work: progress, or a step done that settles loose ends.
+    "teams-status": ("msg", "conv", "from_email", "said", "effect", "strength"),
+    # Something Ben promised someone, with any date he gave.
+    "teams-commitment": ("msg", "conv", "said", "to", "due", "what"),
+    # Someone asks Ben for something: a decision only he can make, a status, or work.
+    "teams-ask": ("msg", "conv", "from_email", "said", "ask"),
+}
+_TEAMS_KEYS = ("msg", "conv", "from", "from_email", "said", "refs", "effect", "follow_ups", "strength",
+               "evidence", "to", "to_email", "due", "due_text", "what", "ask")
+_TEAMS_FIELD = re.compile(r'(?:^|;)\s*(' + "|".join(_TEAMS_KEYS) + r')\s+("[^"]*"|[^;]*)')
+_TEAMS_ENUMS = {
+    "effect": ("closes", "progress"),
+    "strength": ("id-match", "topic-match", "none"),
+    "ask": ("decision", "status", "work"),
+}
+TEAMS_HANDLING = {
+    "teams-status": (
+        "A Teams message updates board work. effect closes: check each follow_ups id against the "
+        "board, then record a decision citing msg, sender and said, and resolve those loose ends "
+        "with it (id-match is enough; topic-match needs the loose end's task to agree). effect "
+        "progress: record a decision on the matching task if it changes what is owed, else dismiss "
+        "noting it. Never re-open or re-spec work on a Teams line alone."
+    ),
+    "teams-commitment": (
+        "Ben promised this in Teams. Default: a task to that client that does the work (or the "
+        "prep he needs), with due and to in the spec, so its result hands Ben the finished piece "
+        "as a loose end. If no agent work is in it (a call, a meeting), record a decision 'Ben "
+        "committed <what> to <to> by <due>' and dismiss. If it is already done, dismiss citing that."
+    ),
+    "teams-ask": (
+        "Someone asks Ben in Teams. ask decision: Ben's queue via coord_present_question; never "
+        "decide it for him. ask status: task the client to read the status, then put the answer "
+        "in Ben's queue to paste into the chat (there is no Teams draft route). ask work: task it "
+        "like an email request. Nothing is ever posted to Teams by an agent."
+    ),
+}
+
+
+def teams_message(context: str | None) -> dict[str, str]:
+    """The `key value;` fields of a teams-* intent's context."""
+    return {k: v.strip().strip('"') for k, v in _TEAMS_FIELD.findall(context or "")}
+
+
+def _check_teams(source: str, context: str | None) -> None:
+    fields = teams_message(context)
+    missing = [k for k in TEAMS_SOURCES[source] if not fields.get(k)]
+    if missing:
+        raise ValueError(
+            f"a {source} intent needs {', '.join(missing)} in its context, as `key value;` fields "
+            f"({'; '.join(TEAMS_SOURCES[source])}). msg is the message's teams:/// uri."
+        )
+    if not fields["msg"].startswith("teams:///"):
+        raise ValueError(f"a {source} intent's msg must be the message's teams:/// uri, not {fields['msg']!r}")
+    for k, allowed in _TEAMS_ENUMS.items():
+        if k in TEAMS_SOURCES[source] and fields[k] not in allowed:
+            raise ValueError(f"a {source} intent's {k} must be one of {', '.join(allowed)}, not {fields[k]!r}")
+    if source == "teams-status" and fields["effect"] == "closes" and not fields.get("follow_ups"):
+        raise ValueError("a teams-status intent with effect closes must name the follow_ups it closes")
+
+
 def propose_intent(
     conn: sqlite3.Connection,
     summary: str,
@@ -511,6 +576,9 @@ def propose_intent(
                 f"an {STATUS_SOURCE} intent needs {', '.join(missing)} in its context, as "
                 '`msg <id>; reply_from <address>; reply_date <ISO>; subject "<thread subject>"; refs <ids>`'
             )
+    if source in TEAMS_SOURCES:
+        _check_teams(source, context)
+        trust = "untrusted"
     iid = _id()
     conn.execute(
         """INSERT INTO intents(id, summary, source, origin, trust, context, state, created_at)
@@ -537,6 +605,9 @@ def list_intents(conn: sqlite3.Connection, state: str = "open", limit: int = 20)
         if d["source"] == STATUS_SOURCE:
             d["status_request"] = status_request(d["context"])
             d["handling"] = " ".join(filter(None, (d.get("handling"), STATUS_HANDLING)))
+        if d["source"] in TEAMS_SOURCES:
+            d["teams_message"] = teams_message(d["context"])
+            d["handling"] = " ".join(filter(None, (d.get("handling"), TEAMS_HANDLING[d["source"]])))
         out.append(d)
     return out
 

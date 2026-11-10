@@ -416,7 +416,9 @@ class ProposeIntentInput(Strict):
     summary: str = Field(..., description="One line on what might need doing. A pointer, not the content.", max_length=200)
     source: str = Field(..., description="Where this came from, e.g. 'email', 'ticket', 'slack'. 'email-status' "
                         "for a client asking for a status update: context must then name msg, reply_from, "
-                        "reply_date and subject", max_length=40)
+                        "reply_date and subject. 'teams-status', 'teams-commitment', 'teams-ask' for Teams messages: "
+                        "context then needs that source's `key value;` fields (msg is the teams:/// uri), and "
+                        "the intent is always untrusted", max_length=40)
     context: str | None = Field(
         default=None,
         description="A reference to the source (message id, URL, item id) plus what the lead will need. Reference it, don't paste it.",
@@ -476,7 +478,11 @@ async def coord_list_intents(params: ListIntentsInput) -> str:
     refs} and its handling says how to turn it into a status read and a
     draft_reply.
 
-    Returns JSON: [{id, summary, source, origin, trust, context, created_at, handling?, status_request?}]
+    A source "teams-status", "teams-commitment" or "teams-ask" intent is a
+    Teams message from the hourly sweep. It carries teams_message (its
+    parsed `key value;` fields) and its handling says where it goes.
+
+    Returns JSON: [{id, summary, source, origin, trust, context, created_at, handling?, status_request?, teams_message?}]
     """
     try:
         return _ok(store.list_intents(db(), params.state, params.limit))
