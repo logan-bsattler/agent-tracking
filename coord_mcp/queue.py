@@ -141,16 +141,37 @@ def backfill(conn: sqlite3.Connection, apply: bool = False) -> list[dict[str, An
 def ben_queue(conn: sqlite3.Connection) -> dict[str, Any]:
     """Ben's open loose ends grouped by client, the client with the oldest
     item first, plus what routing moved off his queue in the last week."""
-    from . import store
+    from . import commitments, store
     t = now()
     q = store.current_question(conn)
+    dues = commitments.due_map(conn)
+    by_fu = {r["follow_up_id"]: r for r in conn.execute(
+        "SELECT follow_up_id, due_at, due_basis FROM commitments WHERE state IN ('open','slipped') "
+        "AND due_at IS NOT NULL AND follow_up_id IS NOT NULL ORDER BY due_at DESC")} if dues else {}
     by: dict[str, list[dict[str, Any]]] = {}
     for r in _ben_rows(conn):
         d = dict(r)
         d["route"] = route_for(r["what"], r["client"])
         d["presented"] = bool(q and q.get("follow_up_id") == r["id"])
+        # The effective due date of the item's task (docs/commitments.md), or
+        # of a commitment linked to this loose end itself if that is sooner.
+        cands = [x for x in (dues.get(r["task_id"]), by_fu.get(r["id"])) if x]
+        best = min(cands, key=lambda x: x["due_at"]) if cands else None
+        d["due"] = best["due_at"] if best else None
+        d["due_basis"] = best["due_basis"] if best else None
         by.setdefault(r["client"] or "unassigned", []).append(d)
-    groups = sorted(by.items(), key=lambda kv: kv[1][0]["created_at"])
+
+    def order(d: dict[str, Any]) -> tuple:
+        # Overdue first, then soonest due, then today's order (oldest first).
+        if d["due"] is None:
+            return (2, 0, d["created_at"])
+        return (0 if d["due"] < t else 1, d["due"], d["created_at"])
+
+    for items in by.values():
+        items.sort(key=order)
+    # Groups holding due items first, by their earliest due; the rest by oldest item, as before.
+    groups = sorted(by.items(), key=lambda kv: (0, kv[1][0]["due"], 0) if kv[1][0]["due"] is not None
+                    else (1, 0, min(i["created_at"] for i in kv[1])))
     ensure_routes(conn)
     moved = [dict(r) for r in conn.execute(
         """SELECT r.follow_up_id id, r.to_who client, r.why, r.created_at, f.what, f.state, f.task_id

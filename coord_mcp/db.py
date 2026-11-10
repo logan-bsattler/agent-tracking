@@ -355,6 +355,47 @@ def ensure_projects(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project_id)")
 
 
+# Commitments: what Ben promised whom, by when (docs/commitments.md). Created
+# on first use, like projects and for the same reason: no SCHEMA_VERSION bump
+# while older servers are still running. Folds into DDL at the next restart.
+COMMITMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS commitments (
+  id            TEXT PRIMARY KEY,
+  client        TEXT NOT NULL,
+  project_id    TEXT REFERENCES projects(id),
+  by_who        TEXT NOT NULL DEFAULT 'Ben',
+  to_who        TEXT NOT NULL,
+  to_email      TEXT,
+  what          TEXT NOT NULL,
+  due_at        INTEGER,
+  due_basis     TEXT NOT NULL CHECK (due_basis IN ('stated','inferred','none')),
+  due_text      TEXT,
+  source        TEXT NOT NULL,
+  source_ref    TEXT,
+  source_at     INTEGER,
+  intent_id     TEXT REFERENCES intents(id),
+  task_id       TEXT REFERENCES tasks(id),
+  follow_up_id  TEXT REFERENCES follow_ups(id),
+  state         TEXT NOT NULL CHECK (state IN ('open','done','slipped','dropped')),
+  slipped_at    INTEGER,
+  due_history   TEXT,
+  close_decision_id TEXT REFERENCES decisions(id),
+  created_at    INTEGER NOT NULL,
+  closed_at     INTEGER
+);
+CREATE INDEX IF NOT EXISTS commitments_open ON commitments(state, due_at);
+CREATE INDEX IF NOT EXISTS commitments_task ON commitments(task_id);
+"""
+
+
+def ensure_commitments(conn: sqlite3.Connection) -> None:
+    """Create commitments (and projects, which it references) if this file
+    has none yet. One indexed read when it exists, so every reader can call it."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='commitments'").fetchone() is None:
+        ensure_projects(conn)
+        conn.executescript(COMMITMENTS_DDL)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Additive migrations. CREATE TABLE IF NOT EXISTS won't add a column to a
     table that already exists, so do it here."""

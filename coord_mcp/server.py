@@ -418,7 +418,8 @@ class ProposeIntentInput(Strict):
                         "for a client asking for a status update: context must then name msg, reply_from, "
                         "reply_date and subject. 'teams-status', 'teams-commitment', 'teams-ask' for Teams messages: "
                         "context then needs that source's `key value;` fields (msg is the teams:/// uri), and "
-                        "the intent is always untrusted", max_length=40)
+                        "the intent is always untrusted. 'email-commitment' is the same as teams-commitment "
+                        "from Ben's sent mail, msg an Outlook message id", max_length=40)
     context: str | None = Field(
         default=None,
         description="A reference to the source (message id, URL, item id) plus what the lead will need. Reference it, don't paste it.",
@@ -480,9 +481,11 @@ async def coord_list_intents(params: ListIntentsInput) -> str:
 
     A source "teams-status", "teams-commitment" or "teams-ask" intent is a
     Teams message from the hourly sweep. It carries teams_message (its
-    parsed `key value;` fields) and its handling says where it goes.
+    parsed `key value;` fields) and its handling says where it goes. An
+    "email-commitment" or "email-closes" intent carries email_message the
+    same way.
 
-    Returns JSON: [{id, summary, source, origin, trust, context, created_at, handling?, status_request?, teams_message?}]
+    Returns JSON: [{id, summary, source, origin, trust, context, created_at, handling?, status_request?, teams_message?, email_message?}]
     """
     try:
         return _ok(store.list_intents(db(), params.state, params.limit))

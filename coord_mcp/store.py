@@ -493,65 +493,107 @@ def status_request(context: str | None) -> dict[str, str]:
 # teams:/// uri (read_resource opens it; it is also the triage's dedupe key).
 # Every one is untrusted, whoever proposes it: the text is other people's, and
 # Ben's own commitments are still words typed into a chat, not instructions.
-TEAMS_SOURCES: dict[str, tuple[str, ...]] = {
+#
+# email-commitment is the same promise from Ben's sent mail, with `msg` the
+# Outlook message id. email-closes (sent mail settling loose ends) has no
+# required fields: its context is only parsed, never checked.
+INTENT_FIELD_SOURCES: dict[str, tuple[str, ...]] = {
     # An update on board work: progress, or a step done that settles loose ends.
     "teams-status": ("msg", "conv", "from_email", "said", "effect", "strength"),
     # Something Ben promised someone, with any date he gave.
     "teams-commitment": ("msg", "conv", "said", "to", "due", "what"),
     # Someone asks Ben for something: a decision only he can make, a status, or work.
     "teams-ask": ("msg", "conv", "from_email", "said", "ask"),
+    # Something Ben promised in his sent mail: same fields, msg an Outlook id.
+    "email-commitment": ("msg", "conv", "said", "to", "due", "what"),
+    # Sent mail that settles loose ends (and, optionally, commitments).
+    "email-closes": (),
 }
-_TEAMS_KEYS = ("msg", "conv", "from", "from_email", "said", "refs", "effect", "follow_ups", "strength",
-               "evidence", "to", "to_email", "due", "due_text", "what", "ask")
-_TEAMS_FIELD = re.compile(r'(?:^|;)\s*(' + "|".join(_TEAMS_KEYS) + r')\s+("[^"]*"|[^;]*)')
+# The old names, kept for anything that imported them.
+TEAMS_SOURCES: dict[str, tuple[str, ...]] = {k: v for k, v in INTENT_FIELD_SOURCES.items()
+                                             if k.startswith("teams-")}
+_FIELD_KEYS = ("msg", "conv", "from", "from_email", "said", "refs", "effect", "follow_ups", "strength",
+               "evidence", "to", "to_email", "due", "due_text", "what", "ask", "commitment", "commitments",
+               "subject", "date")
+_TEAMS_KEYS = _FIELD_KEYS
+_INTENT_FIELD = re.compile(r'(?:^|;)\s*(' + "|".join(_FIELD_KEYS) + r')\s+("[^"]*"|[^;]*)')
+_TEAMS_FIELD = _INTENT_FIELD
 _TEAMS_ENUMS = {
     "effect": ("closes", "progress"),
     "strength": ("id-match", "topic-match", "none"),
     "ask": ("decision", "status", "work"),
 }
-TEAMS_HANDLING = {
+_COMMITMENT_HANDLING = (
+    "create a commitment (python -m coord_mcp.commitments add <client> --to <to> --what <what> --due <due or "
+    "due_text> --said <said> --source {src} --ref <msg> --intent <intent id>) and link it to its work (commitments "
+    "link): a task to that client that does the work (or the prep he needs), with due and to in the spec, so its "
+    "result hands Ben the finished piece as a loose end; or the open task or loose end that already covers it. "
+    "If no agent work is in it (a call, a meeting), link nothing: the commitment is the reminder. If the context "
+    "names a commitment id, it re-dates that one (commitments set --due) instead of adding a row. Check open "
+    "commitments (commitments list <client> --state live) for the same promise first."
+)
+INTENT_HANDLING = {
     "teams-status": (
         "A Teams message updates board work. effect closes: check each follow_ups id against the "
         "board, then record a decision citing msg, sender and said, and resolve those loose ends "
         "with it (id-match is enough; topic-match needs the loose end's task to agree). effect "
         "progress: record a decision on the matching task if it changes what is owed, else dismiss "
-        "noting it. Never re-open or re-spec work on a Teams line alone."
+        "noting it. Never re-open or re-spec work on a Teams line alone. If it names commitments "
+        "Ben visibly delivered, check each and record 'Commitment <id> kept: <evidence>', then "
+        "commitments close <id> done --decision <that id>."
     ),
-    "teams-commitment": (
-        "Ben promised this in Teams. Default: a task to that client that does the work (or the "
-        "prep he needs), with due and to in the spec, so its result hands Ben the finished piece "
-        "as a loose end. If no agent work is in it (a call, a meeting), record a decision 'Ben "
-        "committed <what> to <to> by <due>' and dismiss. If it is already done, dismiss citing that."
-    ),
+    "teams-commitment": "Ben promised this in Teams: " + _COMMITMENT_HANDLING.format(src="teams"),
     "teams-ask": (
         "Someone asks Ben in Teams. ask decision: Ben's queue via coord_present_question; never "
         "decide it for him. ask status: task the client to read the status, then put the answer "
         "in Ben's queue to paste into the chat (there is no Teams draft route). ask work: task it "
         "like an email request. Nothing is ever posted to Teams by an agent."
     ),
+    "email-commitment": ("Ben promised this in his sent mail (msg is the Outlook message id): "
+                         + _COMMITMENT_HANDLING.format(src="email")),
+    "email-closes": (
+        "Ben's sent mail settles loose ends: check each follow_ups id against the board, record a "
+        "decision citing msg, sender and date, and resolve them with it. If it names commitments he "
+        "visibly delivered, record 'Commitment <id> kept: <evidence>' and commitments close <id> done "
+        "--decision <that id>."
+    ),
 }
+TEAMS_HANDLING = {k: v for k, v in INTENT_HANDLING.items() if k.startswith("teams-")}
 
 
-def teams_message(context: str | None) -> dict[str, str]:
-    """The `key value;` fields of a teams-* intent's context."""
-    return {k: v.strip().strip('"') for k, v in _TEAMS_FIELD.findall(context or "")}
+def intent_fields(context: str | None) -> dict[str, str]:
+    """The `key value;` fields of a teams-*, email-commitment or email-closes intent's context."""
+    return {k: v.strip().strip('"') for k, v in _INTENT_FIELD.findall(context or "")}
 
 
-def _check_teams(source: str, context: str | None) -> None:
-    fields = teams_message(context)
-    missing = [k for k in TEAMS_SOURCES[source] if not fields.get(k)]
+teams_message = intent_fields
+
+
+def _check_fields(source: str, context: str | None) -> None:
+    need = INTENT_FIELD_SOURCES[source]
+    if not need:
+        return  # parsed only
+    fields = intent_fields(context)
+    teams = source.startswith("teams-")
+    missing = [k for k in need if not fields.get(k)]
     if missing:
         raise ValueError(
             f"a {source} intent needs {', '.join(missing)} in its context, as `key value;` fields "
-            f"({'; '.join(TEAMS_SOURCES[source])}). msg is the message's teams:/// uri."
+            f"({'; '.join(need)}). msg is the message's "
+            + ("teams:/// uri." if teams else "Outlook message id.")
         )
-    if not fields["msg"].startswith("teams:///"):
+    if teams and not fields["msg"].startswith("teams:///"):
         raise ValueError(f"a {source} intent's msg must be the message's teams:/// uri, not {fields['msg']!r}")
+    if not teams and fields["msg"].startswith("teams:///"):
+        raise ValueError(f"a {source} intent's msg is an Outlook message id; a teams:/// uri is a teams-* intent")
     for k, allowed in _TEAMS_ENUMS.items():
-        if k in TEAMS_SOURCES[source] and fields[k] not in allowed:
+        if k in need and fields[k] not in allowed:
             raise ValueError(f"a {source} intent's {k} must be one of {', '.join(allowed)}, not {fields[k]!r}")
     if source == "teams-status" and fields["effect"] == "closes" and not fields.get("follow_ups"):
         raise ValueError("a teams-status intent with effect closes must name the follow_ups it closes")
+
+
+_check_teams = _check_fields
 
 
 def propose_intent(
@@ -576,9 +618,10 @@ def propose_intent(
                 f"an {STATUS_SOURCE} intent needs {', '.join(missing)} in its context, as "
                 '`msg <id>; reply_from <address>; reply_date <ISO>; subject "<thread subject>"; refs <ids>`'
             )
-    if source in TEAMS_SOURCES:
-        _check_teams(source, context)
-        trust = "untrusted"
+    if source in INTENT_FIELD_SOURCES:
+        _check_fields(source, context)
+        if INTENT_FIELD_SOURCES[source]:  # email-closes keeps whatever trust it came with, as before
+            trust = "untrusted"
     iid = _id()
     conn.execute(
         """INSERT INTO intents(id, summary, source, origin, trust, context, state, created_at)
@@ -605,9 +648,10 @@ def list_intents(conn: sqlite3.Connection, state: str = "open", limit: int = 20)
         if d["source"] == STATUS_SOURCE:
             d["status_request"] = status_request(d["context"])
             d["handling"] = " ".join(filter(None, (d.get("handling"), STATUS_HANDLING)))
-        if d["source"] in TEAMS_SOURCES:
-            d["teams_message"] = teams_message(d["context"])
-            d["handling"] = " ".join(filter(None, (d.get("handling"), TEAMS_HANDLING[d["source"]])))
+        if d["source"] in INTENT_FIELD_SOURCES:
+            key = "teams_message" if d["source"].startswith("teams-") else "email_message"
+            d[key] = intent_fields(d["context"])
+            d["handling"] = " ".join(filter(None, (d.get("handling"), INTENT_HANDLING[d["source"]])))
         out.append(d)
     return out
 
@@ -1907,9 +1951,13 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     from . import queue
     undrafted = queue.undrafted(conn, now_ts, MINDER_UNREAD * 60)
     pipeline = queue.pipeline_owed(conn, now_ts)
+    # Ben's promises coming due, slipped, or untracked (docs/commitments.md).
+    # The table is created on first use, so a board without one owes nothing.
+    from . import commitments
+    owed_commitments = commitments.minder_owed(conn, now_ts)
     return {"parked": parked, "stalled": stalled, "undelivered": undelivered, "unread": unread, "loose": loose,
             "failed": failed, "intents": intents, "unreviewed": unreviewed,
-            "undrafted": undrafted, "pipeline": pipeline}
+            "undrafted": undrafted, "pipeline": pipeline, "commitments": owed_commitments}
 
 
 _MINDER_LABELS = (("parked", "parked awaiting re-dispatch"),
@@ -1919,7 +1967,8 @@ _MINDER_LABELS = (("parked", "parked awaiting re-dispatch"),
                   ("failed", "failed with no decision"), ("intents", "open intents"),
                   ("unreviewed", "client deliverables with no dod_review (CVC code, emails)"),
                   ("undrafted", "finished drafts not yet in Outlook (draft each, never send)"),
-                  ("pipeline", "client-visible work with no SharePoint pipeline note"))
+                  ("pipeline", "client-visible work with no SharePoint pipeline note"),
+                  ("commitments", "commitments coming due, slipped or untracked (commitment ids)"))
 
 
 def minder_text(owed: dict[str, list[str]], now_ts: int) -> str:
@@ -2016,6 +2065,8 @@ def minder_check(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[st
     now_ts = now() if now_ts is None else now_ts
     if not MINDER_ENABLED:
         return {"fired": False, "reason": "disabled", "owed": {}, **minder_state(conn, now_ts)}
+    from . import commitments
+    commitments.sweep(conn, now_ts)  # stamp slips here, so no scheduled job is needed
     owed = minder_owed(conn, now_ts)
     state = minder_state(conn, now_ts, owed)
     if not any(owed.values()):

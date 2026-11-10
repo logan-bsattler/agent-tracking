@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import quote
 
 from . import projects
-from .report import _age, esc, page
+from .report import _age, due_chip, esc, page
 
 PROJECT_CSS = """<style>
 table.clients { width:100%; border-collapse:collapse; font-size:13px; }
@@ -56,7 +56,7 @@ def _task(d: dict[str, Any], t: int, extra: str = "") -> str:
              if d.get("waits_on") else "")
     picked = "" if d.get("state") != "open" or d.get("picked_up") else ' <span class="muted">not picked up</span>'
     return (f'<li><a class="drill" href="/board/task/{esc(d["id"])}">{esc(d["title"])}</a> '
-            f'<span class="muted">{esc(d["kind"])} · {esc(_age(d["since"], t))}{extra}</span>{picked}{waits}</li>')
+            f'<span class="muted">{esc(d["kind"])} · {esc(_age(d["since"], t))}{extra}</span>{due_chip(d, t)}{picked}{waits}</li>')
 
 
 def _list(title: str, items: list[str], empty: str, cap: int = 6) -> str:

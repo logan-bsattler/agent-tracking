@@ -817,6 +817,22 @@ def _age_bucket(since: int, t: int) -> str:
     return "old"
 
 
+def due_chip(d: dict[str, Any], t: int | None = None) -> str:
+    """The due chip on a task row: the effective due date of a commitment
+    over it (docs/commitments.md), and "inferred" when nobody stated one."""
+    due = d.get("due")
+    if not due:
+        return ""
+    t = t or int(datetime.now().timestamp())
+    late = due < t
+    label = ("overdue " if late else "due ") + datetime.fromtimestamp(due).strftime("%a %m-%d %H:%M")
+    if d.get("due_basis") == "inferred":
+        label += " · inferred"
+    color = "var(--critical,#d03b3b)" if late else "var(--serious,#c98500)"
+    return (f' <span class="due-chip" data-due="{int(due)}" style="font-size:12px;color:{color};'
+            f'border:1px solid currentColor;border-radius:8px;padding:0 5px">{esc(label)}</span>')
+
+
 def _task_link(tid: str, title: str = "") -> str:
     text = f"{title[:60]} " if title else ""
     return f'<a class="drill" href="/board/task/{esc(tid)}">{esc(text)}<code>{esc(tid[:8])}</code></a>'
@@ -897,6 +913,7 @@ def _items(rows: list[dict[str, Any]], t: int, empty: str, client: bool = True, 
         note = f'<div class="note">{esc(d["note"][:220])}</div>' if d.get("note") else ""
         note += _order_chips(d)
         who = f'<div class="client">{esc(d["client"])}</div>' if client else ""
+        tid += due_chip(d, t)
         age = (verb + " " if verb else "") + _age(d["since"], t)
         out.append(f'<div class="item{"" if client else " bare"}" data-since="{int(d["since"])}" '
                    f'data-age="{_age_bucket(d["since"], t)}">{who}'
@@ -1231,7 +1248,7 @@ button.kpi { font:inherit; text-align:left; cursor:pointer; width:100%; }
 
 # Nav links in the order every page shows them; the current page is bold.
 NAV = (("/", "Usage"), ("/board", "Board"), ("/clients", "Clients"), ("/queue", "Queue"), ("/hours", "Hours"), ("/drafts", "Drafts"),
-       ("/deliverables", "Deliverables"), ("/intents", "Intents"))
+       ("/deliverables", "Deliverables"), ("/intents", "Intents"), ("/commitments", "Commitments"))
 
 SEEN_BOX = ('<span class="seenbox"><span id="newcount" class="age"></span>'
             '<button id="seen" type="button">Mark seen</button></span>')
@@ -1751,7 +1768,7 @@ def queue_page(v: dict[str, Any], done: str = "", fleet: list[dict[str, Any]] | 
         for d in g["items"]:
             hint = (f' <span class="order" title="routing would send this to {esc(c)}">looks like '
                     f'{esc(ROUTE_WORDS[d["route"]])}</span>' if d["route"] else "")
-            asked = ' <b class="st-waiting">presented</b>' if d["presented"] else ""
+            asked = (' <b class="st-waiting">presented</b>' if d["presented"] else "") + due_chip(d, t)
             rows.append(
                 f'<li data-since="{int(d["created_at"])}"><label><input type="checkbox" name="id" '
                 f'value="{esc(d["id"])}" data-client="{esc(c)}"> {esc(d["what"])}</label>{hint}{asked}'
@@ -1779,6 +1796,55 @@ def queue_page(v: dict[str, Any], done: str = "", fleet: list[dict[str, Any]] | 
                      f'{_task_link(m["task_id"])}</span></li>' for m in v["moved"]) + '</ul></div>')
     return page("Queue", f'({v["total"]}) Queue' if v["total"] else "Queue", "Your queue", sub,
                 flash + body, actions=SEEN_BOX, tail=QUEUE_JS)
+
+
+COMMITMENT_STATES = ("live", "open", "slipped", "done", "dropped", "all")
+
+
+def commitments_page(rows: list[dict[str, Any]], clients: list[str], client: str | None = None,
+                     state: str = "live", done: str = "", t: int | None = None) -> str:
+    """Ben's promises: open and slipped first, each by due date, with Done,
+    Drop and Re-date applied in his name (each records a decision first)."""
+    t = t or int(datetime.now().timestamp())
+    live = [c for c in rows if c["state"] in ("open", "slipped")]
+    late = sum(1 for c in live if c["due_at"] and c["due_at"] < t)
+    sub = (f'{len(live)} open, {late} overdue. Done, Drop and Re-date record a decision in your name; nothing '
+           'here contacts anyone.')
+    filt = ('<form method="get" action="/commitments" class="btns">'
+            '<select name="client"><option value="">all clients</option>'
+            + "".join(f'<option{" selected" if c == client else ""}>{esc(c)}</option>' for c in clients)
+            + '</select><select name="state">'
+            + "".join(f'<option{" selected" if x == state else ""}>{x}</option>' for x in COMMITMENT_STATES)
+            + '</select><button>Filter</button></form>')
+    flash = f'<p class="clear">{esc(done)}</p>' if done else ""
+    items = []
+    for c in rows:
+        chip = (due_chip({"due": c["due_at"], "due_basis": c["due_basis"]}, t) if c["due_at"]
+                else ' <span class="muted">no date</span>')
+        links = " ".join(x for x in (
+            _task_link(c["task_id"]) if c["task_id"] else "",
+            f'loose end <code>{esc(c["follow_up_id"])}</code>' if c["follow_up_id"] else "") if x)
+        links = links or '<span class="muted">nothing linked</span>'
+        hist = f' <span class="muted">re-dated {len(c["due_history"])}×</span>' if c["due_history"] else ""
+        slip = ' <b class="st-failed">slipped</b>' if c["slipped_at"] else ""
+        said = f' · {esc(c["due_text"])}' if c["due_text"] else ""
+        btns = ""
+        if c["state"] in ("open", "slipped"):
+            btns = ('<form method="post" action="/api/commitment" class="btns">'
+                    f'<input type="hidden" name="id" value="{esc(c["id"])}">'
+                    '<button name="action" value="done" class="primary">Done</button>'
+                    '<button name="action" value="drop">Drop</button>'
+                    '<input name="due" size="14" maxlength="60" placeholder="Friday / 2026-11-20">'
+                    '<button name="action" value="redate">Re-date</button>'
+                    '<input name="note" size="24" maxlength="200" placeholder="note (optional)"></form>')
+        items.append(
+            f'<li data-since="{int(c["created_at"])}"><b>{esc(c["client"])}</b> · to {esc(c["to_who"])}: '
+            f'{esc(c["what"])}{chip}{slip}{hist} <span class="muted">{esc(c["state"])}{said}</span>'
+            f'<div class="muted">{links} · {esc(c["source"])} · <code>{esc(c["id"])}</code></div>{btns}</li>')
+    body = (f'<div class="card lane"><ul class="queue">{"".join(items)}</ul></div>' if items
+            else '<p class="clear">No commitments here.</p>')
+    return page("Commitments", f"({late}) Commitments" if late else "Commitments", "Commitments", sub,
+                flash + body, actions=filt)
 
 
 def intents_page(v: dict[str, Any]) -> str:
@@ -2364,6 +2430,22 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     self.send_header("Location", "/queue?done=" + quote(f'{r["count"]} {word}'))
                     self.end_headers()
                     return
+                if path == "/api/commitment":  # /commitments: Ben's Done, Drop and Re-date
+                    from . import commitments
+                    one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+                    try:
+                        r = commitments.act(conn, one("action"), one("id"), one("due") or None, one("note"))
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    if "json" in (self.headers.get("Accept") or ""):
+                        self._json(200, r)
+                        return
+                    word = {"done": "kept", "drop": "dropped", "redate": "re-dated"}[one("action")]
+                    self.send_response(303)
+                    self.send_header("Location", "/commitments?done=" + quote(f'{one("id")} {word}'))
+                    self.end_headers()
+                    return
                 if path == "/api/project":  # /client/<key>: Ben's add, edit and attach
                     from . import projects
                     one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
@@ -2440,6 +2522,8 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v["minder"] = store.minder_status(conn)
                 v["fleet"] = store.fleet(conn, v, hours.CLIENTS)
                 v["activity"] = store.activity(conn)
+                from . import commitments
+                commitments.annotate(v, commitments.due_map(conn))
                 client = (self._query.get("client") or [""])[0].strip() or None
                 return board_page(v, client=client).encode("utf-8")
             if m := re.fullmatch(r"/board/question/(\d+)/file", path):
@@ -2468,7 +2552,9 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 key = unquote(path[len("/client/"):])
                 if key not in client_keys(conn):
                     return None
-                return client_pages.client_page(projects.client_view(conn, key)).encode("utf-8")
+                from . import commitments
+                view = commitments.annotate(projects.client_view(conn, key), commitments.due_map(conn))
+                return client_pages.client_page(view).encode("utf-8")
             if path == "/deliverables":
                 # Not `days`: assigning it here would shadow serve()'s and break "/".
                 window = int((self._query.get("days") or ["14"])[0] or 14)
@@ -2481,6 +2567,15 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 fleet = store.fleet(conn, store.operator_view(conn), hours.CLIENTS)
                 return queue_page(queue.ben_queue(conn), (self._query.get("done") or [""])[0][:200], fleet,
                                   (self._query.get("client") or [""])[0].strip() or None).encode("utf-8")
+            if path == "/commitments":
+                from . import commitments
+                client = (self._query.get("client") or [""])[0].strip() or None
+                st = (self._query.get("state") or ["live"])[0].strip() or "live"
+                st = st if st in COMMITMENT_STATES else "live"
+                commitments.sweep(conn)
+                rows = commitments.list_commitments(conn, client, None if st == "all" else st)
+                return commitments_page(rows, client_keys(conn), client, st,
+                                        (self._query.get("done") or [""])[0][:200]).encode("utf-8")
             if path == "/drafts":
                 window = int((self._query.get("days") or ["30"])[0] or 30)
                 client = (self._query.get("client") or [""])[0].strip() or None
