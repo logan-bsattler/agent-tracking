@@ -19,8 +19,11 @@ from mcp.client.stdio import stdio_client
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def params(role: str, db: str) -> StdioServerParameters:
+def params(role: str, db: str, client: str | None = None) -> StdioServerParameters:
     env = dict(os.environ, COORD_ROLE=role, COORD_DB=db, PYTHONPATH=str(ROOT))
+    env.pop("COORD_CLIENT", None)
+    if client:  # a client session: its key, as its folder name would give it
+        env["COORD_CLIENT"] = client
     return StdioServerParameters(command=sys.executable, args=["-m", "coord_mcp"], env=env)
 
 
@@ -51,7 +54,7 @@ async def main() -> int:
     async with stdio_client(params("team", db)) as (tr, tw), ClientSession(tr, tw) as team:
         await team.initialize()
         tools = {t.name for t in (await team.list_tools()).tools}
-        check("team exposes 21 tools", len(tools) == 21, str(sorted(tools)))
+        check("team exposes 22 tools", len(tools) == 22, str(sorted(tools)))
 
         r = await team.call_tool("coord_list_intents", {"params": {}})
         intents = json.loads(text(r))
@@ -126,6 +129,35 @@ async def main() -> int:
         r = await team.call_tool("coord_list_follow_ups", {"params": {"client": "nobody"}})
         check("follow-up list answers with an empty, counted list",
               json.loads(text(r)) == {"follow_ups": [], "total": 0}, text(r))
+
+    # A client session files a draft Ben asked it for in chat: one call, and it
+    # is a finished draft_reply on the board for master to draft in Outlook.
+    body = Path(db).parent / "reply-Corwin.html"
+    body.write_text("Hi Corwin,\n\nThe fix is in DEVL.\n\nThanks!\n", encoding="utf-8")
+    draft = {"done": True, "to": ["corwin@moog.com"], "subject": "RE: QSM-1050438", "body_path": str(body),
+             "summary": "Fix is in DEVL", "reply_from": "corwin@moog.com", "reply_date": "2026-11-13 09:12",
+             "follow_ups": [{"who": "Ben", "what": "Review and draft to Corwin."}]}
+    async with stdio_client(params("team", db, client="Moog")) as (cr, cw), ClientSession(cr, cw) as moog:
+        await moog.initialize()
+        r = await moog.call_tool("coord_file_draft", {"params": {"result": draft, "asked": "Reply to Corwin"}})
+        filed = json.loads(text(r))
+        check("client files a Ben-direct draft as a finished draft_reply",
+              filed.get("state") == "done" and filed.get("from") == "ben-direct", text(r))
+        r = await moog.call_tool("coord_file_draft", {"params": {"result": draft}})
+        check("same body filed twice is refused without parent_id", "parent_id=" in text(r), text(r)[:200])
+        r = await moog.call_tool("coord_get_task", {"params": {"task_id": filed.get("task_id", "")}})
+        got = json.loads(text(r))
+        check("filed draft is Moog's, with its provenance",
+              got.get("assigned_to") == "Moog" and got.get("spec", {}).get("from") == "ben-direct", text(r)[:200])
+
+    async with stdio_client(params("team", db)) as (tr, tw), ClientSession(tr, tw) as lead:
+        await lead.initialize()
+        r = await lead.call_tool("coord_file_draft", {"params": {"result": draft}})
+        check("a non-client session cannot file a draft", "client sessions" in text(r), text(r)[:200])
+        r = await lead.call_tool("coord_get_task_result", {"params": {
+            "task_id": filed.get("task_id", ""), "fields": ["subject", "body_path"]}})
+        check("lead reads the filed draft by field",
+              json.loads(text(r))["result"] == {"subject": "RE: QSM-1050438", "body_path": str(body)}, text(r))
 
     print()
     print("ALL PASS" if not failures else f"{len(failures)} FAILED:\n  " + "\n  ".join(failures))

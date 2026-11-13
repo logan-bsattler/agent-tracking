@@ -1,7 +1,7 @@
 # coord-mcp
 
 A typed task board for Claude Code agent teams. One stdio MCP server per
-session, one SQLite file between them, 21 tools.
+session, one SQLite file between them, 22 tools.
 
 Claude Code's agent teams already handle spawning teammates, messaging and
 lifecycle. This adds the three things they don't:
@@ -45,7 +45,7 @@ surface. The lead/teammate split is in `CLAUDE.md`, not in role gating.
 
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `COORD_ROLE` | `team` | `team` (all 21 tools) or `desktop` (2 tools) |
+| `COORD_ROLE` | `team` | `team` (all 22 tools) or `desktop` (2 tools) |
 | `COORD_DB` | `~/.coord/coord.db` | **Local disk only.** WAL plus OneDrive corrupts. |
 
 ## Flow
@@ -79,6 +79,7 @@ email -> coord_propose_intent -> intents (open, untrusted)
 | `coord_create_task` | team | put a task on the board, get the contract echoed back |
 | `coord_get_task` | team | teammate reads spec and expected result shape |
 | `coord_complete_task` | team | close with a validated result, or a typed failure |
+| `coord_file_draft` | team | client session files a draft Ben asked it for in chat: a finished `draft_reply` in one call |
 | `coord_get_task_result` | team | read a result projected to named fields |
 | `coord_record_decision` | team | write a decision and why |
 | `coord_get_decisions` | team | standing decisions, superseded ones hidden |
@@ -110,6 +111,16 @@ shows it with a **Draft in Outlook** button, which queues master to type it
 into Outlook on the web (`python -m coord_mcp.outlook <task_id>` gives the
 compose deeplink and body), where it autosaves to Drafts. Outlook COM is not
 used: its MAPI namespace hangs from an agent session. Nothing sends.
+
+A draft Ben asks a client session for directly, outside any task, is filed
+with `coord_file_draft(result, asked?, parent_id?)`: the same `draft_reply`
+result, written as a finished task assigned to the calling session's client
+(`COORD_CLIENT` or its folder name; any other session is refused), with
+`spec.from = "ben-direct"`. From there it is any other draft: `/drafts`
+(tagged *Ben direct*), the client-email review gate, the minder's
+"finished drafts not yet in Outlook". The body file must be on disk, and
+the same body filed twice is refused unless `parent_id` names the draft it
+revises.
 
 A reply into an existing thread also gives `reply_from` (the sender of the
 message being answered) and `reply_date`. Master then searches Outlook for

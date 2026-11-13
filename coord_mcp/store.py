@@ -246,6 +246,87 @@ def _complete(conn: sqlite3.Connection, task_id: str, row: sqlite3.Row, validate
     return out
 
 
+# A draft Ben asked a client session for in chat, not through a task master
+# created. It is filed as a finished draft_reply, so it takes the same road as
+# any other: /drafts, the client-email review gate, the minder's "finished
+# drafts not yet in Outlook", and master's python -m coord_mcp.outlook.
+BEN_DIRECT = "ben-direct"
+ASKED_MAX = 300
+
+
+def file_draft(conn: sqlite3.Connection, client: str | None, result: dict[str, Any], asked: str | None = None,
+               title: str | None = None, parent_id: str | None = None,
+               pipeline_task_id: str | None = None, root: Path | None = None) -> dict[str, Any]:
+    """Put a draft a client agent already wrote on the board as a finished
+    draft_reply assigned to that client. One step: the task never sits open,
+    so nothing reads it as undelivered and no one dispatches it.
+
+    client is the calling session's key (server.READER), never the caller's
+    say-so, so a session can only file drafts as itself. result is the
+    draft_reply contract, done: true. The body file must already be on disk.
+    parent_id names the draft this one revises; filing the same body file a
+    second time without it is refused, so one reply is never drafted twice.
+    """
+    from . import queue
+    root = DOCS_ROOT if root is None else root
+    if not client or client.strip().casefold() == DESK or client.strip().casefold() not in client_keys(conn):
+        raise ValueError(f"coord_file_draft is for client sessions, and {client!r} is not a client key. "
+                         "Master creates a draft_reply task with coord_create_task instead.")
+    if not isinstance(result, dict) or result.get("done") is not True:
+        raise ValueError('file a finished draft: result needs "done": true. A draft you could not write is not '
+                         "filed; tell Ben in chat.")
+    if asked is not None and len(asked) > ASKED_MAX:
+        raise ValueError(f"asked is {len(asked)} chars; cap is {ASKED_MAX}")
+    validated = contracts.validate("draft_reply", result)
+    queue.check_grouped(validated.get("follow_ups") or [], client)
+    body = _resolve(str(Path(validated["body_path"]).expanduser()), client, root)
+    if not body.is_file():
+        raise ValueError(f"body_path {validated['body_path']!r} is not on disk (looked at {body}). "
+                         "Write the body file first, then file it.")
+    if parent_id is not None:
+        p = conn.execute("SELECT kind, assigned_to FROM tasks WHERE id=?", (parent_id,)).fetchone()
+        if p is None:
+            raise KeyError(f"unknown task '{parent_id}'")
+        if p["kind"] != "draft_reply" or (p["assigned_to"] or "").casefold() != client.casefold():
+            raise ValueError(f"parent_id {parent_id} must be one of {client}'s draft_reply tasks: "
+                             "the draft this one revises")
+    else:
+        for r in conn.execute("SELECT id, result FROM tasks WHERE kind='draft_reply' AND state='done' "
+                              "AND lower(assigned_to)=lower(?) ORDER BY completed_at DESC", (client,)):
+            prior = json.loads(r["result"] or "{}").get("body_path")
+            if prior and _resolve(str(Path(prior).expanduser()), client, root) == body:
+                raise ValueError(f"{validated['body_path']} is already on the board as task {r['id']}. "
+                                 f"If this is a revision of it, file again with parent_id={r['id']}.")
+    spec = {"from": BEN_DIRECT, "asked": asked, "reply_date": validated.get("reply_date")}
+    spec = {k: v for k, v in spec.items() if v}
+    title = (title or validated["subject"]).strip()[:80] or "Draft reply"
+    # Tables complete_task makes on first use are made before the savepoint:
+    # executescript commits, which would end it early.
+    from .db import ensure_commitments
+    queue.ensure_routes(conn)
+    ensure_commitments(conn)
+    ensure_deps(conn)
+    ensure_promotions(conn)
+    with savepoint(conn, "file_draft"):
+        tid = _id()
+        t = now()
+        conn.execute(
+            """INSERT INTO tasks(id, parent_id, kind, title, spec, state, assigned_to, created_at,
+                                 picked_up_at, pipeline_task_id)
+               VALUES (?,?,'draft_reply',?,?,'open',?,?,?,?)""",
+            (tid, parent_id, title, json.dumps(spec), client, t, t, pipeline_task_id or None),
+        )
+        _event(conn, tid, "picked_up", client)  # no "filed" event: the CHECK list is schema
+        row = conn.execute("SELECT kind, state, assigned_to FROM tasks WHERE id=?", (tid,)).fetchone()
+        out = _complete(conn, tid, row, validated)
+    review = conn.execute("SELECT id FROM tasks WHERE parent_id=? AND kind='dod_review'", (tid,)).fetchone()
+    out.update({"kind": "draft_reply", "from": BEN_DIRECT,
+                "next": ("Master types it into Outlook Drafts" +
+                         (" once its dod_review approves it" if review else "") +
+                         ". Do not paste it into Outlook yourself, and do not message master.")})
+    return out
+
+
 def _project(result: dict[str, Any], fields: list[str] | None) -> tuple[dict[str, Any], list[str]]:
     """The named fields, plus any names that aren't in the result.
 
@@ -1468,13 +1549,15 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
         g = gate.stage(conn, r["id"])
         unreviewed = g is not None and g["stage"] != "approved"
         try:  # the spec's reply_date when the result left it off
-            spec_date = (json.loads(r["spec"] or "{}") or {}).get("reply_date")
+            spec = json.loads(r["spec"] or "{}") or {}
+            spec_date, origin = spec.get("reply_date"), spec.get("from")
         except (ValueError, AttributeError):
-            spec_date = None
+            spec_date = origin = None
         since, since_from = _client_since(conn, r["id"], d["reply_date"] or spec_date)
         d.update({"client": r["assigned_to"] or "—", "completed_at": r["completed_at"],
                   "client_since": since, "client_since_from": since_from,
                   "summary": res.get("summary", ""), "ben": ben.get(r["id"], []),
+                  "from": origin if isinstance(origin, str) else None,
                   "queued": r["id"] in live, "drafted": sent,
                   "waits_on": held_by.get(r["id"], []), "blocks": holds.get(r["id"], []),
                   "review": g and {**g, "label": STAGES[g["stage"]]},

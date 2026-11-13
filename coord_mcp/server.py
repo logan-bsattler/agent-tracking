@@ -119,7 +119,8 @@ class CreateTaskInput(Strict):
 
 @tool("coord_create_task", title="Create task")
 async def coord_create_task(params: CreateTaskInput) -> str:
-    """Put a task on the board, then hand its id to a teammate.
+    """Put a task on the board, then hand its id to a teammate. Client
+    sessions filing a draft Ben asked them for use coord_file_draft.
 
     Write the spec so a fresh session with no history can do the work. The
     response echoes the result shape the teammate will be held to.
@@ -179,6 +180,45 @@ async def coord_complete_task(params: CompleteInput) -> str:
     """
     try:
         return _ok(store.complete_task(db(), params.task_id, params.result))
+    except Exception as e:
+        return _err(e)
+
+
+class FileDraftInput(Strict):
+    result: dict[str, Any] = Field(
+        ...,
+        description=(
+            "The draft_reply result, exactly as coord_complete_task takes it: done (true), to, cc?, "
+            "subject, body_path (the body file, already written), summary, and for a reply to an email "
+            "thread reply_from (sender of the message answered) and reply_date (when it was sent); "
+            "follow_ups? e.g. [{who: 'Ben', what: 'Review and draft to <name>'}]"
+        ),
+    )
+    asked: str | None = Field(default=None, description="What Ben asked for, in a line", max_length=store.ASKED_MAX)
+    title: str | None = Field(default=None, description="Board title; defaults to the subject", max_length=80)
+    parent_id: str | None = Field(default=None, description="The draft_reply task this one revises, if any",
+                                  max_length=40)
+    pipeline_task_id: str | None = Field(default=None, description="SharePoint pipeline item, if you know it",
+                                         max_length=40)
+
+
+@tool("coord_file_draft", title="File draft")
+async def coord_file_draft(params: FileDraftInput) -> str:
+    """Client sessions: file an email draft Ben asked you for directly (in
+    chat, not as a board task). It lands as a finished draft_reply assigned
+    to you, so master drafts it into Outlook the usual way. Write the body to
+    a file first; never paste the draft into Outlook yourself. A draft for a
+    task you were dispatched goes through coord_complete_task instead.
+
+    One call, validated against the draft_reply contract; nothing is written
+    on rejection. Filing the same body file twice is refused unless parent_id
+    names the draft it revises.
+
+    Returns JSON: {ok, task_id, state, kind, from, next}
+    """
+    try:
+        return _ok(store.file_draft(db(), READER, params.result, params.asked, params.title,
+                                    params.parent_id, params.pipeline_task_id))
     except Exception as e:
         return _err(e)
 

@@ -1692,6 +1692,9 @@ def drafts_page(v: dict[str, Any]) -> str:
         # How long the client has waited is what orders the walk, so it leads.
         wait = _age(d["client_since"], t).removesuffix(" ago")
         late = '<b class="st-failed">late</b> · ' if d.get("late") else ""
+        # Filed by the client session on Ben's own ask, not from a task master wrote.
+        late += ('<span class="muted" title="Ben asked the client session directly; filed with coord_file_draft">'
+                 'Ben direct</span> · ' if d.get("from") == "ben-direct" else "")
         waited = ("" if d["drafted"] else
                   f'<span class="order first" title="since the email it answers">client waiting {wait}</span> · '
                   if d["client_since_from"] == "email" else
