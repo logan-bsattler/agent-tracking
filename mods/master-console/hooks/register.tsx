@@ -86,6 +86,16 @@ function start($: EngineInterface): Promise<void> {
     const root = await $.session.root()
     isMaster = MASTER_ROOT.test(root)
     isDesk = DESK_ROOT.test(root)
+    // The folder alone is not the worker (2026-11-13): triage runs, the
+    // recap and any ad hoc session opened here matched too, took minder
+    // prompts and were told to auto-clear. When COORD_WORKER_ID names the
+    // worker's desktop session id, only that session is the worker. With
+    // either value missing the folder rule stands, as before.
+    if (isMaster) {
+      const workerId = (await $.env.get('COORD_WORKER_ID'))?.trim() ?? ''
+      const hostId = (await $.env.get('CLAUDE_CODE_HOST_SESSION_ID'))?.trim() ?? ''
+      if (workerId && hostId && workerId !== hostId) isMaster = false
+    }
     if (!isMaster && !isDesk) return
     clearAt = numOr(await $.env.get('COORD_MASTER_CLEAR'), 180000)
     if (isDesk) wakeTo = (await $.env.get('COORD_WORKER_WAKE'))?.trim() ?? ''
