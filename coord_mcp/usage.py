@@ -36,20 +36,36 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 # billed in dollars, but this is the same figure Claude Code shows in /cost
 # and it is the best available proxy for how heavily a request weighs.
 # (input, output, cache_read, cache_write_5m, cache_write_1h)
+# Checked against platform.claude.com/docs/en/about-claude/pricing on
+# 2026-11-13. A model with no row of its own is priced by the first key it
+# starts with, so a point release must sit above its family: until that date
+# opus-5-5 was priced as opus-5 (cache reads 2.5x too high), and fable-5-2,
+# sonnet-5-5 and haiku-5-5 were wrong the same way. `coord-usage reprice`
+# recomputes stored rows after a change here.
 PRICING: dict[str, tuple[float, float, float, float, float]] = {
+    "claude-fable-5-2": (8, 40, 0.2, 10, 16),
     "claude-fable-5-1": (10, 50, 0.25, 12.5, 20),
     "claude-fable-5": (10, 50, 1.0, 12.5, 20),
+    "claude-mythos-5-2": (8, 40, 0.2, 10, 16),
     "claude-mythos-5-1": (10, 50, 0.25, 12.5, 20),
+    "claude-mythos-5": (10, 50, 1.0, 12.5, 20),
+    "claude-opus-5-5": (4, 20, 0.2, 5, 8),
     "claude-opus-5": (5, 25, 0.5, 6.25, 10),
     "claude-opus-4-8": (5, 25, 0.5, 6.25, 10),
     "claude-opus-4-7": (5, 25, 0.5, 6.25, 10),
     "claude-opus-4-6": (5, 25, 0.5, 6.25, 10),
+    "claude-sonnet-5-5": (2, 10, 0.1, 2.5, 4),
     "claude-sonnet-5": (2, 10, 0.2, 2.5, 4),
     "claude-sonnet-4-6": (3, 15, 0.3, 3.75, 6),
+    "claude-haiku-5-5": (0.1, 0.5, 0.01, 0.125, 0.2),
     "claude-haiku-4-5": (1, 5, 0.1, 1.25, 2),
     "<synthetic>": (0, 0, 0, 0, 0),
 }
 FALLBACK_PRICE = PRICING["claude-opus-5"]
+# Haiku 5.5 charges 5x on every category once the prompt passes 100k tokens.
+LONG_PROMPT: dict[str, tuple[int, tuple[float, float, float, float, float]]] = {
+    "claude-haiku-5-5": (100_000, (0.5, 2.5, 0.05, 0.625, 1)),
+}
 
 
 def price(model: str) -> tuple[float, float, float, float, float]:
@@ -63,7 +79,44 @@ def price(model: str) -> tuple[float, float, float, float, float]:
 
 def cost_usd(model: str, inp: int, out: int, cr: int, cw5: int, cw1: int) -> float:
     p = price(model)
+    for key, (limit, long_price) in LONG_PROMPT.items():
+        if model.startswith(key) and inp + cr + cw5 + cw1 > limit:
+            p = long_price
     return (inp * p[0] + out * p[1] + cr * p[2] + cw5 * p[3] + cw1 * p[4]) / 1_000_000
+
+
+def reprice(conn: sqlite3.Connection, apply: bool = False) -> dict[str, Any]:
+    """Recompute cost_usd on stored requests from the current PRICING table.
+
+    Costs are fixed at ingest, so a corrected rate changes nothing already
+    stored. Dry run unless `apply`; either way returns the before and after
+    totals per model.
+    """
+    rows = conn.execute(
+        "SELECT request_id, model, input_tokens, output_tokens, cache_read, cache_write_5m, "
+        "cache_write_1h, cost_usd FROM requests"
+    ).fetchall()
+    models: dict[str, dict[str, float]] = {}
+    changes: list[tuple[float, str]] = []
+    for rid, model, inp, out, cr, cw5, cw1, old in rows:
+        new = cost_usd(model, inp, out, cr, cw5, cw1)
+        m = models.setdefault(model, {"requests": 0, "before": 0.0, "after": 0.0})
+        m["requests"] += 1
+        m["before"] += old or 0.0
+        m["after"] += new
+        if abs(new - (old or 0.0)) > 1e-12:
+            changes.append((new, rid))
+    if apply and changes:
+        conn.executemany("UPDATE requests SET cost_usd = ? WHERE request_id = ?", changes)
+        conn.commit()
+    for m in models.values():
+        m["before"], m["after"] = round(m["before"], 2), round(m["after"], 2)
+    return {
+        "applied": bool(apply), "rows": len(rows), "rows_changed": len(changes),
+        "before": round(sum(m["before"] for m in models.values()), 2),
+        "after": round(sum(m["after"] for m in models.values()), 2),
+        "models": dict(sorted(models.items(), key=lambda kv: -kv[1]["before"])),
+    }
 
 
 # ------------------------------------------------------------------ ingest
@@ -1013,7 +1066,9 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--force", action="store_true", help="replace an unrelated statusLine")
     st.add_argument("--no-guard", action="store_true", help="statusLine only, no PreToolUse/UserPromptSubmit hooks")
     sub.add_parser("live", help="the current 5-hour window: burn rate, projection, who is spending")
-    sv = sub.add_parser("serve", help="serve the report on localhost, regenerated on every load")
+    rp = sub.add_parser("reprice", help="recompute stored request costs from the current price table (dry run)")
+    rp.add_argument("--apply", action="store_true", help="write the recomputed costs")
+    sv =sub.add_parser("serve", help="serve the report on localhost, regenerated on every load")
     sv.add_argument("--port", type=int, default=8765)
     sv.add_argument("--days", type=int, default=7)
     sv.add_argument("--open", action="store_true")
@@ -1052,6 +1107,9 @@ def main(argv: list[str] | None = None) -> int:
         return report.serve(connect, a.port, a.days, a.open)
 
     conn = connect()
+    if a.cmd == "reprice":
+        print(json.dumps(reprice(conn, apply=a.apply), indent=2))
+        return 0
     if a.cmd == "ingest":
         print(json.dumps(ingest(conn)))
         return 0

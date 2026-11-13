@@ -8,7 +8,8 @@ was promised what, by when, and whether it was kept. It does two jobs:
 - **Follow-up.** The minder and Ben's queue flag a commitment coming due or
   overdue.
 
-Status: **design, for Ben's approval.** Nothing below is built yet. It
+Status: **phase one is built** (commit 0125167: table on first use, CLI,
+minder, queue order, dashboard). Phase two is design only. The design
 replaces the `teams-commitment` → task rule in the master `CLAUDE.md` (added
 2026-11-10, commit cf8bbe2). That text is rewritten once this is approved.
 

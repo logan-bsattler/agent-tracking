@@ -52,6 +52,41 @@ def test_pricing_matches_documented_rates():
     assert usage.price("claude-unknown-9") == usage.FALLBACK_PRICE
 
 
+def test_point_releases_are_not_priced_as_their_family():
+    # Each of these fell through to an older row until 2026-11-13.
+    assert usage.price("claude-opus-5-5") == (4, 20, 0.2, 5, 8)
+    assert usage.price("claude-fable-5-2") == (8, 40, 0.2, 10, 16)
+    assert usage.price("claude-sonnet-5-5")[2] == 0.1
+    assert usage.price("claude-haiku-5-5") != usage.FALLBACK_PRICE
+    assert usage.price("claude-opus-5") == (5, 25, 0.5, 6.25, 10)
+    # A longer key must come before the family key it starts with.
+    keys = list(usage.PRICING)
+    for i, k in enumerate(keys):
+        assert not any(k.startswith(earlier) for earlier in keys[:i]), k
+
+
+def test_haiku_5_5_long_prompt_tier():
+    short = usage.cost_usd("claude-haiku-5-5", 50_000, 1000, 50_000, 0, 0)
+    assert short == pytest.approx((50_000 * 0.1 + 1000 * 0.5 + 50_000 * 0.01) / 1e6)
+    long = usage.cost_usd("claude-haiku-5-5", 50_000, 1000, 50_001, 0, 0)
+    assert long == pytest.approx((50_000 * 0.5 + 1000 * 2.5 + 50_001 * 0.05) / 1e6)
+
+
+def test_reprice_is_a_dry_run_until_applied(conn, projects):
+    f = projects / "C--dev-proj" / "s1.jsonl"
+    _write(f, [_rec("r1", "s1", "2026-11-13T10:00:00Z", model="claude-opus-5-5")])
+    usage.ingest(conn)
+    right = conn.execute("SELECT cost_usd FROM requests").fetchone()[0]
+    conn.execute("UPDATE requests SET cost_usd = 9.0")
+    conn.commit()
+    dry = usage.reprice(conn)
+    assert dry["rows_changed"] == 1 and dry["before"] == 9.0 and not dry["applied"]
+    assert conn.execute("SELECT cost_usd FROM requests").fetchone()[0] == 9.0
+    usage.reprice(conn, apply=True)
+    assert conn.execute("SELECT cost_usd FROM requests").fetchone()[0] == pytest.approx(right)
+    assert usage.reprice(conn)["rows_changed"] == 0
+
+
 def test_ingest_dedupes_streamed_blocks(conn, projects):
     f = projects / "C--dev-proj" / "s1.jsonl"
     _write(f, [_rec("r1", "s1", "2026-09-14T10:00:00Z", block=0), _rec("r1", "s1", "2026-09-14T10:00:00Z", block=1),

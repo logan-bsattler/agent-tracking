@@ -1,7 +1,7 @@
 # coord-mcp
 
 A typed task board for Claude Code agent teams. One stdio MCP server per
-session, one SQLite file between them, eleven tools.
+session, one SQLite file between them, 21 tools.
 
 Claude Code's agent teams already handle spawning teammates, messaging and
 lifecycle. This adds the three things they don't:
@@ -45,7 +45,7 @@ surface. The lead/teammate split is in `CLAUDE.md`, not in role gating.
 
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `COORD_ROLE` | `team` | `team` (all 11 tools) or `desktop` (2 tools) |
+| `COORD_ROLE` | `team` | `team` (all 21 tools) or `desktop` (2 tools) |
 | `COORD_DB` | `~/.coord/coord.db` | **Local disk only.** WAL plus OneDrive corrupts. |
 
 ## Flow

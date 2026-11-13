@@ -10,7 +10,7 @@ agents run on. You work on the source; they are the users.
 
 ## What this repo is
 
-A stdio MCP server plus a SQLite board (`~/.coord/coord.db`), eleven tools.
+A stdio MCP server plus a SQLite board (`~/.coord/coord.db`), 21 tools.
 See `README.md` for the tool surface, the lead/teammate split and the wiring
 files under `examples/`.
 

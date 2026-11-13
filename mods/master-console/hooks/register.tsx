@@ -132,6 +132,7 @@ function start($: EngineInterface): Promise<void> {
       void (async () => {
         if (!isMaster && !isDesk) return  // a scheduled session, demoted on its prompt
         await refresh()  // ~20 ms; a question master just presented shows within 10s
+        await health($)
         if (wakeTo) await wake($)
         // Diagnostic (2026-11-01): since 10-30 neither session takes prompts.
         // Shows whether this tick runs at all, and whether busy is what stops it.
@@ -142,6 +143,41 @@ function start($: EngineInterface): Promise<void> {
     })
     $.ui.toast(`master-console: ${isDesk ? 'desk' : 'worker'} polling for queued prompts`)
   })()
+}
+
+// Health (2026-11-13). The dashboard's red banner only helps someone looking
+// at /board, and a dead dashboard shows nothing at all. Each tick reads
+// /api/health: a new set of problems toasts once, and ~3 minutes of failed
+// fetches toasts "dashboard down" once, until it answers again.
+const DOWN_AFTER = 180_000
+let healthSig = ''
+let downSince = 0
+let downToasted = false
+async function health($: EngineInterface): Promise<void> {
+  let text: string
+  try {
+    const r = await $.http.fetch(`${DASH}/api/health`)
+    if (!r.ok) throw new Error('not ok')
+    text = r.text
+  } catch {
+    const t = Date.now()
+    if (!downSince) downSince = t
+    if (!downToasted && t - downSince >= DOWN_AFTER) {
+      downToasted = true
+      $.ui.toast('Dashboard down: 127.0.0.1:8765 has not answered for 3 minutes. ' +
+        'The minder is not running and queued prompts are not delivered.')
+    }
+    return
+  }
+  if (downToasted) $.ui.toast('Dashboard is back.')
+  downSince = 0
+  downToasted = false
+  try {
+    const h = JSON.parse(text) as { ok: boolean; problems?: { text?: string }[] }
+    const sig = h.ok ? '' : (h.problems ?? []).map(p => p.text ?? '').filter(Boolean).join('; ') || 'not ok'
+    if (sig && sig !== healthSig) $.ui.toast(`Board health: ${sig.slice(0, 240)}`)
+    healthSig = sig
+  } catch { /* not JSON: an older dashboard without /api/health */ }
 }
 
 // Desk only: wake the worker when the board says its prompt is stuck. The
