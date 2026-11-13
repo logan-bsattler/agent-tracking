@@ -185,6 +185,42 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
     # workbook item (queue.check_grouped; Ben, 2026-11-13).
     from . import queue as _queue
     _queue.check_grouped(validated.get("follow_ups") or [], row["assigned_to"])
+    # One transaction: the close, its loose ends and the dod_review it owes
+    # land together or not at all. The tables made on first use are made
+    # first: executescript commits, which would end the savepoint early.
+    from .db import ensure_commitments
+    _queue.ensure_routes(conn)
+    ensure_commitments(conn)
+    ensure_deps(conn)
+    ensure_promotions(conn)
+    with savepoint(conn, "complete_task"):
+        return _complete(conn, task_id, row, validated)
+
+
+class savepoint:
+    """A SAVEPOINT around a block: released on success, rolled back on error.
+    Tolerates a nested executescript having committed it already (nothing to
+    release then), so a table created on first use cannot turn a success
+    into an error."""
+
+    def __init__(self, conn: sqlite3.Connection, name: str):
+        self.conn, self.name = conn, name
+
+    def __enter__(self):
+        self.conn.execute(f"SAVEPOINT {self.name}")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is not None:
+                self.conn.execute(f"ROLLBACK TO {self.name}")
+            self.conn.execute(f"RELEASE {self.name}")
+        except sqlite3.OperationalError:
+            pass  # already committed by an executescript inside the block
+        return False
+
+
+def _complete(conn: sqlite3.Connection, task_id: str, row: sqlite3.Row, validated: dict[str, Any]) -> dict[str, Any]:
     state = "done" if validated.get("done") else "failed"
     conn.execute(
         "UPDATE tasks SET state=?, result=?, result_version=?, completed_at=? WHERE id=?",
@@ -204,6 +240,9 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
         from . import queue
         if moved := queue.route_new(conn, task_id):
             out["routed_to_you"] = moved
+    if state == "done":
+        # Not echoed to the producer: the review is another session's job.
+        create_review(conn, task_id)
     return out
 
 
@@ -802,16 +841,13 @@ def auto_close_intents(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         when = (f.get("said") if it["source"] == "teams-status" else f.get("date") or f.get("said")) or "?"
         statement = (f"Closed {len(rows)} loose end(s) on {it['source']} evidence: msg {f.get('msg') or '?'}, "
                      f"{who}, {when}: {f.get('evidence') or 'named by id'}")[:200]
-        conn.execute("SAVEPOINT auto_close")
         try:
-            did = record_decision(conn, statement, CLOSE_BECAUSE, rows[0]["task_id"])["decision_id"]
-            for r in rows:
-                resolve_follow_up(conn, r["id"], decision_id=did)
-            resolve_intent(conn, it["id"], note=f"closed in code: decision {did}")
-            conn.execute("RELEASE auto_close")
+            with savepoint(conn, "auto_close"):
+                did = record_decision(conn, statement, CLOSE_BECAUSE, rows[0]["task_id"])["decision_id"]
+                for r in rows:
+                    resolve_follow_up(conn, r["id"], decision_id=did)
+                resolve_intent(conn, it["id"], note=f"closed in code: decision {did}")
         except Exception as e:  # this intent stays open for master; the rest still go
-            conn.execute("ROLLBACK TO auto_close")
-            conn.execute("RELEASE auto_close")
             errors.append(f"{it['id']}: {type(e).__name__}: {e}")
             continue
         out.append({"intent_id": it["id"], "decision_id": did, "follow_ups": [r["id"] for r in rows]})
@@ -1133,6 +1169,97 @@ def latest_review(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | No
         return None
     return {"id": r["id"], "completed_at": r["completed_at"],
             "verdict": json.loads(r["result"] or "{}").get("verdict")}
+
+
+REVIEW_ROUNDS = 2  # request_changes verdicts after which the next call is Ben's (master's to raise)
+GATED_DOD = {"code_change": "cvc-code", "draft_reply": "client-email"}
+REVIEW_BRIEF = (
+    "Independent definition-of-done review of task {parent} ({kind}). You did not write it. "
+    "1. Read that task's spec (coord_get_task {parent}) and its result (coord_get_task_result {parent}, "
+    "fields {fields}). 2. Read the file(s) under review and the checklist at dod_path. 3. Judge every "
+    "checklist item in criteria BEFORE reading the producer's self_check, so it cannot steer you. "
+    "4. Put each change needed in follow_ups with who = {client}. verdict approve only when every item "
+    "is met; escalate a judgement the checklist cannot settle."
+)
+
+
+def review_rounds(conn: sqlite3.Connection, task_id: str) -> int:
+    """request_changes verdicts among the dod_reviews of this task and every
+    task of its kind above it in the parent chain: each revision is a new
+    task whose parent is the one it revises."""
+    row = conn.execute("SELECT kind FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        return 0
+    n, seen, tid = 0, set(), task_id
+    while tid and tid not in seen:
+        seen.add(tid)
+        for (res,) in conn.execute("SELECT result FROM tasks WHERE parent_id=? AND kind='dod_review' "
+                                   "AND state='done'", (tid,)):
+            n += json.loads(res or "{}").get("verdict") == "request_changes"
+        up = conn.execute("SELECT t.parent_id, p.kind FROM tasks t LEFT JOIN tasks p ON p.id = t.parent_id "
+                          "WHERE t.id=?", (tid,)).fetchone()
+        tid = up["parent_id"] if up and up["kind"] == row["kind"] else None
+    return n
+
+
+def _dod_checklist(client: str | None, dtype: str) -> str:
+    """The checklist for a deliverable type: <client>/dod/<type>.md, falling
+    back to the agents folder's dod/<type>.md. Neither on disk: the relative
+    name, for the reviewer to resolve in its own folder."""
+    for base in ([DOCS_ROOT / client] if client else []) + [AGENTS_ROOT]:
+        p = base / "dod" / f"{dtype}.md"
+        if p.is_file():
+            return str(p)
+    return f"dod/{dtype}.md"
+
+
+def review_owed(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
+    """The dod_review a finished task is owed, as create_task arguments, or
+    None: not a finished deliverable or gated code/email, a review already
+    exists (any state), or the round cap is reached (that goes to Ben)."""
+    from . import gate
+    r = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if r is None or r["state"] != "done":
+        return None
+    result = json.loads(r["result"] or "{}")
+    if not result.get("done"):
+        return None
+    if r["kind"] != "deliverable" and not (r["kind"] in GATED_DOD and gate.is_gated(conn, r)):
+        return None
+    if conn.execute("SELECT 1 FROM tasks WHERE parent_id=? AND kind='dod_review'", (task_id,)).fetchone():
+        return None
+    if review_rounds(conn, task_id) >= REVIEW_ROUNDS:
+        return None
+    spec = json.loads(r["spec"] or "{}")
+    client = r["assigned_to"]
+    if r["kind"] == "deliverable":
+        dtype = spec.get("deliverable_type") or result.get("deliverable_type") or "deliverable"
+        dod = spec.get("dod_path") or result.get("dod_path") or _dod_checklist(client, dtype)
+        under = [result.get("path")] + list(result.get("files") or [])
+        fields = '["path", "files", "deliverable_type", "dod_path", "self_check", "summary"]'
+    else:
+        dtype = GATED_DOD[r["kind"]]
+        dod = spec.get("dod_path") or _dod_checklist(client, dtype)
+        under = ([result.get("body_path")] if r["kind"] == "draft_reply"
+                 else [f.get("path") for f in result.get("files_changed") or [] if isinstance(f, dict)])
+        fields = ('["to", "cc", "subject", "body_path", "summary"]' if r["kind"] == "draft_reply"
+                  else '["summary", "files_changed", "tests", "notes"]')
+    brief = REVIEW_BRIEF.format(parent=task_id, kind=r["kind"], fields=fields, client=client or "the client")
+    return {"kind": "dod_review", "title": f"DoD review: {r['title']}"[:80], "assigned_to": client,
+            "parent_id": task_id,
+            "spec": {"review_of": task_id, "deliverable_type": dtype, "dod_path": dod,
+                     "files": [p for p in under if p], "brief": brief, "created_by": "board (auto)"}}
+
+
+def create_review(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
+    """Create the dod_review review_owed() says a task is owed; None if none.
+    Called by complete_task, inside its transaction. Dispatching it stays
+    master's (a review with no side session needs the primary cleared)."""
+    owed = review_owed(conn, task_id)
+    if owed is None:
+        return None
+    return create_task(conn, owed["kind"], owed["title"], owed["spec"], assigned_to=owed["assigned_to"],
+                       parent_id=owed["parent_id"])
 
 
 def _stage(conn: sqlite3.Connection, task_id: str, kind: str, path: Path) -> dict[str, Any]:

@@ -151,6 +151,12 @@ def test_minder_owes_a_review_for_each_gated_result(conn, tmp_path):
     code, _ = _code(conn, tmp_path)
     plain, _ = _code(conn, tmp_path, cvc=False)
     later = now() + (store.MINDER_UNREAD + 1) * 60
+    # Completion creates each gated task's dod_review, so nothing is owed...
+    assert store.minder_owed(conn, later)["unreviewed"] == []
+    auto = {r["parent_id"] for r in conn.execute("SELECT parent_id FROM tasks WHERE kind='dod_review'")}
+    assert auto == {tid, code}
+    # ...unless it finished before that (or the review was removed).
+    conn.execute("DELETE FROM tasks WHERE kind='dod_review'")
     owed = store.minder_owed(conn, later)["unreviewed"]
     assert set(owed) == {tid, code}
     _review(conn, tid)

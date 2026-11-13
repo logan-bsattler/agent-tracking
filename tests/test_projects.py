@@ -106,19 +106,21 @@ def test_client_view_rolls_up_tasks_loose_ends_and_unfiled(conn):
     store.complete_task(conn, root, {"done": True, "summary": "s", "path": "C:/x/fdd.docx", "deliverable_type": "fdd",
                                      "dod_path": "d.md", "self_check": [{"item": "a", "met": True, "note": "ok"}],
                                      "follow_ups": [{"who": "MAG", "what": "ask Rajesh about loaders"}]})
+    # Completion created the deliverable's dod_review under it.
+    review = conn.execute("SELECT id FROM tasks WHERE parent_id=? AND kind='dod_review'", (root,)).fetchone()["id"]
     store.record_decision(conn, "Ship r5 as is", "Ben said so", task_id=root)
     child = _task(conn, "fix review notes", parent=root)
     _task(conn, "stray question")
     projects.attach(conn, p["id"], [root])
     v = projects.client_view(conn, "MAG")
     [pv] = v["projects"]
-    assert [d["id"] for d in pv["open"]] == [child]
+    assert sorted(d["id"] for d in pv["open"]) == sorted([review, child])
     assert [d["stage"] for d in pv["deliverables"]] == ["written"]
     assert pv["loose"][0]["what"] == "ask Rajesh about loaders"
     assert pv["decisions"][0]["statement"] == "Ship r5 as is"
     assert pv["summary_stale"]  # open work, no summary
     assert [d["title"] for d in v["unfiled"]] == ["stray question"]
-    assert v["filed"] == 2 and v["task_count"] == 3
+    assert v["filed"] == 3 and v["task_count"] == 4
     html = client_pages.client_page(v)
     assert "FDD-O2S-1396" in html and "stray question" in html and "Attach checked" in html
     over = projects.clients_overview(conn, ["MAG", "LNK"])
