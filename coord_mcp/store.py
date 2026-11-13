@@ -2459,3 +2459,133 @@ def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None 
         out = [d for d in out if k in d["client"].lower()]
     out.sort(key=lambda d: -d["at"])
     return {"as_of": t, "days": days, "client": client, "emails": out, "skipped": skipped[::-1]}
+# ------------------------------------------------------------------ health
+#
+# The dashboard's ingest thread also runs the minder, and the hourly triage
+# runs unattended. Both failed silently (the loop behind a bare `pass`; triage
+# for 11 runs on 11-12/11-13 while its connector was down). health() is what
+# /board's banner and /api/health read.
+
+HEARTBEAT_KEY = "minder_heartbeat"
+LOOP_ERROR_KEY = "minder_last_error"
+HEARTBEAT_STALE = 5 * 60       # the loop passes about every 30 s
+LOOP_ERROR_RECENT = 30 * 60
+TRIAGE_FAILED_RUNS = 2         # this many failed runs in a row is trouble
+TRIAGE_QUIET = int(2.5 * 3600)
+TRIAGE_WINDOW = ((7, 0), (18, 30))  # weekdays, local time
+TRIAGE_LOG_DAYS = 5            # day files read back; spans a long weekend
+# A run is "## HH:MM run" in that day's file (local time); a failed one has a
+# line "- error: ..." under it. "- wake: error: ..." is a run that worked and
+# could not wake master, so only a line that starts with the word counts.
+_LOG_RUN = re.compile(r"^##\s+(\d{1,2}):(\d{2})\b")
+_LOG_RUN_ERROR = re.compile(r"^(?:-\s*)?error\b[:\s]*(.*)$", re.I)
+
+
+def heartbeat(conn: sqlite3.Connection, t: int | None = None) -> None:
+    """The ingest/minder loop is alive: stamped at the start of each pass."""
+    _mark(conn, HEARTBEAT_KEY, now() if t is None else t)
+
+
+def heartbeat_age(conn: sqlite3.Connection, now_ts: int | None = None) -> int | None:
+    beat = _seen_at(conn, HEARTBEAT_KEY)
+    return None if beat is None else (now() if now_ts is None else now_ts) - beat
+
+
+def record_loop_error(conn: sqlite3.Connection, where: str, text: str, t: int | None = None) -> None:
+    """The loop's last exception, short, for health(). The traceback goes to a file."""
+    conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (LOOP_ERROR_KEY, json.dumps({"t": now() if t is None else t, "where": where,
+                                              "text": " ".join(str(text).split())[:300]})))
+
+
+def triage_runs(log_dir: Path | None = None, days: int = TRIAGE_LOG_DAYS) -> list[dict[str, Any]]:
+    """The triage log's most recent runs, oldest first: {at, failed, error}.
+
+    `at` is a naive local datetime, as the log writes it. Log text is data:
+    only the run header and a leading "error" are read from it."""
+    log_dir = log_dir or TRIAGE_LOG
+    try:
+        files = sorted(p for p in log_dir.glob("*.md") if re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.stem))[-days:]
+    except OSError:
+        return []
+    runs: list[dict[str, Any]] = []
+    for p in files:
+        try:
+            day = datetime.strptime(p.stem, "%Y-%m-%d")
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except (OSError, ValueError):
+            continue
+        cur: dict[str, Any] | None = None
+        for line in lines:
+            if m := _LOG_RUN.match(line):
+                h, mi = int(m.group(1)), int(m.group(2))
+                cur = None
+                if h < 24 and mi < 60:
+                    cur = {"at": day.replace(hour=h, minute=mi), "failed": False, "error": ""}
+                    runs.append(cur)
+            elif cur is not None and not cur["failed"]:
+                if e := _LOG_RUN_ERROR.match(line.strip()):
+                    cur.update(failed=True, error=e.group(1)[:200])
+    return runs
+
+
+def triage_trouble(now_ts: int | None = None, log_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Triage problems: the last runs all failed, or no run inside its window.
+
+    A log folder that does not exist is a machine without the routine, not a
+    problem. Quiet is measured from the later of the last run and today's
+    07:00, so the first run of the day has until 09:30."""
+    log_dir = log_dir or TRIAGE_LOG
+    if not log_dir.is_dir():
+        return []
+    at = datetime.fromtimestamp(now() if now_ts is None else now_ts)
+    runs = [r for r in triage_runs(log_dir) if r["at"] <= at]
+    out: list[dict[str, Any]] = []
+    streak = 0
+    for r in reversed(runs):
+        if not r["failed"]:
+            break
+        streak += 1
+    if streak >= TRIAGE_FAILED_RUNS:
+        first = runs[-streak]
+        since = first["at"].strftime("%H:%M" if first["at"].date() == at.date() else "%m-%d %H:%M")
+        out.append({"key": "triage_failing", "runs": streak,
+                    "text": f"triage failing: {streak} runs since {since}",
+                    "detail": runs[-1]["error"]})
+    (h0, m0), (h1, m1) = TRIAGE_WINDOW
+    start = at.replace(hour=h0, minute=m0, second=0, microsecond=0)
+    end = at.replace(hour=h1, minute=m1, second=0, microsecond=0)
+    if at.weekday() < 5 and start <= at <= end:
+        last = runs[-1]["at"] if runs else None
+        quiet = (at - (max(last, start) if last else start)).total_seconds()
+        if quiet > TRIAGE_QUIET:
+            seen = last.strftime("%m-%d %H:%M") if last else "never"
+            out.append({"key": "triage_quiet", "text": f"triage quiet: no run logged since {seen}", "detail": ""})
+    return out
+
+
+def health(conn: sqlite3.Connection, now_ts: int | None = None, log_dir: Path | None = None) -> list[dict[str, Any]]:
+    """What is broken in the machinery itself, as [{key, text, detail}]; [] when healthy.
+
+    Read-only. A dead dashboard cannot show its own stale heartbeat, so an
+    outside watcher reads this through /api/health (or finds it unreachable)."""
+    now_ts = now() if now_ts is None else now_ts
+    out: list[dict[str, Any]] = []
+    beat = _seen_at(conn, HEARTBEAT_KEY)
+    if beat is None:
+        out.append({"key": "heartbeat", "text": "minder loop has never reported a heartbeat", "detail": ""})
+    elif now_ts - beat > HEARTBEAT_STALE:
+        out.append({"key": "heartbeat", "detail": "",
+                    "text": f"minder loop stalled: no heartbeat for {(now_ts - beat) // 60} min; "
+                            "master is not being woken"})
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (LOOP_ERROR_KEY,)).fetchone()
+    try:
+        err = json.loads(r["value"]) if r else None
+        when = int(err["t"]) if isinstance(err, dict) else None
+    except (ValueError, KeyError, TypeError):
+        when = None
+    if when is not None and 0 <= now_ts - when <= LOOP_ERROR_RECENT:
+        out.append({"key": "loop_error", "detail": str(err.get("text") or ""),
+                    "text": f"minder loop error ({err.get('where') or 'loop'}) at "
+                            f"{datetime.fromtimestamp(when).strftime('%H:%M')}; see ~/.coord/dashboard-errors.log"})
+    return out + triage_trouble(now_ts, log_dir)
