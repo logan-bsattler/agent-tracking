@@ -73,6 +73,7 @@ let tookAt = 'none'  // diagnostic: last prompt this process took
 let ctx = 0
 let clearAt = 180000
 let wakeTo = ''  // the worker's session id, desk only; empty is off
+let autoDispatch = false  // COORD_AUTO_DISPATCH=1: send the board's next dispatch each tick
 let refresh: () => Promise<void> = async () => {}
 let take: () => Promise<void> = async () => {}
 
@@ -99,6 +100,7 @@ function start($: EngineInterface): Promise<void> {
     if (!isMaster && !isDesk) return
     clearAt = numOr(await $.env.get('COORD_MASTER_CLEAR'), 180000)
     if (isDesk) wakeTo = (await $.env.get('COORD_WORKER_WAKE'))?.trim() ?? ''
+    autoDispatch = ((await $.env.get('COORD_AUTO_DISPATCH'))?.trim() ?? '') === '1'
     ctx = (await $.session.usage()).context.tokens ?? 0
     refresh = async () => {
       try {
@@ -134,6 +136,7 @@ function start($: EngineInterface): Promise<void> {
         await refresh()  // ~20 ms; a question master just presented shows within 10s
         await health($)
         if (wakeTo) await wake($)
+        if (autoDispatch) await dispatch($)
         // Diagnostic (2026-11-01): since 10-30 neither session takes prompts.
         // Shows whether this tick runs at all, and whether busy is what stops it.
         const hhmm = () => new Date().toTimeString().slice(0, 5)
@@ -201,6 +204,42 @@ async function wake($: EngineInterface): Promise<void> {
   } catch (err) {
     $.ui.toast(`Worker wake failed: ${String(err).slice(0, 160)}`)
   }
+}
+
+// Dispatch in code (2026-11-13). The board picks the next task a free client
+// session should get (coord_mcp.sessions.next_dispatch) and leases it to one
+// caller, so the desk and the worker ticking at once never both send it.
+// Sent through the app's send_message, read as wake() reads it, and reported
+// back so the board stamps the task (or counts the failure). One per tick.
+// Off unless COORD_AUTO_DISPATCH=1.
+async function dispatch($: EngineInterface): Promise<void> {
+  type Dispatch = { task_id: string; client: string; session_id: string; message: string }
+  let d: Dispatch | null = null
+  try {
+    const r = await $.http.fetch(`${DASH}/api/dispatch/claim`, {
+      method: 'POST', headers: FORM, body: `claimer=${isDesk ? 'desk' : 'master'}`,
+    })
+    if (!r.ok) return
+    d = (JSON.parse(r.text) as { dispatch: Dispatch | null }).dispatch
+  } catch { return /* dashboard down: nothing claimed, nothing lost */ }
+  if (!d) return
+  let status = 'error'
+  let said = ''
+  try {
+    const res = await $.mcp.call('ccd_session_mgmt', 'send_message', { session_id: d.session_id, message: d.message })
+    said = res.content.map(b => ('text' in b ? b.text : '') ?? '').join(' ')
+    const m = res.isError ? null : said.match(/delivered|queued/)
+    if (m) status = m[0]
+  } catch (err) {
+    said = String(err)
+  }
+  try {
+    await $.http.fetch(`${DASH}/api/dispatch/sent`, {
+      method: 'POST', headers: FORM,
+      body: `task_id=${encodeURIComponent(d.task_id)}&status=${status}&detail=${encodeURIComponent(said.slice(0, 400))}`,
+    })
+  } catch { /* the lease lapses; the board retries after its wait */ }
+  if (status === 'error') $.ui.toast(`Auto-dispatch of ${d.task_id} to ${d.client} failed: ${said.slice(0, 160)}`)
 }
 
 export const register: Register = on => {

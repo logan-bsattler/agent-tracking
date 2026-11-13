@@ -1977,12 +1977,16 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     # that still holds (task_deps): its blocker going done is the signal.
     held = held_tasks(conn, now_ts)
     waiting = waiting_on(conn)
+    # Nor one code sent in the last half hour (sessions.next_dispatch): the
+    # mod is delivering it, and master is woken only if that did not take.
+    from . import sessions
+    sent = sessions.recently_dispatched(conn, now_ts)
     undelivered = [r["id"] for r in conn.execute(
         """SELECT t.id FROM tasks t
            WHERE t.state='open' AND t.picked_up_at IS NULL AND t.created_at <= ?
              AND NOT EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id)
            ORDER BY t.created_at""", (now_ts - MINDER_UNDELIVERED * 60,))
-        if r["id"] not in held and r["id"] not in waiting]
+        if r["id"] not in held and r["id"] not in waiting and r["id"] not in sent]
     stalled = list(stalled_tasks(conn, now_ts))
     # A decision on the task or a child task since it finished is the master
     # acting on the result, whether or not it fetched the result itself.
@@ -2592,4 +2596,11 @@ def health(conn: sqlite3.Connection, now_ts: int | None = None, log_dir: Path | 
         out.append({"key": "loop_error", "detail": str(err.get("text") or ""),
                     "text": f"minder loop error ({err.get('where') or 'loop'}) at "
                             f"{datetime.fromtimestamp(when).strftime('%H:%M')}; see ~/.coord/dashboard-errors.log"})
-    return out + triage_trouble(now_ts, log_dir)
+    from . import sessions
+    return out + sessions.trouble(conn) + triage_trouble(now_ts, log_dir)
+
+
+def next_dispatch(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any] | None:
+    """The next task code may send, or None (sessions.next_dispatch)."""
+    from . import sessions
+    return sessions.next_dispatch(conn, now_ts)

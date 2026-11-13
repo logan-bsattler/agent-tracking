@@ -408,6 +408,55 @@ def ensure_commitments(conn: sqlite3.Connection) -> None:
         conn.executescript(COMMITMENTS_DDL)
 
 
+# Dispatch in code (coord_mcp/sessions.py): which session takes a client's
+# work, and every attempt to send one a task. Created on first use, like
+# projects and for the same reason: no SCHEMA_VERSION bump while older
+# servers are still running. tasks gains dispatched_at, dispatch_status and
+# dispatch_session the same way.
+DISPATCH_DDL = """
+CREATE TABLE IF NOT EXISTS client_sessions (
+  client     TEXT NOT NULL,
+  role       TEXT NOT NULL CHECK (role IN ('primary','side')),
+  session_id TEXT NOT NULL,
+  title      TEXT,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (client, role)
+);
+CREATE TABLE IF NOT EXISTS dispatch_attempts (
+  id          TEXT PRIMARY KEY,
+  task_id     TEXT NOT NULL REFERENCES tasks(id),
+  client      TEXT NOT NULL,
+  role        TEXT NOT NULL,
+  session_id  TEXT NOT NULL,
+  status      TEXT NOT NULL CHECK (status IN ('claimed','delivered','queued','error')),
+  claimer     TEXT,
+  detail      TEXT,
+  created_at  INTEGER NOT NULL,
+  lease_until INTEGER NOT NULL,
+  sent_at     INTEGER
+);
+CREATE INDEX IF NOT EXISTS dispatch_attempts_task ON dispatch_attempts(task_id, created_at);
+CREATE INDEX IF NOT EXISTS dispatch_attempts_session ON dispatch_attempts(session_id, created_at);
+"""
+_DISPATCH_COLS = ("dispatched_at INTEGER", "dispatch_status TEXT", "dispatch_session TEXT")
+
+
+def ensure_dispatch(conn: sqlite3.Connection) -> None:
+    """Create the dispatch tables and tasks' dispatch columns if this file has
+    none yet. Two cheap reads when both exist, so every reader can call it.
+    Never inside a SAVEPOINT the caller needs: executescript commits."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dispatch_attempts'").fetchone() is None:
+        conn.executescript(DISPATCH_DDL)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    for col in _DISPATCH_COLS:
+        if col.split()[0] not in have:
+            try:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {col}")
+            except sqlite3.OperationalError as e:  # another process added it first
+                if "duplicate column" not in str(e):
+                    raise
+
+
 # Shape of follow_ups and questions for Ben items (docs/ben-only-replies.md).
 # Its own meta row, not SCHEMA_VERSION: a bump would ping-pong a full init
 # with every coord server still on the old code, which reads the new columns

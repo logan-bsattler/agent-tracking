@@ -2553,6 +2553,20 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     taker = (form.get("taker") or ["master"])[0]
                     self._json(200, {"prompt": store.take_operator_prompt(conn, taker)})
                     return
+                if path == "/api/dispatch/claim":  # the mod's tick: one task to send, under a lease
+                    from . import sessions
+                    self._json(200, {"dispatch": sessions.claim(conn, (form.get("claimer") or [""])[0])})
+                    return
+                if path == "/api/dispatch/sent":  # the mod's report on that send
+                    from . import sessions
+                    one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+                    try:
+                        r = sessions.dispatch_sent(conn, one("task_id"), one("status"), one("detail"))
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    self._json(200, r)
+                    return
                 if path == "/api/worker/wake":  # the desk's tick: should it wake the worker?
                     self._json(200, {"wake": store.claim_worker_wake(conn)})
                     return
