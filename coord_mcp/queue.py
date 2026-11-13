@@ -254,6 +254,164 @@ def apply(conn: sqlite3.Connection, action: str, ids: list[str],
     return {**store._enqueue(conn, "batch", None, text), "action": action, "count": len(ids)}
 
 
+# ------------------------------------------------- shrinking it at the source
+#
+# Ben's ruling, 2026-11-13: his queue grew faster than he could clear it
+# (1,047 items raised in 14 days, 635 resolved). Two rules:
+#
+# - Grouping. A result that hands him three or more rulings of the same
+#   shape (one per row, per item, per program) is refused at completion: the
+#   agent writes the rows to one workbook and hands back one item naming it.
+# - Expiry. A loose end of his that has sat open EXPIRE_DAYS is deferred, not
+#   dropped: off the active queue, still in the Deferred lane, reopenable.
+#   Dated items, replies waiting on him and the question on screen stay.
+
+GROUP_MIN = 3
+_FILE_NAMED = re.compile(r"\.(xlsx|xlsm|csv|html?|docx|pdf)\b", re.I)
+_VARIES = re.compile(r"\S*\d\S*|\"[^\"]*\"|'[^']*'|`[^`]*`|\b\w+\.(p|i|w|cls)\b")
+
+
+def _shape(what: str) -> str:
+    """`what` with everything that varies row to row (numbers, ids, quoted
+    names, program names) replaced, so two rulings on different rows match."""
+    return " ".join(_VARIES.sub("#", what.lower()).split())
+
+
+def same_shape(a: str, b: str) -> bool:
+    from difflib import SequenceMatcher
+    x, y = _shape(a), _shape(b)
+    if x == y:
+        return True
+    # Short distinct asks ("Approve the plan" / "Approve the checklist") look
+    # alike as text; a per-row ruling also names its row, id or program.
+    if "#" not in x or "#" not in y:
+        return False
+    return x.split()[:3] == y.split()[:3] or SequenceMatcher(None, x, y).ratio() >= 0.7
+
+
+def ungrouped(follow_ups: list[dict[str, Any]], client: str | None) -> list[str]:
+    """The largest set of same-shape items a result hands Ben one by one, if
+    it has GROUP_MIN or more; else []. Items routing would hand back to the
+    client, and ones that already name a file, do not count."""
+    mine = [f["what"] for f in follow_ups
+            if str(f.get("who", "")).strip().casefold() == "ben"
+            and not route_for(f["what"], client) and not _FILE_NAMED.search(f["what"])]
+    best: list[str] = []
+    for i, w in enumerate(mine):
+        group = [w] + [o for o in mine[i + 1:] if same_shape(w, o)]
+        if len(group) > len(best):
+            best = group
+    return best if len(best) >= GROUP_MIN else []
+
+
+def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
+    """Refuse a result that hands Ben the same ruling row by row."""
+    group = ungrouped(follow_ups, client)
+    if group:
+        raise ValueError(
+            f"follow_ups hands Ben {len(group)} rulings of the same shape, one per row "
+            f"(\"{group[0][:60]}\", \"{group[1][:60]}\", ...). Group them: write the rows to one workbook "
+            "(.xlsx, a column for his answer) under work/ and hand back ONE follow-up for Ben that names "
+            "its path, so he rules on all of them in one pass. Rulings that really differ may stay separate.")
+
+
+EXPIRE_DAYS = 14
+EXPIRE_EVERY = 86400
+EXPIRE_META = "ben_expire_last"
+EXPIRED_DDL = """
+CREATE TABLE IF NOT EXISTS follow_up_expiry (
+  follow_up_id TEXT PRIMARY KEY REFERENCES follow_ups(id),
+  decision_id  TEXT NOT NULL,
+  expired_at   INTEGER NOT NULL
+);
+"""
+
+
+def ensure_expiry(conn: sqlite3.Connection) -> None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='follow_up_expiry'").fetchone() is None:
+        conn.executescript(EXPIRED_DDL)
+
+
+def stale(conn: sqlite3.Connection, now_ts: int | None = None, days: int = EXPIRE_DAYS) -> list[dict[str, Any]]:
+    """Ben's open loose ends older than `days` that nothing dates or holds.
+
+    Kept: anything with a due date (its own, its task's, a commitment's), a
+    draft reply waiting on him, the question currently presented, and one
+    already expired once (Ben or master reopened it, so it stays)."""
+    from . import commitments, store
+    t = now() if now_ts is None else now_ts
+    ensure_expiry(conn)
+    q = store.current_question(conn)
+    dues = commitments.due_map(conn)
+    held = {r["follow_up_id"] for r in conn.execute(
+        "SELECT follow_up_id FROM commitments WHERE state IN ('open','slipped') AND follow_up_id IS NOT NULL")} \
+        if dues else set()
+    once = {r["follow_up_id"] for r in conn.execute("SELECT follow_up_id FROM follow_up_expiry")}
+    replies = {r["id"] for r in conn.execute("SELECT id FROM tasks WHERE kind='draft_reply'")}
+    out = []
+    for r in _ben_rows(conn):
+        if r["created_at"] > t - days * 86400 or r["id"] in once or r["id"] in held:
+            continue
+        if r["due_at"] is not None or (r["task_id"] and (r["task_id"] in dues or r["task_id"] in replies)):
+            continue
+        if q and q.get("follow_up_id") == r["id"]:
+            continue
+        out.append({"id": r["id"], "client": r["client"] or "unassigned", "what": r["what"],
+                    "age_days": (t - r["created_at"]) // 86400})
+    return out
+
+
+def expire(conn: sqlite3.Connection, apply: bool = False, now_ts: int | None = None,
+           days: int = EXPIRE_DAYS) -> dict[str, Any]:
+    """Defer every stale Ben loose end behind one decision. Dry run unless `apply`."""
+    from . import store
+    t = now() if now_ts is None else now_ts
+    rows = stale(conn, t, days)
+    by: dict[str, int] = {}
+    for r in rows:
+        by[r["client"]] = by.get(r["client"], 0) + 1
+    out: dict[str, Any] = {"ok": True, "applied": False, "count": len(rows), "by_client": by, "items": rows}
+    if not apply or not rows:
+        return out
+    split = ", ".join(f"{c} {n}" for c, n in sorted(by.items(), key=lambda kv: -kv[1]))
+    dec = store.record_decision(
+        conn, f"Auto-deferred {len(rows)} Ben loose end(s) open over {days} days: {split}"[:200],
+        "queue expiry rule, Ben 2026-11-13: undated items leave the active queue, reopenable; "
+        "python -m coord_mcp.queue expire --undo <this id>")
+    for r in rows:
+        store.resolve_follow_up(conn, r["id"], decision_id=dec["decision_id"], defer=True)
+        conn.execute("INSERT OR REPLACE INTO follow_up_expiry VALUES (?,?,?)", (r["id"], dec["decision_id"], t))
+    conn.commit()
+    return {**out, "applied": True, "decision_id": dec["decision_id"]}
+
+
+def unexpire(conn: sqlite3.Connection, decision_id: str) -> dict[str, Any]:
+    """Reopen what one expiry decision deferred and is still deferred. They
+    stay marked as expired once, so the next pass leaves them alone."""
+    from . import store
+    ensure_expiry(conn)
+    ids = [r["id"] for r in conn.execute(
+        """SELECT f.id FROM follow_up_expiry e JOIN follow_ups f ON f.id = e.follow_up_id
+           WHERE e.decision_id=? AND f.state='deferred' AND f.resolved_by=?""", (decision_id, decision_id))]
+    for i in ids:
+        store.resolve_follow_up(conn, i, reopen=True)
+    conn.commit()
+    return {"ok": True, "reopened": len(ids), "decision_id": decision_id}
+
+
+def expire_due(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any] | None:
+    """The dashboard's daily pass: expire once per EXPIRE_EVERY. The first
+    pass on a board only stamps the clock, so the first sweep of an existing
+    queue is one Ben runs by hand after reading the dry run."""
+    t = now() if now_ts is None else now_ts
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (EXPIRE_META,)).fetchone()
+    if r is not None and t - int(r["value"]) < EXPIRE_EVERY:
+        return None
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (EXPIRE_META, str(t)))
+    conn.commit()
+    return expire(conn, apply=True, now_ts=t) if r is not None else None
+
+
 # --------------------------------------------------------- owed downstream
 
 DRAFT_WINDOW = 48 * 3600   # older finished drafts predate auto-drafting; Ben works them from /drafts
@@ -352,9 +510,25 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("backfill", help="list (or with --apply, move) Ben loose ends that are agent work")
     b.add_argument("--apply", action="store_true")
+    e = sub.add_parser("expire", help="list (or with --apply, defer) Ben loose ends open too long with no date")
+    e.add_argument("--apply", action="store_true")
+    e.add_argument("--days", type=int, default=EXPIRE_DAYS)
+    e.add_argument("--undo", metavar="DECISION_ID", help="reopen what that expiry decision deferred")
     a = p.parse_args(argv)
     conn = connect()
     try:
+        if a.cmd == "expire":
+            if a.undo:
+                print(f"{unexpire(conn, a.undo)['reopened']} reopened")
+                return 0
+            out = expire(conn, apply=a.apply, days=a.days)
+            for r in out["items"]:
+                print(f"{r['id']}  {r['client']:<9} {r['age_days']:>3}d  {r['what'][:100]}")
+            for c, n in sorted(out["by_client"].items(), key=lambda kv: -kv[1]):
+                print(f"  {c}: {n}")
+            print(f"{out['count']} " + (f"deferred, decision {out['decision_id']}" if out["applied"]
+                                        else "would be deferred (dry run; --apply to defer)"))
+            return 0
         rows = backfill(conn, apply=a.apply)
     finally:
         conn.close()

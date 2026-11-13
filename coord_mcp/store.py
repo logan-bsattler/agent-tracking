@@ -181,6 +181,10 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
     if row["state"] == "done":
         raise ValueError(f"task '{task_id}' is already done")
     validated = contracts.validate(row["kind"], result)
+    # Three or more same-shape rulings for Ben go back to be grouped into one
+    # workbook item (queue.check_grouped; Ben, 2026-11-13).
+    from . import queue as _queue
+    _queue.check_grouped(validated.get("follow_ups") or [], row["assigned_to"])
     state = "done" if validated.get("done") else "failed"
     conn.execute(
         "UPDATE tasks SET state=?, result=?, result_version=?, completed_at=? WHERE id=?",

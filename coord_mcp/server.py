@@ -171,7 +171,9 @@ async def coord_complete_task(params: CompleteInput) -> str:
     On rejection nothing is written and the error names every offending field
     plus the expected shape. Fix and resend in the same turn. Do not work
     around a cap by moving overflow into another field; put long output in a
-    file and reference its path.
+    file and reference its path. Three or more follow_ups asking Ben for the
+    same ruling row by row are refused too: write the rows to one workbook
+    and hand back one follow-up naming its path.
 
     Returns JSON: {ok, task_id, state: "done"|"failed"}
     """

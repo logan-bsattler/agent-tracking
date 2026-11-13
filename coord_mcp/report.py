@@ -2316,6 +2316,13 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         store.minder_check(conn)
                     except Exception:
                         loop_error(connect, "minder")
+                    # Once a day: Ben's stale, undated loose ends are
+                    # deferred behind one decision (queue.expire_due).
+                    try:
+                        from . import queue
+                        queue.expire_due(conn)
+                    except Exception:
+                        loop_error(connect, "expire")
                 finally:
                     conn.close()
             except Exception:  # a locked db or a vanished file: the next pass gets it

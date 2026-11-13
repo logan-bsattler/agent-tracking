@@ -236,3 +236,97 @@ def test_queue_page_leads_with_client_cards_that_filter_it(conn):
     assert html.index('class="fleet"') < html.index('action="/api/queue"')
     assert 'href="/queue?client=LNK"' in html and 'href="/queue"' in html
     assert "Approve MAG thing" in html and "Approve LNK thing" not in html
+
+
+# ------------------------------------------------ grouping and expiry (11-13)
+
+ROWS = ["Rule on row 12: keep UM EA or change to CS", "Rule on row 13: keep UM EA or change to BX",
+        "Rule on row 27: keep UM LB or change to KG"]
+
+
+def test_same_shape_rulings_for_ben_are_refused_until_grouped(conn):
+    tid = store.create_task(conn, "investigation", "t", {"q": "x"}, assigned_to="MAG")["task_id"]
+    store.get_task(conn, tid, reader="MAG")
+    with pytest.raises(ValueError, match="one workbook"):
+        store.complete_task(conn, tid, {**INV, "follow_ups": [_ben(w) for w in ROWS]})
+    # Nothing was written: the task is still open and has no loose ends.
+    assert conn.execute("SELECT state FROM tasks WHERE id=?", (tid,)).fetchone()["state"] != "done"
+    assert conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE task_id=?", (tid,)).fetchone()["n"] == 0
+    out = store.complete_task(conn, tid, {**INV, "follow_ups": [
+        _ben("Rule on the 3 UM rows in work/um-rulings.xlsx (answer column D)")]})
+    assert out["state"] == "done" and out["follow_ups"] == 1
+
+
+@pytest.mark.parametrize("whats", [
+    ROWS[:2],                                                        # two is not a pattern
+    ["Approve the plan", "Call Darren about the VM", "Promote the status report on /deliverables"],
+    ["Query so_mstr for site 10", "Query so_mstr for site 20", "Query so_mstr for site 30"],  # routed to the client
+    ["Review work/a.xlsx", "Review work/b.xlsx", "Review work/c.xlsx"],  # each already names a file
+])
+def test_distinct_or_few_items_are_not_grouped(whats):
+    assert queue.ungrouped([_ben(w) for w in whats], "MAG") == []
+
+
+def test_client_items_never_count_toward_grouping():
+    assert queue.ungrouped([{"who": "MAG", "what": w} for w in ROWS], "MAG") == []
+
+
+DAY = 86400
+
+
+def _aged(conn, fid, days):
+    conn.execute("UPDATE follow_ups SET created_at=? WHERE id=?", (now() - days * DAY, fid))
+
+
+def _fid(conn, tid):
+    return conn.execute("SELECT id FROM follow_ups WHERE task_id=? ORDER BY idx", (tid,)).fetchone()["id"]
+
+
+def test_expire_defers_old_undated_ben_items_behind_one_decision(conn):
+    old, _ = _done(conn, follow_ups=[_ben("Approve the plan")])
+    new, _ = _done(conn, follow_ups=[_ben("Decide whether to keep the report")])
+    mag, _ = _done(conn, follow_ups=[{"who": "MAG", "what": "Rerun the load"}])
+    for t in (old, mag):
+        _aged(conn, _fid(conn, t), 20)
+    dry = queue.expire(conn)
+    assert dry["count"] == 1 and not dry["applied"] and dry["by_client"] == {"MAG": 1}
+    assert conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='deferred'").fetchone()["n"] == 0
+    out = queue.expire(conn, apply=True)
+    assert out["applied"] and out["count"] == 1
+    states = {t: conn.execute("SELECT state, resolved_by FROM follow_ups WHERE task_id=?", (t,)).fetchone()
+              for t in (old, new, mag)}
+    assert states[old]["state"] == "deferred" and states[old]["resolved_by"] == out["decision_id"]
+    assert states[new]["state"] == "open" and states[mag]["state"] == "open"
+    d = conn.execute("SELECT statement FROM decisions WHERE id=?", (out["decision_id"],)).fetchone()
+    assert d["statement"].startswith("Auto-deferred 1 Ben loose end(s) open over 14 days: MAG 1")
+
+
+def test_expire_keeps_dated_items_replies_and_the_presented_question(conn):
+    dated, _ = _done(conn, follow_ups=[_ben("Approve the plan")])
+    conn.execute("UPDATE follow_ups SET due_at=? WHERE task_id=?", (now() + DAY, dated))
+    reply, _ = _done(conn, kind="draft_reply", follow_ups=[_ben("Review and draft")], result={
+        "done": True, "to": ["a@b.c"], "subject": "s", "body_path": "work/r.txt", "summary": "s"})
+    asked, _ = _done(conn, follow_ups=[_ben("Decide whether to keep the report")])
+    for t in (dated, reply, asked):
+        _aged(conn, _fid(conn, t), 30)
+    store.present_question(conn, "Keep it?", ["Yes", "No"], follow_up_id=_fid(conn, asked))
+    assert queue.expire(conn, apply=True)["count"] == 0
+
+
+def test_undo_reopens_and_a_reopened_item_is_not_expired_again(conn):
+    tid, _ = _done(conn, follow_ups=[_ben("Approve the plan")])
+    _aged(conn, _fid(conn, tid), 20)
+    dec = queue.expire(conn, apply=True)["decision_id"]
+    assert queue.unexpire(conn, dec)["reopened"] == 1
+    assert conn.execute("SELECT state FROM follow_ups WHERE task_id=?", (tid,)).fetchone()["state"] == "open"
+    assert queue.expire(conn, apply=True)["count"] == 0
+
+
+def test_daily_pass_stamps_first_then_expires_once_a_day(conn):
+    tid, _ = _done(conn, follow_ups=[_ben("Approve the plan")])
+    _aged(conn, _fid(conn, tid), 20)
+    t = now()
+    assert queue.expire_due(conn, t) is None          # first pass on a board: clock only
+    assert queue.expire_due(conn, t + 3600) is None   # not due yet
+    out = queue.expire_due(conn, t + DAY + 1)
+    assert out["applied"] and out["count"] == 1
