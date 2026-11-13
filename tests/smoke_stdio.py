@@ -70,6 +70,28 @@ async def main() -> int:
         r = await team.call_tool("coord_resolve_intent", {"params": {"intent_id": intent_id, "task_ids": [task_id]}})
         check("intent converted", json.loads(text(r))["state"] == "converted", text(r))
 
+        # An ask only Ben can answer, from a client with no agent: a loose end with no task.
+        r = await team.call_tool("coord_propose_intent", {"params": {
+            "summary": "Essex-Brownell: hours and target date for FDD-005", "source": "email-reply",
+            "context": "from Homero; received 2026-11-11 14:02Z"}})
+        ben_intent = json.loads(text(r))["intent_id"]
+        r = await team.call_tool("coord_resolve_intent", {"params": {
+            "intent_id": ben_intent, "note": "unwired client",
+            "ben_item": {"what": "Reply to Homero: hours and date", "client": "Essex-Brownell", "due": "2026-11-14"}}})
+        out = json.loads(text(r))
+        fid = (out.get("ben_item") or {}).get("follow_up_id")
+        check("resolve_intent with ben_item leaves a task-less loose end",
+              out.get("state") == "dismissed" and bool(fid) and out["ben_item"]["due_at"], text(r))
+        r = await team.call_tool("coord_list_follow_ups", {"params": {"who": "Ben"}})
+        fus = json.loads(text(r))["follow_ups"]
+        check("Ben item listed under its client", any(f["id"] == fid and f["task_id"] is None
+                                                       and f["client"] == "Essex-Brownell" for f in fus), text(r))
+        r = await team.call_tool("coord_record_decision", {"params": {
+            "statement": "Ben replied to Homero", "because": "smoke"}})
+        r = await team.call_tool("coord_resolve_follow_up", {"params": {
+            "follow_up_id": fid, "decision_id": json.loads(text(r))["decision_id"]}})
+        check("Ben item resolves by decision", json.loads(text(r)).get("state") == "dropped", text(r))
+
         r = await team.call_tool("coord_get_task", {"params": {"task_id": task_id}})
         got = json.loads(text(r))
         check("teammate reads spec and shape", got["spec"]["out"] == "C:/tmp/q3.csv" and "expected_result_shape" in got)

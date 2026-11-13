@@ -493,21 +493,36 @@ async def coord_list_intents(params: ListIntentsInput) -> str:
         return _err(e)
 
 
+class BenItemInput(Strict):
+    what: str = Field(..., description="What Ben owes, in one line", min_length=1, max_length=300)
+    client: str = Field(..., description="Client key, or the client's name when it is not wired",
+                        min_length=1, max_length=60)
+    due: str | None = Field(default=None, description="When it is due: an ISO date or the words used "
+                            "('tomorrow', 'Friday'), read against when the intent was proposed", max_length=60)
+
+
 class ResolveIntentInput(Strict):
     intent_id: str = Field(..., description="Intent to close")
     task_ids: list[str] | None = Field(default=None, description="Tasks you created from it. Omit to dismiss.", max_length=20)
     note: str | None = Field(default=None, description="Why it was dismissed, or anything worth keeping", max_length=200)
+    ben_item: BenItemInput | None = Field(
+        default=None,
+        description="An ask only Ben can answer that becomes no task (e.g. an unwired client): leaves a loose "
+                    "end for Ben with no task, in his queue under `client`. Its id goes into the note.")
 
 
 @tool("coord_resolve_intent", title="Resolve intent")
 async def coord_resolve_intent(params: ResolveIntentInput) -> str:
     """Close an intent: name the tasks you created from it, or dismiss it with
-    a note. Stamps from_intent on those tasks for provenance.
+    a note. Stamps from_intent on those tasks for provenance. With ben_item,
+    an ask only Ben can answer also becomes a loose end for him with no task.
 
-    Returns JSON: {ok, intent_id, state: "converted"|"dismissed", tasks}
+    Returns JSON: {ok, intent_id, state: "converted"|"dismissed", tasks,
+    ben_item?: {follow_up_id, client, due_at, ref}}
     """
     try:
-        return _ok(store.resolve_intent(db(), params.intent_id, params.task_ids, params.note))
+        item = params.ben_item.model_dump(exclude_none=True) if params.ben_item else None
+        return _ok(store.resolve_intent(db(), params.intent_id, params.task_ids, params.note, ben_item=item))
     except Exception as e:
         return _err(e)
 

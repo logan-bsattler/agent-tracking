@@ -102,8 +102,11 @@ def reroute(conn: sqlite3.Connection, follow_up_id: str, to: str, why: str) -> N
 
 
 def _ben_rows(conn: sqlite3.Connection, task_id: str | None = None) -> list[sqlite3.Row]:
-    sql = ("SELECT f.id, f.task_id, f.what, f.created_at, t.assigned_to client, t.title "
-           "FROM follow_ups f JOIN tasks t ON t.id = f.task_id "
+    # A Ben item has no task (docs/ben-only-replies.md): its client and due
+    # date are on the row, and it is grouped under that client.
+    sql = ("SELECT f.id, f.task_id, f.what, f.created_at, COALESCE(t.assigned_to, f.client) client, "
+           "COALESCE(t.title, '') title, f.intent_id, f.due_at, f.ref "
+           "FROM follow_ups f LEFT JOIN tasks t ON t.id = f.task_id "
            "WHERE f.state='open' AND lower(trim(f.who))='ben'")
     args: tuple = ()
     if task_id:
@@ -148,14 +151,18 @@ def ben_queue(conn: sqlite3.Connection) -> dict[str, Any]:
     by_fu = {r["follow_up_id"]: r for r in conn.execute(
         "SELECT follow_up_id, due_at, due_basis FROM commitments WHERE state IN ('open','slipped') "
         "AND due_at IS NOT NULL AND follow_up_id IS NOT NULL ORDER BY due_at DESC")} if dues else {}
+    wired = store.client_keys(conn)
     by: dict[str, list[dict[str, Any]]] = {}
     for r in _ben_rows(conn):
         d = dict(r)
-        d["route"] = route_for(r["what"], r["client"])
+        # Send to agent needs a client session; an unwired client has none.
+        d["agent_ok"] = bool(r["client"]) and r["client"].strip().casefold() in wired
+        d["route"] = route_for(r["what"], r["client"]) if r["task_id"] else None
         d["presented"] = bool(q and q.get("follow_up_id") == r["id"])
         # The effective due date of the item's task (docs/commitments.md), or
         # of a commitment linked to this loose end itself if that is sooner.
-        cands = [x for x in (dues.get(r["task_id"]), by_fu.get(r["id"])) if x]
+        own = {"due_at": r["due_at"], "due_basis": "stated"} if r["due_at"] is not None else None
+        cands = [x for x in (dues.get(r["task_id"]) if r["task_id"] else None, by_fu.get(r["id"]), own) if x]
         best = min(cands, key=lambda x: x["due_at"]) if cands else None
         d["due"] = best["due_at"] if best else None
         d["due_basis"] = best["due_basis"] if best else None
@@ -214,6 +221,12 @@ def apply(conn: sqlite3.Connection, action: str, ids: list[str],
         no_client = [i for i in ids if not rows[i]["client"]]
         if no_client:
             raise ValueError(f"no client to send to: {', '.join(no_client)}")
+        wired = store.client_keys(conn)
+        unwired = [i for i in ids if rows[i]["client"].strip().casefold() not in wired]
+        if unwired:
+            raise ValueError("no agent session for "
+                             + ", ".join(f"{i} ({rows[i]['client']})" for i in unwired)
+                             + ": that client is not wired. Defer, drop or answer it instead.")
         for i in ids:
             reroute(conn, i, rows[i]["client"], "ben")
         return {"ok": True, "action": action, "count": len(ids)}
@@ -231,7 +244,8 @@ def apply(conn: sqlite3.Connection, action: str, ids: list[str],
         if len(a) > ANSWER_MAX:
             raise ValueError(f"answer on {i} is over {ANSWER_MAX} characters")
         r = rows[i]
-        lines.append(f"- {i} ({r['client'] or 'unassigned'}, task {r['task_id']}; \"{r['what'][:120]}\"): {a}")
+        src = f"task {r['task_id']}" if r["task_id"] else f"intent {r['intent_id']}"
+        lines.append(f"- {i} ({r['client'] or 'unassigned'}, {src}; \"{r['what'][:120]}\"): {a}")
     text = store.OPERATOR_ACTIONS["batch"].format(n=len(ids), answers="\n".join(lines))
     if note:
         text += "\n\nBen's direction: " + note

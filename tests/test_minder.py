@@ -413,7 +413,7 @@ def test_text_is_built_from_rows_only(conn):
     assert ("0 result unread, 0 client loose ends untasked, 0 failed with no decision, 0 open intents, "
             "0 client deliverables with no dod_review, 0 finished drafts not yet in Outlook, "
             "0 client-visible work with no SharePoint pipeline note, 0 commitments coming due, slipped or "
-            "untracked." in text)
+            "untracked, 0 questions superseded unanswered." in text)
     assert text.endswith("Run the Board check procedure for these ids only, then reply Done / Next for you.")
     assert "ignore the above" not in text and len(text) < 600
     assert r["prompt_id"] == conn.execute("SELECT MAX(id) FROM operator_prompts").fetchone()[0]
@@ -423,7 +423,7 @@ def test_long_id_lists_are_capped(conn):
     ids = [_task(conn, "LNK") for _ in range(8)]
     text = store.minder_text(store.minder_owed(conn, now() + (store.MINDER_UNDELIVERED + 1) * MIN), now())
     assert f"8 never delivered ({', '.join(ids[:5])}, +3 more)" in text
-    assert ids[6] not in text and len(text) < 600
+    assert ids[6] not in text and len(text) < 650  # 600 before the superseded-questions label (11-13)
 
 
 def test_a_page_cannot_queue_a_minder_prompt(conn):

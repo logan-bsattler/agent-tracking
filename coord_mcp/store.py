@@ -365,9 +365,10 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
     # oldest first, and silent: once the operator's backlog passed it, every
     # new follow-up was invisible and the master had no id to resolve it by.
     # The total goes out with the list so a cut is never silent again.
-    loose = [dict(r) for r in conn.execute(
-        """SELECT f.id, f.task_id, t.assigned_to client, f.who, f.what
-           FROM follow_ups f JOIN tasks t ON t.id = f.task_id
+    # A Ben item has no task: its client and intent are on the row.
+    loose = [{k: v for k, v in dict(r).items() if v is not None or k != "intent_id"} for r in conn.execute(
+        """SELECT f.id, f.task_id, COALESCE(t.assigned_to, f.client) client, f.who, f.what, f.intent_id
+           FROM follow_ups f LEFT JOIN tasks t ON t.id = f.task_id
            WHERE f.state='open' ORDER BY f.created_at, f.idx LIMIT ?""",
         (LOOSE_ENDS_CAP,))]
     loose_total = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='open'").fetchone()["n"]
@@ -396,15 +397,15 @@ def list_follow_ups(
         where.append("f.task_id=?")
         args.append(task_id)
     if client:
-        where.append("lower(t.assigned_to)=lower(?)")
+        where.append("lower(COALESCE(t.assigned_to, f.client))=lower(?)")
         args.append(client)
     if who:
         where.append("lower(trim(f.who))=lower(trim(?))")
         args.append(who)
     sql_where = " AND ".join(where)
-    rows = [dict(r) for r in conn.execute(
-        f"""SELECT f.id, f.task_id, t.assigned_to client, f.who, f.what
-            FROM follow_ups f JOIN tasks t ON t.id = f.task_id
+    rows = [{k: v for k, v in dict(r).items() if v is not None or k != "intent_id"} for r in conn.execute(
+        f"""SELECT f.id, f.task_id, COALESCE(t.assigned_to, f.client) client, f.who, f.what, f.intent_id
+            FROM follow_ups f LEFT JOIN tasks t ON t.id = f.task_id
             WHERE {sql_where}
             ORDER BY f.created_at DESC,
                      (SELECT MAX(g.rowid) FROM follow_ups g WHERE g.task_id = f.task_id) DESC,
@@ -412,7 +413,7 @@ def list_follow_ups(
             LIMIT ?""",
         (*args, LOOSE_ENDS_CAP))]
     total = conn.execute(
-        f"SELECT COUNT(*) n FROM follow_ups f JOIN tasks t ON t.id = f.task_id WHERE {sql_where}", args
+        f"SELECT COUNT(*) n FROM follow_ups f LEFT JOIN tasks t ON t.id = f.task_id WHERE {sql_where}", args
     ).fetchone()["n"]
     out: dict[str, Any] = {"follow_ups": rows, "total": total}
     if task_id and not rows and conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
@@ -656,17 +657,76 @@ def list_intents(conn: sqlite3.Connection, state: str = "open", limit: int = 20)
     return out
 
 
+BEN_ITEM_WHAT_MAX = 300
+BEN_ITEM_CLIENT_MAX = 60
+BEN_ITEM_REF_MAX = 500
+
+
+def ben_item(conn: sqlite3.Connection, intent_id: str, what: str, client: str,
+             due_at: Any = None, ref: str | None = None) -> dict[str, Any]:
+    """A loose end for Ben with no task behind it (docs/ben-only-replies.md):
+    an ask only he can answer, from an intent that became no task. It sits in
+    his queue under `client` (a client key, or the name of an unwired client)
+    until a decision resolves it, like any other loose end.
+
+    due_at is an epoch or an ISO timestamp. ref defaults to the intent's
+    `msg` field (an Outlook id or a teams:/// uri) when it has one."""
+    from .commitments import _epoch
+    what, client = (what or "").strip(), (client or "").strip()
+    if not what or len(what) > BEN_ITEM_WHAT_MAX:
+        raise ValueError(f"ben_item what must be 1-{BEN_ITEM_WHAT_MAX} characters")
+    if not client or len(client) > BEN_ITEM_CLIENT_MAX:
+        raise ValueError(f"ben_item client must be 1-{BEN_ITEM_CLIENT_MAX} characters: "
+                         "the client key, or the client's name when it is not wired")
+    row = conn.execute("SELECT context FROM intents WHERE id=?", (intent_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"unknown intent '{intent_id}'")
+    ref = (ref or intent_fields(row["context"]).get("msg") or "").strip()[:BEN_ITEM_REF_MAX] or None
+    try:
+        due = _epoch(due_at)
+    except ValueError:
+        raise ValueError(f"ben_item due_at is not an epoch or ISO timestamp: {due_at!r}") from None
+    fid = _id()
+    conn.execute(
+        "INSERT INTO follow_ups(id, task_id, idx, who, what, state, created_at, client, intent_id, due_at, ref) "
+        "VALUES (?, NULL, 0, 'Ben', ?, 'open', ?, ?, ?, ?, ?)",
+        (fid, what, now(), client, intent_id, due, ref))
+    return {"follow_up_id": fid, "client": client, "due_at": due, "ref": ref}
+
+
+_insert_ben_item = ben_item  # resolve_intent's ben_item argument shadows the name
+
+
 def resolve_intent(
     conn: sqlite3.Connection,
     intent_id: str,
     task_ids: list[str] | None = None,
     note: str | None = None,
+    ben_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    row = conn.execute("SELECT state FROM intents WHERE id=?", (intent_id,)).fetchone()
+    """Close an intent: converted to tasks, or dismissed with a note.
+
+    ben_item {what, client, due?} also leaves a loose end for Ben with no task
+    (an ask only he can answer); its id goes into the note. due is the words
+    used or an ISO date, read against when the intent was proposed."""
+    row = conn.execute("SELECT state, created_at FROM intents WHERE id=?", (intent_id,)).fetchone()
     if row is None:
         raise KeyError(f"unknown intent '{intent_id}'")
     if row["state"] != "open":
         raise ValueError(f"intent '{intent_id}' is already {row['state']}")
+    item_args = None
+    if ben_item is not None:
+        if not isinstance(ben_item, dict):
+            raise ValueError("ben_item is {what, client, due?}")
+        extra = set(ben_item) - {"what", "client", "due"}
+        if extra:
+            raise ValueError(f"ben_item takes what, client and due, not {sorted(extra)}")
+        due = ben_item.get("due")
+        due_at = None
+        if due not in (None, ""):
+            from .commitments import resolve_due
+            due_at, _ = resolve_due(str(due), said_at=row["created_at"])
+        item_args = (ben_item.get("what") or "", ben_item.get("client") or "", due_at)
     if task_ids:
         marks = ",".join("?" * len(task_ids))
         found = {r["id"] for r in conn.execute(f"SELECT id FROM tasks WHERE id IN ({marks})", task_ids)}
@@ -677,11 +737,18 @@ def resolve_intent(
         state = "converted"
     else:
         state = "dismissed"
+    item = None
+    if item_args:  # after every check above, so a refusal leaves no orphan loose end
+        item = _insert_ben_item(conn, intent_id, item_args[0], item_args[1], due_at=item_args[2])
+        note = f"Ben item {item['follow_up_id']}" + (f"; {note}" if note else "")
     conn.execute(
         "UPDATE intents SET state=?, resolved_at=?, task_ids=?, note=? WHERE id=?",
         (state, now(), json.dumps(task_ids or []), note, intent_id),
     )
-    return {"ok": True, "intent_id": intent_id, "state": state, "tasks": task_ids or []}
+    out = {"ok": True, "intent_id": intent_id, "state": state, "tasks": task_ids or []}
+    if item:
+        out["ben_item"] = item
+    return out
 
 
 def board_summary(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -782,13 +849,18 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
     loose_ends: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
     for r in conn.execute(
-        """SELECT f.id fid, f.task_id, f.who, f.what, f.state, f.created_at, t.assigned_to, t.title
-           FROM follow_ups f JOIN tasks t ON t.id = f.task_id
+        """SELECT f.id fid, f.task_id, f.who, f.what, f.state, f.created_at, f.intent_id, f.due_at,
+                  COALESCE(t.assigned_to, f.client) assigned_to, t.title
+           FROM follow_ups f LEFT JOIN tasks t ON t.id = f.task_id
            WHERE f.state IN ('open','deferred') ORDER BY f.created_at, f.idx"""
     ):
-        d = {"id": r["task_id"], "fid": r["fid"], "kind": "follow_up", "title": r["what"],
+        # A Ben item has no task page: id "" renders it without a link.
+        src = f"from: {r['title']}" if r["task_id"] else f"Ben item from intent {r['intent_id']}"
+        d = {"id": r["task_id"] or "", "fid": r["fid"], "kind": "follow_up", "title": r["what"],
              "client": r["assigned_to"] or "—",
-             "since": r["created_at"], "who": r["who"], "note": f"{r['who']} · from: {r['title']}"}
+             "since": r["created_at"], "who": r["who"], "note": f"{r['who']} · {src}"}
+        if r["due_at"] is not None:
+            d["due"], d["due_basis"] = r["due_at"], "stated"
         if r["state"] == "deferred":
             deferred.append(d)
         elif r["who"].strip().lower() == "ben":
@@ -1951,13 +2023,15 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     from . import queue
     undrafted = queue.undrafted(conn, now_ts, MINDER_UNREAD * 60)
     pipeline = queue.pipeline_owed(conn, now_ts)
+    superseded = superseded_questions(conn)
     # Ben's promises coming due, slipped, or untracked (docs/commitments.md).
     # The table is created on first use, so a board without one owes nothing.
     from . import commitments
     owed_commitments = commitments.minder_owed(conn, now_ts)
     return {"parked": parked, "stalled": stalled, "undelivered": undelivered, "unread": unread, "loose": loose,
             "failed": failed, "intents": intents, "unreviewed": unreviewed,
-            "undrafted": undrafted, "pipeline": pipeline, "commitments": owed_commitments}
+            "undrafted": undrafted, "pipeline": pipeline, "commitments": owed_commitments,
+            "superseded": superseded}
 
 
 _MINDER_LABELS = (("parked", "parked awaiting re-dispatch"),
@@ -1968,7 +2042,30 @@ _MINDER_LABELS = (("parked", "parked awaiting re-dispatch"),
                   ("unreviewed", "client deliverables with no dod_review (CVC code, emails)"),
                   ("undrafted", "finished drafts not yet in Outlook (draft each, never send)"),
                   ("pipeline", "client-visible work with no SharePoint pipeline note"),
-                  ("commitments", "commitments coming due, slipped or untracked (commitment ids)"))
+                  ("commitments", "commitments coming due, slipped or untracked (commitment ids)"),
+                  ("superseded", "questions superseded unanswered (q ids; re-present each, or record why not)"))
+
+
+def superseded_questions(conn: sqlite3.Connection) -> list[str]:
+    """'q<id>' of board-wide questions (no task, no loose end) that another
+    question replaced before Ben answered, and that no decision cites since.
+    A question with a loose end behind it stays owed through that loose end."""
+    rows = conn.execute(
+        """SELECT id FROM questions
+           WHERE superseded_at IS NOT NULL AND closed_at IS NULL
+             AND task_id = '' AND follow_up_id IS NULL
+           ORDER BY id""").fetchall()
+    out = []
+    for r in rows:
+        ref = f"q{r['id']}"
+        pat = re.compile(rf"(?<![0-9A-Za-z]){ref}(?![0-9])")
+        cited = any(pat.search(d["statement"] or "") or pat.search(d["because"] or "")
+                    for d in conn.execute(
+                        "SELECT statement, because FROM decisions WHERE statement LIKE ? OR because LIKE ?",
+                        (f"%{ref}%", f"%{ref}%")))
+        if not cited:
+            out.append(ref)
+    return out
 
 
 def minder_text(owed: dict[str, list[str]], now_ts: int) -> str:
@@ -2146,14 +2243,20 @@ def present_question(conn: sqlite3.Connection, question: str, options: list[str]
         if fu is None:
             raise KeyError(f"unknown follow-up '{follow_up_id}'")
         if task_id and task_id != fu["task_id"]:
-            raise ValueError(f"follow-up '{follow_up_id}' belongs to task '{fu['task_id']}', not '{task_id}'")
+            raise ValueError(f"follow-up '{follow_up_id}' belongs to "
+                             + (f"task '{fu['task_id']}'" if fu["task_id"] else "no task (a Ben item)")
+                             + f", not '{task_id}'")
+        # A Ben item has no task; the follow-up alone keeps the question
+        # from being board-wide, and its ref is the follow-up id.
         task_id = fu["task_id"]
     if task_id and not conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
         raise KeyError(f"unknown task '{task_id}'")
     doc = _question_doc(path)
     _ensure_question_path(conn)
     t = now()
-    conn.execute("UPDATE questions SET closed_at=? WHERE closed_at IS NULL", (t,))
+    # Superseded, not answered: the minder lists a board-wide one until a
+    # decision cites q<id> (docs/ben-only-replies.md section 3).
+    conn.execute("UPDATE questions SET superseded_at=? WHERE closed_at IS NULL AND superseded_at IS NULL", (t,))
     # task_id is NOT NULL in the table; '' is board-wide, and reads give None.
     cur = conn.execute(
         "INSERT INTO questions(task_id, follow_up_id, question, options, recommended, created_at, path) "
@@ -2169,7 +2272,7 @@ def current_question(conn: sqlite3.Connection, task_id: str | None = None) -> di
     With task_id, only if it is that task's."""
     r = conn.execute(
         "SELECT q.* FROM questions q LEFT JOIN follow_ups f ON f.id = q.follow_up_id "
-        "WHERE q.closed_at IS NULL AND (q.follow_up_id IS NULL OR f.state = 'open') "
+        "WHERE q.closed_at IS NULL AND q.superseded_at IS NULL AND (q.follow_up_id IS NULL OR f.state = 'open') "
         "ORDER BY q.created_at DESC, q.id DESC LIMIT 1").fetchone()
     if r is None or (task_id and r["task_id"] != task_id):
         return None
@@ -2251,8 +2354,16 @@ def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None 
     out: list[dict[str, Any]] = []
 
     ben: dict[str, list[str]] = {}
-    for f in conn.execute("SELECT task_id, what FROM follow_ups WHERE state='open' AND lower(trim(who))='ben' ORDER BY idx"):
-        ben.setdefault(f["task_id"], []).append(f["what"])
+    items: dict[str, list[str]] = {}  # Ben items (no task), by intent
+    for f in conn.execute("SELECT task_id, intent_id, what FROM follow_ups WHERE state='open' "
+                          "AND lower(trim(who))='ben' ORDER BY created_at, idx"):
+        if f["task_id"]:
+            ben.setdefault(f["task_id"], []).append(f["what"])
+        elif f["intent_id"]:
+            items.setdefault(f["intent_id"], []).append(f["what"])
+    # A Ben item resolved since: the ask is settled, so the dismissal is not a gap.
+    settled = {r["intent_id"] for r in conn.execute(
+        "SELECT intent_id FROM follow_ups WHERE task_id IS NULL AND intent_id IS NOT NULL AND state != 'open'")}
     intent_ids: set[str] = set()
     raised: set[str] = set()  # summaries of intents Ben raised from noted log lines
     # email-status and email-reply are inbound asks too; before 11-13 only
@@ -2277,7 +2388,13 @@ def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None 
             tasks.append({"id": row["id"], "title": row["title"], "state": row["state"]})
             fam = [tid] + [c["id"] for c in conn.execute("SELECT id FROM tasks WHERE parent_id=?", (tid,))]
             owed += [w for x in fam for w in ben.get(x, [])]
-        if _REPLY_OWED.search(ctx) or _REPLY_OWED.search(r["note"] or ""):
+        if r["id"] in items:
+            # The Ben item is the record of what he owes (docs/ben-only-replies.md);
+            # it replaces the note heuristics below.
+            owed[:0] = items[r["id"]]
+        elif r["id"] in settled:
+            pass
+        elif _REPLY_OWED.search(ctx) or _REPLY_OWED.search(r["note"] or ""):
             owed.insert(0, "Reply to the sender (triage flagged it as yours).")
         elif (r["source"] == "email-reply" and r["state"] == "dismissed"
               and not _REPLY_DONE.search(r["note"] or "")):

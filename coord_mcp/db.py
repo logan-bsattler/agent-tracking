@@ -142,16 +142,25 @@ CREATE TABLE IF NOT EXISTS meeting_rules (
 -- decision saying why). Open rows are the board's loose ends. 'deferred'
 -- (resolved_by = the decision naming its trigger) is still owed but parked off
 -- the board until it is reopened or resolved.
+-- A row with no task_id is a Ben item (docs/ben-only-replies.md): an ask
+-- only Ben can answer, from an intent that became no task. It names its
+-- intent and client. It is created as Ben's; Send to agent may hand it to a
+-- wired client, so the CHECK asks only for the intent.
 CREATE TABLE IF NOT EXISTS follow_ups (
   id          TEXT PRIMARY KEY,
-  task_id     TEXT NOT NULL REFERENCES tasks(id),
+  task_id     TEXT REFERENCES tasks(id),
   idx         INTEGER NOT NULL,
   who         TEXT NOT NULL,
   what        TEXT NOT NULL,
   state       TEXT NOT NULL CHECK (state IN ('open','tasked','dropped','deferred')),
   resolved_by TEXT,
   created_at  INTEGER NOT NULL,
-  resolved_at INTEGER
+  resolved_at INTEGER,
+  client      TEXT,
+  intent_id   TEXT REFERENCES intents(id),
+  due_at      INTEGER,
+  ref         TEXT,
+  CHECK (task_id IS NOT NULL OR intent_id IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS follow_ups_state ON follow_ups(state, created_at);
 CREATE INDEX IF NOT EXISTS follow_ups_task ON follow_ups(task_id, idx);
@@ -187,8 +196,8 @@ CREATE INDEX IF NOT EXISTS operator_prompts_open ON operator_prompts(taken_at, c
 
 -- The question master is putting to Ben (CLAUDE.md "One question at a time"),
 -- so each option can be a button in the master-console band and on the task
--- page. One is current: presenting another closes the last. closed_at is set
--- when an option is pressed or the question is superseded.
+-- page. One is current: presenting another supersedes the last
+-- (superseded_at). closed_at is set only when it is answered.
 CREATE TABLE IF NOT EXISTS questions (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id      TEXT NOT NULL,
@@ -197,7 +206,10 @@ CREATE TABLE IF NOT EXISTS questions (
   options      TEXT NOT NULL,
   recommended  INTEGER,
   created_at   INTEGER NOT NULL,
-  closed_at    INTEGER
+  closed_at    INTEGER,
+  -- Another question went up before this one was answered. Not an answer:
+  -- the minder lists it until a decision cites q<id> or it is closed.
+  superseded_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS questions_open ON questions(closed_at, created_at);
 
@@ -396,6 +408,67 @@ def ensure_commitments(conn: sqlite3.Connection) -> None:
         conn.executescript(COMMITMENTS_DDL)
 
 
+# Shape of follow_ups and questions for Ben items (docs/ben-only-replies.md).
+# Its own meta row, not SCHEMA_VERSION: a bump would ping-pong a full init
+# with every coord server still on the old code, which reads the new columns
+# as extras in SELECT * and inserts by column name.
+BEN_ITEMS_KEY = "ben_items_version"
+BEN_ITEMS_VERSION = "1"
+_FU_COLS = ("id", "task_id", "idx", "who", "what", "state", "resolved_by", "created_at", "resolved_at")
+
+
+def _follow_ups_ddl() -> tuple[str, list[str]]:
+    """(CREATE TABLE, [CREATE INDEX...]) for follow_ups, from DDL."""
+    ddl = DDL[DDL.index("CREATE TABLE IF NOT EXISTS follow_ups"):]
+    ddl = ddl[:ddl.index("CREATE TABLE IF NOT EXISTS intents")]
+    table, *indexes = [x.strip() for x in ddl.split(";") if x.strip()]
+    return table, indexes
+
+
+def ensure_ben_items(conn: sqlite3.Connection) -> None:
+    """Rebuild follow_ups with task_id nullable and the Ben item columns, and
+    add questions.superseded_at, once per file. One indexed read after that.
+
+    SQLite cannot alter nullability, so the table is built beside the old one,
+    filled, and renamed into place. Foreign keys go off for the swap: other
+    tables (commitments, follow_up_routes) reference follow_ups, and dropping
+    it with enforcement on would fail on their rows."""
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key=?", (BEN_ITEMS_KEY,)).fetchone()
+    except sqlite3.OperationalError:
+        return  # no meta table: connect() has not initialised this file
+    if row is not None and row[0] == BEN_ITEMS_VERSION:
+        return
+    fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.execute("PRAGMA foreign_keys=OFF")  # a no-op inside a transaction, so before BEGIN
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT value FROM meta WHERE key=?", (BEN_ITEMS_KEY,)).fetchone()
+            if row is None or row[0] != BEN_ITEMS_VERSION:  # another process may have won the race
+                info = {r[1]: r for r in conn.execute("PRAGMA table_info(follow_ups)")}
+                if "client" not in info or info["task_id"][3]:  # [3] is notnull
+                    table, indexes = _follow_ups_ddl()
+                    cols = ", ".join(c for c in _FU_COLS if c in info)
+                    conn.execute(table.replace("IF NOT EXISTS follow_ups", "follow_ups_ben"))
+                    conn.execute(f"INSERT INTO follow_ups_ben({cols}) SELECT {cols} FROM follow_ups")
+                    conn.execute("DROP TABLE follow_ups")
+                    conn.execute("ALTER TABLE follow_ups_ben RENAME TO follow_ups")
+                    for ix in indexes:
+                        conn.execute(ix)
+                if "superseded_at" not in {r[1] for r in conn.execute("PRAGMA table_info(questions)")}:
+                    conn.execute("ALTER TABLE questions ADD COLUMN superseded_at INTEGER")
+                conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                             (BEN_ITEMS_KEY, BEN_ITEMS_VERSION))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        if fk:
+            conn.execute("PRAGMA foreign_keys=ON")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Additive migrations. CREATE TABLE IF NOT EXISTS won't add a column to a
     table that already exists, so do it here."""
@@ -414,15 +487,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # rebuild the table from the current DDL and copy the rows across.
     fu_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='follow_ups'").fetchone()
     if fu_sql and "'deferred'" not in fu_sql[0]:
-        ddl = DDL[DDL.index("CREATE TABLE IF NOT EXISTS follow_ups"):]
-        ddl = ddl[:ddl.index("CREATE TABLE IF NOT EXISTS intents")]
-        table, *indexes = [x.strip() for x in ddl.split(";") if x.strip()]
+        table, indexes = _follow_ups_ddl()
+        cols = ", ".join(_FU_COLS)
         # Build beside the old table and rename into place: renaming the old
         # one away would carry its indexes with it and leave the new one bare.
         conn.execute("BEGIN IMMEDIATE")
         try:
             conn.execute(table.replace("IF NOT EXISTS follow_ups", "follow_ups_v8"))
-            conn.execute("INSERT INTO follow_ups_v8 SELECT * FROM follow_ups")
+            conn.execute(f"INSERT INTO follow_ups_v8({cols}) SELECT {cols} FROM follow_ups")
             conn.execute("DROP TABLE follow_ups")
             conn.execute("ALTER TABLE follow_ups_v8 RENAME TO follow_ups")
             for ix in indexes:
@@ -490,4 +562,5 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     # (minder loose ends, unread, reviews) scans the whole tasks table: 9s per
     # /board load at ~1,300 tasks and ~430 open loose ends (2026-11-04).
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_id)")
+    ensure_ben_items(conn)
     return conn

@@ -1738,6 +1738,10 @@ DRAFTS_JS = """<script>
 QUEUE_JS = """<script>
 document.querySelectorAll('input.all').forEach(b => b.addEventListener('change', () =>
   document.querySelectorAll('input[data-client="' + b.dataset.client + '"]').forEach(x => x.checked = b.checked)));
+// Send to agent is off while a ticked item's client has no agent session.
+const noAgent = () => document.querySelectorAll('button[value="agent"]').forEach(btn =>
+  btn.disabled = !!document.querySelector('input[name="id"][data-noagent]:checked'));
+document.addEventListener('change', noAgent); noAgent();
 </script>"""
 ROUTE_WORDS = {"agent": "agent work", "reply": "a reply an agent drafts", "ben": "sent by you"}
 
@@ -1769,10 +1773,14 @@ def queue_page(v: dict[str, Any], done: str = "", fleet: list[dict[str, Any]] | 
             hint = (f' <span class="order" title="routing would send this to {esc(c)}">looks like '
                     f'{esc(ROUTE_WORDS[d["route"]])}</span>' if d["route"] else "")
             asked = (' <b class="st-waiting">presented</b>' if d["presented"] else "") + due_chip(d, t)
+            noagent = "" if d.get("agent_ok", True) else " data-noagent=\"1\""
+            src = (_task_link(d["task_id"], d["title"][:60]) if d["task_id"]
+                   else f'Ben item · intent <code>{esc(d.get("intent_id") or "")}</code>'
+                   + ("" if d.get("agent_ok", True) else " · not wired, Send to agent off"))
             rows.append(
                 f'<li data-since="{int(d["created_at"])}"><label><input type="checkbox" name="id" '
-                f'value="{esc(d["id"])}" data-client="{esc(c)}"> {esc(d["what"])}</label>{hint}{asked}'
-                f'<div class="muted">{_age(d["created_at"], t)} · {_task_link(d["task_id"], d["title"][:60])} '
+                f'value="{esc(d["id"])}" data-client="{esc(c)}"{noagent}> {esc(d["what"])}</label>{hint}{asked}'
+                f'<div class="muted">{_age(d["created_at"], t)} · {src} '
                 f'<code>{esc(d["id"])}</code></div>'
                 f'<textarea name="a.{esc(d["id"])}" rows="1" maxlength="1000" placeholder="answer (optional)">'
                 f'</textarea></li>')
@@ -1793,7 +1801,8 @@ def queue_page(v: dict[str, Any], done: str = "", fleet: list[dict[str, Any]] | 
                  f'<span class="count">{len(v["moved"])}</span></h2><ul>' + "".join(
                      f'<li>{esc(m["client"])} · {esc(ROUTE_WORDS.get(m["why"], m["why"]))} · {esc(m["state"])} · '
                      f'{esc(m["what"][:160])} <span class="muted">{_age(m["created_at"], t)} · '
-                     f'{_task_link(m["task_id"])}</span></li>' for m in v["moved"]) + '</ul></div>')
+                     f'{_task_link(m["task_id"]) if m["task_id"] else "Ben item"}</span></li>'
+                     for m in v["moved"]) + '</ul></div>')
     return page("Queue", f'({v["total"]}) Queue' if v["total"] else "Queue", "Your queue", sub,
                 flash + body, actions=SEEN_BOX, tail=QUEUE_JS)
 
