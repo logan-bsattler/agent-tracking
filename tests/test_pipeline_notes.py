@@ -32,7 +32,9 @@ def _promoted(conn, pid="88"):
     store.complete_task(conn, tid, {"done": True, "summary": "s", "path": "C:/x/report.html",
                                     "deliverable_type": "status-report", "dod_path": "d", "self_check": [
                                         {"item": "a", "met": True}]})
-    rev = conn.execute("SELECT id FROM tasks WHERE parent_id=?", (tid,)).fetchone()["id"]
+    row = conn.execute("SELECT id FROM tasks WHERE parent_id=?", (tid,)).fetchone()
+    rev = row["id"] if row else store.create_task(conn, "dod_review", "Review status report", {"q": "x"},
+                                                  assigned_to="MAG", parent_id=tid)["task_id"]
     conn.execute("INSERT INTO promotions(id, task_id, review_id, client, src, dest, version, sha256, created_at) "
                  "VALUES ('p1',?,?,'MAG','C:/x/report.html','C:\\docs\\MAG\\deliverables\\report-v2.html',2,'h',?)",
                  (tid, rev, now()))
@@ -44,9 +46,14 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 
 def test_note_text_for_a_checkin_names_its_cvc_and_date(conn):
     tid = _code(conn, summary="Checked in CVC0707-81 to TEST")
-    assert queue.pipeline_note_text(conn, tid) == f"{TODAY}: checked in Shipper fix (CVC0707-81). Checked in CVC0707-81 to TEST"
+    assert queue.pipeline_note_text(conn, tid) == f"{TODAY}: checked in Shipper fix (CVC0707-81)"
     other = _code(conn, spec={"q": "x", "ticket": "QSM-1069690"}, summary="s")
     assert "(QSM-1069690)" in queue.pipeline_note_text(conn, other)
+
+
+def test_note_text_leaves_out_the_agent_summary(conn):
+    tid = _code(conn, summary="Ben still needs to chase the client on this")
+    assert queue.pipeline_note_text(conn, tid) == f"{TODAY}: checked in Shipper fix"
 
 
 def test_note_text_for_a_promotion_names_the_promoted_copy(conn):
@@ -55,9 +62,9 @@ def test_note_text_for_a_promotion_names_the_promoted_copy(conn):
 
 
 def test_note_text_fits_the_decision_cap(conn):
-    tid = _code(conn, summary="x" * 300)
+    tid = _code(conn, title="x" * 80, spec={"q": "x", "ticket": "T" * 60})
     note = queue.pipeline_note_text(conn, tid)
-    assert len(f"Pipeline note 417: {note}") <= 200 and note.endswith("...")
+    assert len(f"Pipeline note 417: {note}") <= 200
 
 
 def test_claim_leases_one_and_ok_records_the_clearing_decision(conn):

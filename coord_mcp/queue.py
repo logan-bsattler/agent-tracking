@@ -517,7 +517,7 @@ def _ticket(spec: dict[str, Any], result: dict[str, Any]) -> str | None:
 
 def pipeline_note_text(conn: sqlite3.Connection, task_id: str) -> str:
     """One factual line for the task's pipeline item: the date, what landed,
-    its name or version. A promoted deliverable names its promoted copy
+    its name or version, and nothing else (never the agent's summary). A promoted deliverable names its promoted copy
     (<name>-vN); code names its CVC or ticket when the result or spec does.
     Short enough that the decision `Pipeline note <id>: <note>` fits 200."""
     from .db import ensure_promotions
@@ -536,9 +536,9 @@ def pipeline_note_text(conn: sqlite3.Connection, task_id: str) -> str:
     else:
         ticket = _ticket(spec, result)
         what = "checked in" if spec.get("checkin_of") or not spec.get("cvc") else "built"
+        # Not the result's summary: SharePoint is client-visible and a summary
+        # is written for master. The ticket is read from it, nothing else.
         line = f"{_day(r['completed_at'])}: {what} {r['title']}" + (f" ({ticket})" if ticket else "")
-        if result.get("summary"):
-            line += f". {result['summary']}"
     pid = pipeline_id(conn, task_id) or ""
     room = 200 - len(f"{PIPELINE_NOTE} {pid}: ")
     return line if len(line) <= room else line[:room - 3].rstrip() + "..."
