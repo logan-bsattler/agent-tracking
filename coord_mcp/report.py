@@ -1131,7 +1131,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
     sub = f"as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · straight from ~/.coord/coord.db {scope}"
     actions = (f'{_button("next", "Next question", primary=True)}{_button("board", "Board check")}'
                f'{_button("cleanup", "Board cleanup")}{queued_note}{minder_note}{SEEN_BOX}')
-    body = f"""{_kpis(v, n, len(done_24h))}
+    body = f"""{health_banner(v.get("health"))}{_kpis(v, n, len(done_24h))}
 {_fleet(fleet_rows, t, client)}
 {_next_up(fresh, t, v.get("question"))}
 <div class="lanes">
@@ -2214,6 +2214,48 @@ def _normal_priority() -> None:
         pass
 
 
+ERROR_LOG_MAX = 2 * 1024 * 1024
+
+
+def loop_error(connect, where: str, log: Path | None = None) -> None:
+    """The ingest/minder loop caught an exception (call from the except block).
+
+    Appends the traceback to ~/.coord/dashboard-errors.log, unless the file
+    is already over ERROR_LOG_MAX, and stores a short line in meta for
+    store.health(). Never raises: the loop must keep going."""
+    import sys
+    import traceback
+    exc = sys.exc_info()[1]
+    tb = traceback.format_exc()
+    try:
+        log = log or Path.home() / ".coord" / "dashboard-errors.log"
+        if not log.exists() or log.stat().st_size < ERROR_LOG_MAX:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with log.open("a", encoding="utf-8") as f:
+                f.write(f"--- {datetime.now().isoformat(timespec='seconds')} {where}\n{tb}\n")
+    except Exception:
+        pass
+    try:
+        conn = connect()
+        try:
+            store.record_loop_error(conn, where, f"{type(exc).__name__}: {exc}")
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def health_banner(problems: list[dict[str, Any]] | None) -> str:
+    """A red card listing store.health() problems; nothing when healthy."""
+    if not problems:
+        return ""
+    rows = "".join(f'<li><b>{esc(p["text"])}</b>'
+                   + (f' <span class="age">{esc(p["detail"])}</span>' if p.get("detail") else "") + "</li>"
+                   for p in problems)
+    return ('<div class="card grp alert" id="health"><h2>Dashboard health'
+            f'<span class="count">{len(problems)}</span></h2><ul>{rows}</ul></div>')
+
+
 def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) -> int:
     """Localhost server that re-renders on every request; a background thread
     re-ingests every INGEST_EVERY seconds.
@@ -2261,6 +2303,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             try:
                 conn = connect()
                 try:
+                    store.heartbeat(conn)  # first, so a hung pass reads stale
                     try:
                         usage.ingest(conn)
                     finally:
@@ -2272,11 +2315,11 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     try:
                         store.minder_check(conn)
                     except Exception:
-                        pass
+                        loop_error(connect, "minder")
                 finally:
                     conn.close()
             except Exception:  # a locked db or a vanished file: the next pass gets it
-                pass
+                loop_error(connect, "ingest")
             time.sleep(INGEST_EVERY)
 
     threading.Thread(target=ingest_loop, name="ingest", daemon=True).start()
@@ -2523,8 +2566,14 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                                    "actions": {k: v for k, v in store.OPERATOR_ACTIONS.items()
                                                if k in store.PAGE_ACTIONS and k != "redispatch"}}
                                   ).encode("utf-8")
+            if path == "/api/health":
+                self._type = "application/json"
+                problems = store.health(conn)
+                return json.dumps({"ok": not problems, "problems": problems,
+                                   "heartbeat_age_s": store.heartbeat_age(conn)}).encode("utf-8")
             if path == "/board":
                 v = store.operator_view(conn)
+                v["health"] = store.health(conn)
                 v["parked"] = store.parked_tasks(conn)
                 v["queued"] = store.queued_operator_prompts(conn)
                 v["question"] = store.current_question(conn)
