@@ -755,6 +755,71 @@ def resolve_intent(
     return out
 
 
+CLOSE_SOURCES = ("email-closes", "teams-status")
+CLOSE_BECAUSE = "id-match close in code (rec 3); master default; Ben may override"
+_FU_ID = re.compile(r"[,\s]+")
+
+
+def auto_close_target(conn: sqlite3.Connection, intent: sqlite3.Row | dict[str, Any]) -> list[sqlite3.Row] | None:
+    """The open loose ends an intent closes on id-match evidence alone, or None
+    when it is master's: not a closes source, not id-match, naming commitments
+    (those closes stay master's), or naming any id that is unknown or no
+    longer open. topic-match is never closed in code."""
+    if intent["source"] not in CLOSE_SOURCES:
+        return None
+    f = intent_fields(intent["context"])
+    if intent["source"] == "teams-status" and f.get("effect") != "closes":
+        return None
+    if f.get("strength") != "id-match" or f.get("commitments", "").strip():
+        return None
+    ids = [i for i in _FU_ID.split(f.get("follow_ups") or "") if i]
+    if not ids:
+        return None
+    rows = []
+    for fid in dict.fromkeys(ids):
+        r = conn.execute("SELECT id, task_id, state FROM follow_ups WHERE id=?", (fid,)).fetchone()
+        if r is None or r["state"] != "open":
+            return None
+        rows.append(r)
+    return rows
+
+
+def auto_close_intents(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """The dashboard loop's pass over closes intents (rec 3): each open
+    email-closes, or teams-status with effect closes, at strength id-match
+    whose every named loose end is open gets one decision citing the
+    evidence, every loose end resolved with it, and the intent resolved
+    naming it. Anything else stays open for master. Idempotent: a resolved
+    intent is never read again. One intent per transaction."""
+    out, errors = [], []
+    for it in conn.execute("SELECT id, source, context FROM intents WHERE state='open' AND source IN (?,?) "
+                           "ORDER BY created_at", CLOSE_SOURCES).fetchall():
+        rows = auto_close_target(conn, it)
+        if not rows:
+            continue
+        f = intent_fields(it["context"])
+        who = f.get("from") or f.get("from_email") or "?"
+        when = (f.get("said") if it["source"] == "teams-status" else f.get("date") or f.get("said")) or "?"
+        statement = (f"Closed {len(rows)} loose end(s) on {it['source']} evidence: msg {f.get('msg') or '?'}, "
+                     f"{who}, {when}: {f.get('evidence') or 'named by id'}")[:200]
+        conn.execute("SAVEPOINT auto_close")
+        try:
+            did = record_decision(conn, statement, CLOSE_BECAUSE, rows[0]["task_id"])["decision_id"]
+            for r in rows:
+                resolve_follow_up(conn, r["id"], decision_id=did)
+            resolve_intent(conn, it["id"], note=f"closed in code: decision {did}")
+            conn.execute("RELEASE auto_close")
+        except Exception as e:  # this intent stays open for master; the rest still go
+            conn.execute("ROLLBACK TO auto_close")
+            conn.execute("RELEASE auto_close")
+            errors.append(f"{it['id']}: {type(e).__name__}: {e}")
+            continue
+        out.append({"intent_id": it["id"], "decision_id": did, "follow_ups": [r["id"] for r in rows]})
+    if errors:  # after the others are done, so the loop logs it
+        raise RuntimeError("auto-close failed for " + "; ".join(errors))
+    return out
+
+
 def board_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     """Counts only, for the desktop role. No specs, results, titles or ids."""
     counts: dict[str, dict[str, int]] = {}

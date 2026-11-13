@@ -2308,6 +2308,13 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         usage.ingest(conn)
                     finally:
                         build_home(conn)
+                    # Closes intents with id-match evidence are settled in
+                    # code first (store.auto_close_intents), so the minder
+                    # never wakes master for them.
+                    try:
+                        store.auto_close_intents(conn)
+                    except Exception:
+                        loop_error(connect, "closes")
                     # The minder (store.minder_check) rides this pass: it
                     # reads the board and, when master owes work it is not
                     # acting on, queues one wake prompt. Its own try, so a
