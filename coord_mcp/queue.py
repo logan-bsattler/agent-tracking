@@ -492,7 +492,7 @@ NOTE_LEASE_KEY = "pipeline_note_lease"
 NOTE_ERRORS_KEY = "pipeline_note_errors"
 NOTE_LEASE = 120          # a claim not reported done within this is free again
 NOTE_RETRY = 30 * 60      # a note SharePoint refused waits this long before another try
-NOTE_BECAUSE = "added to SharePoint by the master-console mod from the board (rec D); master default"
+NOTE_BECAUSE = "added to SharePoint by the master-console mod from the board; master default"
 _CVC = re.compile(r"\bCVC[\w-]*\d[\w-]*", re.I)
 _TICKET_KEYS = ("cvc", "cvc_ticket", "ticket", "qsm", "jira")
 

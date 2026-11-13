@@ -795,7 +795,7 @@ def resolve_intent(
 
 
 CLOSE_SOURCES = ("email-closes", "teams-status")
-CLOSE_BECAUSE = "id-match close in code (rec 3); master default; Ben may override"
+CLOSE_BECAUSE = "id-match close in code; master default; Ben may override"
 _FU_ID = re.compile(r"[,\s]+")
 
 
@@ -824,7 +824,7 @@ def auto_close_target(conn: sqlite3.Connection, intent: sqlite3.Row | dict[str, 
 
 
 def auto_close_intents(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """The dashboard loop's pass over closes intents (rec 3): each open
+    """The dashboard loop's pass over closes intents: each open
     email-closes, or teams-status with effect closes, at strength id-match
     whose every named loose end is open gets one decision citing the
     evidence, every loose end resolved with it, and the intent resolved
