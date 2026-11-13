@@ -301,6 +301,31 @@ master took the previous minder prompt. Thresholds are minutes in
 it last fired and when it is next eligible; `/api/parked` carries the same
 under `minder`.
 
+### Procedures the board runs in code
+
+Four of master's per-turn procedures run without it (2026-11-13):
+
+- **Id-match closes.** Each loop pass, an open `email-closes` intent (or
+  `teams-status` with `effect closes`) at `strength id-match`, naming only
+  open loose ends and no `commitments`, is settled by one decision citing
+  the evidence (`store.auto_close_intents`). topic-match stays master's.
+- **Reviews.** `coord_complete_task` on a deliverable, or on gated CVC code
+  or a gated email, creates its `dod_review` in the same transaction
+  (`store.create_review`), unless one exists or two `request_changes`
+  rounds already ran (that goes to Ben through master).
+- **Dispatch.** `python -m coord_mcp.sessions seed|set|list` keeps each
+  client's primary and side session. `sessions.next_dispatch` picks the
+  oldest undelivered task whose session is free; the master-console mod
+  claims it (`/api/dispatch/claim`, a lease), sends
+  `Do task <id>. Start with coord_get_task.` and reports back
+  (`/api/dispatch/sent`). Parked tasks, reviews with no side session and
+  unregistered clients stay master's. Off unless `COORD_AUTO_DISPATCH=1`.
+- **Pipeline notes.** `queue.pipeline_note_text` writes the one-line note;
+  the mod claims one (`/api/pipeline-note/claim`), adds it with
+  sharepoint-pipeline's `add_task_note`, and reports back
+  (`/api/pipeline-note/done`), which records the `Pipeline note <id>: ...`
+  decision. Off unless `COORD_AUTO_PIPELINE_NOTES=1`.
+
 ### Installing on another machine or account
 
 Nothing here is tied to this machine. On the second machine:

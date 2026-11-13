@@ -74,6 +74,7 @@ let ctx = 0
 let clearAt = 180000
 let wakeTo = ''  // the worker's session id, desk only; empty is off
 let autoDispatch = false  // COORD_AUTO_DISPATCH=1: send the board's next dispatch each tick
+let autoNotes = false  // COORD_AUTO_PIPELINE_NOTES=1: add the board's next SharePoint note each tick
 let refresh: () => Promise<void> = async () => {}
 let take: () => Promise<void> = async () => {}
 
@@ -101,6 +102,7 @@ function start($: EngineInterface): Promise<void> {
     clearAt = numOr(await $.env.get('COORD_MASTER_CLEAR'), 180000)
     if (isDesk) wakeTo = (await $.env.get('COORD_WORKER_WAKE'))?.trim() ?? ''
     autoDispatch = ((await $.env.get('COORD_AUTO_DISPATCH'))?.trim() ?? '') === '1'
+    autoNotes = ((await $.env.get('COORD_AUTO_PIPELINE_NOTES'))?.trim() ?? '') === '1'
     ctx = (await $.session.usage()).context.tokens ?? 0
     refresh = async () => {
       try {
@@ -137,6 +139,7 @@ function start($: EngineInterface): Promise<void> {
         await health($)
         if (wakeTo) await wake($)
         if (autoDispatch) await dispatch($)
+        if (autoNotes) await pipelineNote($)
         // Diagnostic (2026-11-01): since 10-30 neither session takes prompts.
         // Shows whether this tick runs at all, and whether busy is what stops it.
         const hhmm = () => new Date().toTimeString().slice(0, 5)
@@ -240,6 +243,39 @@ async function dispatch($: EngineInterface): Promise<void> {
     })
   } catch { /* the lease lapses; the board retries after its wait */ }
   if (status === 'error') $.ui.toast(`Auto-dispatch of ${d.task_id} to ${d.client} failed: ${said.slice(0, 160)}`)
+}
+
+// Pipeline notes in code (2026-11-13). The board writes the one factual line
+// (coord_mcp.queue.pipeline_note_text) for work that reached the client and
+// leases one at a time; this adds it with sharepoint-pipeline's add_task_note
+// ({id: SharePoint item number, note}) and reports back, and an ok records
+// the "Pipeline note <id>: <note>" decision. Off unless
+// COORD_AUTO_PIPELINE_NOTES=1.
+async function pipelineNote($: EngineInterface): Promise<void> {
+  type Note = { task_id: string; pipeline_id: string; item_id: number; note: string }
+  let n: Note | null = null
+  try {
+    const r = await $.http.fetch(`${DASH}/api/pipeline-note/claim`, { method: 'POST', headers: FORM, body: '' })
+    if (!r.ok) return
+    n = (JSON.parse(r.text) as { note: Note | null }).note
+  } catch { return }
+  if (!n) return
+  let status = 'error'
+  let said = ''
+  try {
+    const res = await $.mcp.call('sharepoint-pipeline', 'add_task_note', { id: n.item_id, note: n.note })
+    said = res.content.map(b => ('text' in b ? b.text : '') ?? '').join(' ')
+    if (!res.isError) status = 'ok'
+  } catch (err) {
+    said = String(err)
+  }
+  try {
+    await $.http.fetch(`${DASH}/api/pipeline-note/done`, {
+      method: 'POST', headers: FORM,
+      body: `task_id=${encodeURIComponent(n.task_id)}&status=${status}&detail=${encodeURIComponent(said.slice(0, 200))}`,
+    })
+  } catch { /* the lease lapses; the board offers it again */ }
+  if (status === 'error') $.ui.toast(`Pipeline note for ${n.task_id} (item ${n.pipeline_id}) failed: ${said.slice(0, 160)}`)
 }
 
 export const register: Register = on => {

@@ -2567,6 +2567,20 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         return
                     self._json(200, r)
                     return
+                if path == "/api/pipeline-note/claim":  # the mod's tick: one SharePoint note, under a lease
+                    from . import queue
+                    self._json(200, {"note": queue.pipeline_note_claim(conn)})
+                    return
+                if path == "/api/pipeline-note/done":  # the mod's report on that add_task_note
+                    from . import queue
+                    one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+                    try:
+                        r = queue.pipeline_note_done(conn, one("task_id"), one("status"), one("detail"))
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    self._json(200, r)
+                    return
                 if path == "/api/worker/wake":  # the desk's tick: should it wake the worker?
                     self._json(200, {"wake": store.claim_worker_wake(conn)})
                     return

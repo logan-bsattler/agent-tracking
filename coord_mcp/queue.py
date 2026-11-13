@@ -479,6 +479,143 @@ def pipeline_owed(conn: sqlite3.Connection, now_ts: int, days: int = 7) -> list[
     return out
 
 
+# --------------------------------------------------- pipeline notes in code
+#
+# The note master adds by hand (manual: Pipeline notes) is one factual line:
+# what landed, its name or version, the date. The board writes it
+# (pipeline_note_text), the master-console mod claims one at a time
+# (/api/pipeline-note/claim), adds it with sharepoint-pipeline's
+# add_task_note, and reports back (/api/pipeline-note/done); an ok records the
+# same `Pipeline note <id>: <note>` decision that clears pipeline_owed.
+
+NOTE_LEASE_KEY = "pipeline_note_lease"
+NOTE_ERRORS_KEY = "pipeline_note_errors"
+NOTE_LEASE = 120          # a claim not reported done within this is free again
+NOTE_RETRY = 30 * 60      # a note SharePoint refused waits this long before another try
+NOTE_BECAUSE = "added to SharePoint by the master-console mod from the board (rec D); master default"
+_CVC = re.compile(r"\bCVC[\w-]*\d[\w-]*", re.I)
+_TICKET_KEYS = ("cvc", "cvc_ticket", "ticket", "qsm", "jira")
+
+
+def _day(ts: int | None) -> str:
+    from datetime import datetime
+    return datetime.fromtimestamp(ts or now()).strftime("%Y-%m-%d")
+
+
+def _ticket(spec: dict[str, Any], result: dict[str, Any]) -> str | None:
+    """The CVC or ticket a code change names: a spec field, else the first
+    CVC id in its result's summary, notes or branch, or its spec's text."""
+    for k in _TICKET_KEYS:
+        v = spec.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:40]
+    for text in (result.get("summary"), result.get("notes"), result.get("branch"), json.dumps(spec)):
+        if isinstance(text, str) and (m := _CVC.search(text)):
+            return m.group(0)
+    return None
+
+
+def pipeline_note_text(conn: sqlite3.Connection, task_id: str) -> str:
+    """One factual line for the task's pipeline item: the date, what landed,
+    its name or version. A promoted deliverable names its promoted copy
+    (<name>-vN); code names its CVC or ticket when the result or spec does.
+    Short enough that the decision `Pipeline note <id>: <note>` fits 200."""
+    from .db import ensure_promotions
+    r = conn.execute("SELECT kind, title, spec, result, completed_at FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if r is None:
+        raise KeyError(f"unknown task '{task_id}'")
+    spec, result = json.loads(r["spec"] or "{}"), json.loads(r["result"] or "{}")
+    if r["kind"] == "deliverable":
+        ensure_promotions(conn)
+        p = conn.execute("SELECT dest, version, created_at FROM promotions WHERE task_id=? "
+                         "ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id,)).fetchone()
+        if p is None:
+            raise ValueError(f"task {task_id} has not been promoted")
+        from pathlib import PureWindowsPath
+        line = f"{_day(p['created_at'])}: delivered {PureWindowsPath(p['dest']).name} ({r['title']})"
+    else:
+        ticket = _ticket(spec, result)
+        what = "checked in" if spec.get("checkin_of") or not spec.get("cvc") else "built"
+        line = f"{_day(r['completed_at'])}: {what} {r['title']}" + (f" ({ticket})" if ticket else "")
+        if result.get("summary"):
+            line += f". {result['summary']}"
+    pid = pipeline_id(conn, task_id) or ""
+    room = 200 - len(f"{PIPELINE_NOTE} {pid}: ")
+    return line if len(line) <= room else line[:room - 3].rstrip() + "..."
+
+
+def _meta_json(conn: sqlite3.Connection, key: str) -> Any:
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    try:
+        return json.loads(r["value"]) if r else None
+    except ValueError:
+        return None
+
+
+def _set_meta(conn: sqlite3.Connection, key: str, value: Any) -> None:
+    if value is None:
+        conn.execute("DELETE FROM meta WHERE key=?", (key,))
+    else:
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (key, json.dumps(value)))
+
+
+def pipeline_note_claim(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any] | None:
+    """One owed note under a lease, or None: a claim is live, nothing is
+    owed, or what is owed has a pipeline id that is not a SharePoint item
+    number (left for master) or was refused within NOTE_RETRY.
+    {task_id, pipeline_id, item_id, note}."""
+    from .db import ensure_projects, ensure_promotions
+    t = now() if now_ts is None else now_ts
+    ensure_promotions(conn)  # before BEGIN: executescript would commit it
+    ensure_projects(conn)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        lease = _meta_json(conn, NOTE_LEASE_KEY)
+        if isinstance(lease, dict) and int(lease.get("until") or 0) > t:
+            conn.execute("COMMIT")
+            return None
+        errors = _meta_json(conn, NOTE_ERRORS_KEY) or {}
+        out = None
+        for tid in pipeline_owed(conn, t):
+            if t - int(errors.get(tid) or 0) < NOTE_RETRY:
+                continue
+            pid = pipeline_id(conn, tid) or ""
+            if not pid.strip().isdigit():
+                continue
+            out = {"task_id": tid, "pipeline_id": pid, "item_id": int(pid), "note": pipeline_note_text(conn, tid)}
+            _set_meta(conn, NOTE_LEASE_KEY, {**out, "until": t + NOTE_LEASE})
+            break
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return out
+
+
+def pipeline_note_done(conn: sqlite3.Connection, task_id: str, status: str, detail: str | None = None,
+                       now_ts: int | None = None) -> dict[str, Any]:
+    """Close the claim. ok records the decision `Pipeline note <id>: <note>`
+    on the task, with the note exactly as claimed; error frees it to retry
+    after NOTE_RETRY."""
+    from . import store
+    t = now() if now_ts is None else now_ts
+    if status not in ("ok", "error"):
+        raise ValueError(f"status must be ok or error, not {status!r}")
+    lease = _meta_json(conn, NOTE_LEASE_KEY)
+    if not isinstance(lease, dict) or lease.get("task_id") != task_id:
+        raise ValueError(f"task {task_id!r} has no open pipeline-note claim")
+    _set_meta(conn, NOTE_LEASE_KEY, None)
+    if status == "error":
+        errors = _meta_json(conn, NOTE_ERRORS_KEY) or {}
+        errors = {k: v for k, v in errors.items() if t - int(v) < NOTE_RETRY}
+        errors[task_id] = t
+        _set_meta(conn, NOTE_ERRORS_KEY, errors)
+        return {"ok": True, "task_id": task_id, "status": "error", "detail": (detail or "")[:200]}
+    dec = store.record_decision(conn, f"{PIPELINE_NOTE} {lease['pipeline_id']}: {lease['note']}"[:200],
+                                NOTE_BECAUSE, task_id)
+    return {"ok": True, "task_id": task_id, "status": "ok", "decision_id": dec["decision_id"]}
+
+
 # Work the client will see, which SharePoint should therefore show.
 LINKED_KINDS = ("deliverable", "code_change", "draft_reply")
 
