@@ -629,3 +629,34 @@ def test_log_line_citing_an_intent_outside_the_window_shows_its_board_state(conn
         "- email 08:02 Sam — LNK — cites a typo — intent 0123456789ab\n", encoding="utf-8")
     by = {d["sender"]: d["action"] for d in store.triage_emails(conn, log_dir=log)["emails"]}
     assert by == {"Kenji": "dismissed", "Pat": "intent", "Sam": "intent"}
+
+
+def test_dismissed_only_ben_reply_stays_owed_on_the_intents_view(conn, tmp_path):
+    """An email-reply for an unwired client is dismissed with no task, so no
+    loose end keeps it (Essex FDD-005, 11-11). The view lists it as owed until
+    its note says the reply went out; email-status rows show too."""
+    import time
+    t = int(time.time())
+    rows = [("aaaaaaaaaaa1", "unknown: REPLY: Homero asks Ben for an FDD-005 estimate", "email-reply",
+             "Essex-Brownell is not a wired client; put to Ben as question"),
+            ("aaaaaaaaaaa2", "unknown: REPLY: Erick asks Ben to promise #306 by Dec 4", "email-reply",
+             "Answered by Ben's 11/12 mail (Dec 4)"),
+            ("aaaaaaaaaaa3", "LNK: John asks for an update on CVCs", "email-status", "Same thread as another")]
+    for iid, summary, source, note in rows:
+        conn.execute("INSERT INTO intents(id, summary, source, origin, trust, context, state, created_at, note) "
+                     "VALUES (?,?,?,'team','trusted','msg x; from Someone',"
+                     "'dismissed',?,?)", (iid, summary, source, t, note))
+    log = tmp_path / "log"
+    log.mkdir()
+    import datetime as dt
+    (log / f"{dt.date.today().isoformat()}.md").write_text(
+        "## 08:09 run\n"
+        "- email 14:33Z Homero Rendon - unknown - asks for an estimate -> email-reply aaaaaaaaaaa1\n"
+        "- email 17:04Z Shelton King — Furlani — PO Print approved — note only: no reply owed unless Ben differs\n",
+        encoding="utf-8")
+    v = store.triage_emails(conn, log_dir=log)
+    by = {d.get("intent_id") or d["sender"]: d for d in v["emails"]}
+    assert len(v["emails"]) == 4  # the hyphen line is folded into its email-reply intent
+    assert by["aaaaaaaaaaa1"]["owed"] and not by["aaaaaaaaaaa2"]["owed"]
+    assert by["aaaaaaaaaaa3"]["action"] == "dismissed"
+    assert not by["Shelton King"]["owed"]

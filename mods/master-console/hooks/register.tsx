@@ -44,6 +44,9 @@ const DASH = 'http://127.0.0.1:8765'
 // queued prompts.
 const MASTER_ROOT = /^c:[\\/]development[\\/]agents[\\/]?$/i
 const DESK_ROOT = /^c:[\\/]development[\\/]agents[\\/]desk[\\/]?$/i
+// The desktop app opens a scheduled task's session with this wrapper as its
+// first prompt (hourly-triage, morning-recap, pull-outlook-meetings).
+const SCHEDULED_TEXT = /^\s*<scheduled-task\b/
 const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' }
 const MAX_BUTTONS = 5
 const WAKE_MARK = 'master-console wake:'
@@ -100,7 +103,7 @@ function start($: EngineInterface): Promise<void> {
       } catch { /* dashboard down: keep the last list; the band still has Next and Board */ }
     }
     take = async () => {
-      if (busy) return
+      if (busy || (!isMaster && !isDesk)) return
       try {
         const r = await $.http.fetch(`${DASH}/api/prompts/take`, {
           method: 'POST', headers: FORM, body: `taker=${isDesk ? 'desk' : 'master'}`,
@@ -117,6 +120,7 @@ function start($: EngineInterface): Promise<void> {
     await refresh()
     $.clock.every(10_000, () => {
       void (async () => {
+        if (!isMaster && !isDesk) return  // a scheduled session, demoted on its prompt
         await refresh()  // ~20 ms; a question master just presented shows within 10s
         if (wakeTo) await wake($)
         // Diagnostic (2026-11-01): since 10-30 neither session takes prompts.
@@ -173,6 +177,17 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     await start($)
+    // Scheduled routines (hourly-triage, morning recap, the Outlook meetings
+    // pull) run in the agents folder too, so MASTER_ROOT matched them. Once
+    // their turn ended they sat idle with the poll running and took the
+    // worker's queued prompts: the minder's "master owes work" landed in a
+    // triage session twice on 11-12/13 and never reached master. A session
+    // a schedule fires is not the worker. ('sdk' is not a signal: the desktop
+    // app may hand Ben's own prompts in that way.)
+    if (isMaster && (e.origin?.kind === 'scheduled-trigger' || SCHEDULED_TEXT.test(e.text))) {
+      isMaster = false
+      $.ui.status(undefined)
+    }
     if (!isMaster && !isDesk) return next(e)
     // The same wake, if the app hands it in as a prompt instead.
     if (isMaster && e.text.includes(WAKE_MARK)) {

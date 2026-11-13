@@ -2226,9 +2226,13 @@ def close_question(conn: sqlite3.Connection, question_id: Any) -> bool:
 # "- email ..." line per message it read and did not turn into an intent.
 TRIAGE_LOG = Path(__file__).resolve().parents[2] / "hourly" / "log"
 _LOG_EMAIL = re.compile(
-    r"^- email (?:(?P<date>\d{4}-\d{2}-\d{2}) )?(?P<time>\d{1,2}:\d{2})Z? (?P<sender>.+?) — (?P<client>.+?) — (?P<rest>.+)$")
+    r"^- email (?:(?P<date>\d{4}-\d{2}-\d{2}) )?(?P<time>\d{1,2}:\d{2})Z? (?P<sender>.+?) [—-] (?P<client>.+?) [—-] (?P<rest>.+)$")
 _LOG_SKIPPED = re.compile(r"^- skipped(?: automated)?:\s*(?:automated\s*)?(?P<n>\d+)\s*(?P<what>.*)$")
-_REPLY_OWED = re.compile(r"\bREPLY:|reply is Ben's|Ben to reply|Ben-only reply|reply owed", re.I)
+_REPLY_OWED = re.compile(r"\bREPLY:|reply is Ben's|Ben to reply|Ben-only reply|(?<!no )reply owed", re.I)
+# A dismissed email-reply intent whose note says the reply already went out.
+_REPLY_DONE = re.compile(r"\banswered\b|\breplied\b|Ben's [^;.]*\b(?:mail|reply|email)\b|already (?:sent|answered)", re.I)
+# A log line's pointer to the intent it raised: "intent <id>", "-> email-reply <id>".
+_LOG_INTENT_REF = re.compile(r"\b(?:intent|email(?:-[a-z]+)?) ([0-9a-f]{12})\b")
 
 
 def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None = None,
@@ -2251,8 +2255,11 @@ def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None 
         ben.setdefault(f["task_id"], []).append(f["what"])
     intent_ids: set[str] = set()
     raised: set[str] = set()  # summaries of intents Ben raised from noted log lines
-    for r in conn.execute("""SELECT id, summary, context, state, created_at, task_ids, note FROM intents
-                             WHERE source='email' AND created_at >= ? ORDER BY created_at DESC""", (cutoff,)):
+    # email-status and email-reply are inbound asks too; before 11-13 only
+    # 'email' was listed, so a dismissed only-Ben reply never showed here.
+    for r in conn.execute("""SELECT id, summary, source, context, state, created_at, task_ids, note FROM intents
+                             WHERE source IN ('email', 'email-status', 'email-reply') AND created_at >= ?
+                             ORDER BY created_at DESC""", (cutoff,)):
         intent_ids.add(r["id"])
         if "raised it from /intents" in (r["context"] or ""):
             raised.add(r["summary"].lower())
@@ -2272,6 +2279,11 @@ def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None 
             owed += [w for x in fam for w in ben.get(x, [])]
         if _REPLY_OWED.search(ctx) or _REPLY_OWED.search(r["note"] or ""):
             owed.insert(0, "Reply to the sender (triage flagged it as yours).")
+        elif (r["source"] == "email-reply" and r["state"] == "dismissed"
+              and not _REPLY_DONE.search(r["note"] or "")):
+            # An only-Ben reply dismissed with no task (an unwired client, as
+            # Essex FDD-005 on 11-11) has no loose end, so nothing else keeps it.
+            owed.insert(0, "Reply to the sender: only Ben can, and the intent was dismissed with no task.")
         out.append({
             "at": r["created_at"], "received": recv.group(1) if recv else None,
             "sender": m.group(1).strip() if m else "", "client": head.strip() if rest else "",
@@ -2303,7 +2315,7 @@ def triage_emails(conn: sqlite3.Connection, days: int = 7, log_dir: Path | None 
                 if not e:
                     continue
                 rest = e.group("rest")
-                ref = re.search(r"\bintent ([0-9a-f]{12})\b", rest)
+                ref = _LOG_INTENT_REF.search(rest)
                 if ref and ref.group(1) in intent_ids:
                     continue  # the intent row already shows this email
                 hh, mm = run.split(":")

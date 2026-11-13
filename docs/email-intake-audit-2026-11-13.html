@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Email Intake Audit</title>
+<style>
+:root { --bg:#fbfaf7; --fg:#1f2328; --muted:#646b73; --line:#e3e0d8; --bad:#b42318; --warn:#9a6700; --ok:#1a7f37; --card:#fff; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#16181b; --fg:#e6e6e3; --muted:#9aa0a6; --line:#30343a; --bad:#ff7b72; --warn:#d29922; --ok:#3fb950; --card:#1d2024; } }
+:root[data-theme="dark"] { --bg:#16181b; --fg:#e6e6e3; --muted:#9aa0a6; --line:#30343a; --bad:#ff7b72; --warn:#d29922; --ok:#3fb950; --card:#1d2024; }
+body { background:var(--bg); color:var(--fg); font:15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; margin:0; padding:24px 16px 64px; }
+main { max-width:880px; margin:0 auto; }
+h1 { font-size:24px; margin:0 0 4px; } h2 { font-size:18px; margin:32px 0 8px; border-bottom:1px solid var(--line); padding-bottom:4px; }
+.sub { color:var(--muted); margin:0 0 20px; }
+.bluf { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--bad); padding:12px 16px; border-radius:6px; }
+.kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:12px 0; }
+.kpi { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
+.kpi b { display:block; font-size:22px; } .kpi span { color:var(--muted); font-size:13px; }
+.bad { color:var(--bad); } .warn { color:var(--warn); } .ok { color:var(--ok); }
+table { width:100%; border-collapse:collapse; font-size:14px; } th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:600; } .scroll { overflow-x:auto; }
+code { font-size:13px; background:var(--card); border:1px solid var(--line); border-radius:4px; padding:0 4px; }
+ol li { margin-bottom:8px; } .tag { font-size:12px; border:1px solid currentColor; border-radius:10px; padding:0 6px; margin-left:4px; }
+</style>
+</head>
+<body><main>
+<h1>Email intake audit</h1>
+<p class="sub">coord-mcp hourly-triage → intents → Master. Window 2026-11-06 to 2026-11-13 08:00 CT. Prepared 2026-11-13.</p>
+
+<div class="bluf">
+<p><b>No: not every email is handled today, for three reasons.</b></p>
+<ol>
+<li><b>Email triage has been down since 11-12 11:09 CT.</b> The Microsoft 365 connector returned Graph 502 errors, and then on 11-13 08:02 it asked to be reconnected. Nine hourly runs in a row checked nothing. Nothing is lost yet: <code>state.json</code> did not advance, so the next working run picks up again from 11-12 17:09Z. <b>The fix is yours: reconnect the Microsoft 365 connector.</b></li>
+<li><b>Only-Ben replies for unwired clients are dropped.</b> Master dismisses the intent, and nothing on the board keeps the item. It survives only as a presented question, and the next question closes that one silently. Three such emails from this week have no recorded outcome, including Homero's FDD-005 estimate.</li>
+<li><b>The master-console mod took the minder's prompts away from Master.</b> The scheduled triage sessions run in Master's folder, so the mod treated them as the worker. The Master worker session still exists, but it has been idle since 11-12 16:26 CT. <span class="ok">Fixed in this change.</span></li>
+</ol>
+</div>
+
+<h2>Coverage, 7 days</h2>
+<div class="kpis">
+<div class="kpi"><b>62 / 62</b><span>scheduled weekday runs that fired</span></div>
+<div class="kpi"><b class="bad">10</b><span>runs that failed (1 coord timeout, 9 M365)</span></div>
+<div class="kpi"><b>283</b><span>emails triaged (191 itemised + 92 automated)</span></div>
+<div class="kpi"><b class="warn">~21 h</b><span>of mail not yet checked (since 11-12 17:09Z)</span></div>
+<div class="kpi"><b>0</b><span>open intents</span></div>
+</div>
+<div class="scroll"><table>
+<tr><th>Class</th><th>Count</th><th>Notes</th></tr>
+<tr><td>Never seen by triage</td><td class="warn">unknown</td><td>All mail since 11-12 17:09Z. I could not count it: this session has no M365 connector, and triage's own connector is failing. It is covered once triage runs again, because the window has not advanced.</td></tr>
+<tr><td>Seen, no intent</td><td>146 + 92 automated</td><td>FYI, scheduling, colleague-to-colleague and already-handled threads, each with a one-line reason in the log. Two lines are flagged <code>REPLY:</code> but got no intent (see gap 3).</td></tr>
+<tr><td>Intent resolved to a task</td><td class="ok">28</td><td>Inbound asks (<code>email</code>, <code>email-status</code>, <code>email-reply</code>).</td></tr>
+<tr><td>Intent dismissed</td><td>7 inbound + 19 evidence</td><td>Of the 7 inbound: 4 were handled (a duplicate thread, answered in the thread, Ben replied himself, internal access) and <b class="bad">3 have no outcome</b>. Of the 19 evidence intents: 14 <code>email-closes</code> were resolved by a decision, and 5 <code>email-commitment</code> became commitment rows.</td></tr>
+<tr><td>Still open</td><td>0</td><td>Master clears intents quickly. Turnaround is not the problem; where they go is.</td></tr>
+</table></div>
+
+<h2>Gaps, with examples</h2>
+
+<h3>1. M365 connector outage stops intake silently <span class="tag bad">open, Ben</span></h3>
+<p>Every run from 11-12 12:09 CT through 11-13 08:02 CT failed. On 11-12 the errors were Graph 502/503. On 11-13 08:02 the sent-mail query returned "This connector requires additional permissions… reconnect it". The routine logs the failure and stops, which is correct. But nothing reaches you except the log file and tomorrow's recap: a run with no intents sends no wake to Master. The <code>hourly/recap/</code> folder also has no file after 10-30, even though the Morning recap session still runs daily, so the recap backstop may not be writing where triage expects it.</p>
+<p>One item to watch for when it recovers: the 08:02 run saw a Colin Gray group chat this morning asking whether you sent an estimate by email. It could not classify the chat.</p>
+
+<h3>2. Only-Ben replies for unwired clients have no durable home <span class="tag bad">open, proposal</span></h3>
+<div class="scroll"><table>
+<tr><th>Received</th><th>From</th><th>Subject / ask</th><th>What happened</th></tr>
+<tr><td>11-11 14:33Z</td><td>Homero Rendon</td><td>"RE: Updated FDD for Essex": hours and target date for Essex-Brownell FDD-005</td><td>Intent <code>d5e065d052cf</code> was dismissed as "not a wired client". It was presented as q642 at 09:11 CT and superseded by q643 at 10:36 CT. No answer and no decision were recorded.</td></tr>
+<tr><td>11-09 13:41Z</td><td>Colin Gray</td><td>"RE: Logan Consulting": name 1–2 technical people besides Homero for Piston Group VPN access</td><td>Intent <code>19b4abfda2ee</code> was dismissed, and decision <code>23aaa66299a7</code> said "queue for Ben". It was never presented, and no decision followed.</td></tr>
+<tr><td>11-09 17:13Z</td><td>Jyoti Kotti (Rani Therapeutics)</td><td>Confirm Ben as primary QAD support contact</td><td>Intent <code>29dee5176ab9</code> was dismissed, and decision <code>9de53da13db7</code> said "Ben answers directly". Nothing tracks whether you did.</td></tr>
+</table></div>
+<p><b>Why it is a gap.</b> Ben's queue is defined as "open loose ends whose <code>who</code> is Ben". A loose end needs a task, and an unwired client has no task. A question presented with no task or loose end (board-wide, <code>q&lt;id&gt;</code>) is closed by <code>present_question</code> the moment the next question goes up (<code>store.py</code>, the <code>UPDATE questions SET closed_at</code> on every present). In the last 13 days, 5 board-wide questions closed with no recorded answer: q490, q617, q642, q643 and q651. q643 was answered by decision <code>7bdc9034a679</code>, and q490 in effect by the P&amp;C wiring decision <code>3a030ea2d24e</code>. q617, q642 and q651 have no matching decision.</p>
+<p>The cause is volume, not a one-off. Essex-Brownell appears in 22 triage lines this week (#306 BMO card, #400, #466, FDD-005, QRF training), and it is still "unknown".</p>
+
+<h3>3. Triage logs some <code>REPLY:</code> items without proposing an intent <span class="tag warn">open, routine</span></h3>
+<p>On 11-06 at 16:17Z, John Polich's "BOA to BMO Travel Card" nudge was logged as "REPLY: … internal admin, no intent". That thread is Essex-Brownell's BMO card change (#306), which was client work. The routine's rule is a <code>REPLY:</code> note <i>plus</i> an <code>email-reply</code> intent. When the client is unknown, it sometimes writes only the note.</p>
+
+<h3>4. The /intents dashboard view hid these emails <span class="tag ok">fixed</span></h3>
+<p><code>store.triage_emails</code> listed only <code>source='email'</code> intents, so every <code>email-status</code> and <code>email-reply</code> row was invisible. That includes the Essex FDD-005 email. Log lines written with " - " separators, or pointing at an intent as <code>-&gt; email-reply &lt;id&gt;</code>, were also dropped or shown as unlinked. And "no reply owed" matched the owed-reply pattern, so Shelton King's 11-11 Furlani PO Print note was flagged as owed.</p>
+
+<h3>5. Wake-ups and minder prompts went to the wrong session <span class="tag ok">fixed (mod)</span></h3>
+<p>The Master worker <code>local_198c7d6a-…</code> still exists. It is not archived, and its last activity was 11-12 22:26Z, so it is not "gone". But master-console marks any session whose root is <code>C:\development\agents</code> as the worker, and hourly-triage, Morning recap and the Outlook-meetings pull all run there. After its own turn, each of those sessions kept polling <code>/api/prompts/take</code> as <code>taker=master</code>. That caused two problems:</p>
+<ul>
+<li>It took the minder's "master owes work" prompts: on 11-12 at 18:10, and on 11-13 at 08:11 (both logged as "misroute").</li>
+<li>It probably also counted as worker liveness, so the desk's worker wake never fired.</li>
+</ul>
+<p>The triage wake <code>send_message</code> itself returned "undelivered (no start within 20s)" on 11-11 once and on 11-12 twice. Those intents were still converted later.</p>
+
+<h2>Fixes, ranked</h2>
+<ol>
+<li><b>Reconnect the Microsoft 365 connector</b> <span class="tag bad">Ben, now</span>. Then let one run catch up, and confirm its log shows a window starting at 2026-11-12T17:09Z.</li>
+<li><b>Stop scheduled sessions acting as the worker</b> <span class="tag ok">done here</span>. In <code>mods/master-console</code>, a session whose prompt is a <code>&lt;scheduled-task …&gt;</code> wrapper, or whose prompt origin is <code>scheduled-trigger</code>, is demoted: it no longer polls, takes prompts or auto-clears. It takes effect the next time each session loads the mod. Already-open idle triage sessions keep the old behaviour until they end, so archiving them would close that gap now.</li>
+<li><b>Give only-Ben items a durable home</b> <span class="tag bad">proposal, breaking</span>. Make <code>coord_resolve_intent</code> refuse to dismiss an <code>email-reply</code> (and an <code>email-status</code> or <code>teams-ask</code> with <code>ask decision</code>) unless the note cites a decision showing the reply went out, or a commitment or follow-up id. Pair that with a Ben loose end that needs no task: <code>follow_ups.task_id</code> nullable, or a <code>client</code> plus <code>intent_id</code>, so /queue holds it. This is a schema and contract change. Live Master sessions dismiss with a free-text note today.</li>
+<li><b>Never silently close an unanswered board-wide question</b> <span class="tag warn">proposal, behaviour</span>. Have <code>present_question</code> record "superseded" separately from "answered", and add a minder item for questions superseded with no decision citing <code>q&lt;id&gt;</code>. It is not a schema change if it uses a new nullable column, but it changes the minder prompt text that Master's CLAUDE.md enumerates.</li>
+<li><b>Wire Essex-Brownell as a client</b> <span class="tag warn">Ben's call</span>. It is the largest unwired source by far. Piston and Rani are smaller.</li>
+<li><b>Tighten the hourly-triage routine</b> (<code>~/.claude/scheduled-tasks/hourly-triage/SKILL.md</code>; outside this repo, so not edited):
+  <ul>
+  <li>Every <code>REPLY:</code> note must have its <code>email-reply</code> intent.</li>
+  <li>Match <code>Essex</code> / <code>Superior Essex</code> / <code>Essex-Brownell</code> explicitly until it is wired.</li>
+  <li>After two failed runs in a row, wake Master with a one-line "triage down since HH:MM" so it reaches your queue the same day.</li>
+  <li>Read the Master id from one place rather than hard-coding it.</li>
+  </ul></li>
+<li><b>No morning-recap file since 10-30</b> (the session still runs daily) <span class="tag warn">check</span>. It is the stated backstop for unconverted intents and failed wakes, so it needs looking at.</li>
+<li><b>/intents view</b> <span class="tag ok">done here</span>:
+  <ul>
+  <li>Lists <code>email-status</code> and <code>email-reply</code> rows.</li>
+  <li>Shows a dismissed only-Ben reply as owed until its note says it was answered.</li>
+  <li>Accepts " - " log separators and <code>-&gt; email-* &lt;id&gt;</code> references.</li>
+  <li>No longer flags "no reply owed".</li>
+  </ul>
+  After the fix, the live board shows Homero (FDD-005), Colin Gray (Piston) and Jyoti Kotti (Rani) as owed.</li>
+</ol>
+
+<h2>How the pipeline works (map)</h2>
+<div class="scroll"><table>
+<tr><th>Step</th><th>Detail</th></tr>
+<tr><td>Schedule</td><td>The <code>hourly-triage</code> desktop scheduled task runs at about :08 every hour, 07:00–18:00 CT, on weekdays. Each run is a fresh session in <code>C:\development\agents</code>.</td></tr>
+<tr><td>Read</td><td><code>outlook_email_search</code> over the whole mailbox (no folder filter), from <code>afterDateTime = state.last_email_check</code>, 25 per page, paging until done. Sent mail is read separately, for commitments and closing evidence only.</td></tr>
+<tr><td>Filter</td><td>Ids already in <code>seen_email_ids</code> (last 500) are skipped. Newsletters, notifications and automated mail are counted on one line, not itemised.</td></tr>
+<tr><td>Client</td><td>Matched by domain, signature, subject or pipeline item against 13 client keys. Anything else is <code>unknown</code>.</td></tr>
+<tr><td>Classify</td><td>Each email gets one of five outcomes:
+  <ul>
+  <li><code>email</code>: work.</li>
+  <li><code>email-status</code>: an update ask.</li>
+  <li><code>email-reply</code>: only Ben can answer.</li>
+  <li><code>email-closes</code>: evidence that a loose end is done.</li>
+  <li>A note line, otherwise.</li>
+  </ul>
+  Sent mail produces <code>email-commitment</code>. Duplicates are checked against open intents only.</td></tr>
+<tr><td>Hand-off</td><td><code>coord_propose_intent</code> writes the intent. Then <code>send_message</code> wakes <code>local_198c7d6a-…</code>, only when intents were proposed. The minder backs this up: it flags open intents after its threshold.</td></tr>
+<tr><td>State</td><td><code>state.json</code> is written only after a successful run, so a failed run is re-covered by the next one.</td></tr>
+</table></div>
+<p class="sub">Sources: <code>hourly/log/2026-11-06…13.md</code>, <code>hourly/state.json</code>, the <code>~/.coord/coord.db</code> tables intents, questions, decisions and operator_prompts, and <code>mods/master-console/hooks/register.tsx</code>. I could not cross-check the inbox: this session has no Microsoft 365 connector.</p>
+</main></body>
+</html>
