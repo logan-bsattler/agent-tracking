@@ -7,7 +7,7 @@ name = "coord-mcp"
 version = "0.2.0"
 description = "Typed task board for Claude Code agent teams: contracts, decisions, intents."
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2"]
+dependencies = ["pydantic>=2", "tzdata; sys_platform == 'win32'"]  # zoneinfo has no system tz database on Windows
 
 [project.optional-dependencies]
 test = ["pytest>=8", "mcp>=2.0,<3"]  # smoke_stdio.py drives the server with the SDK client
