@@ -1143,6 +1143,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
 <div class="card lane" id="done"><h2>Done, last {v['recent_h']}h<span class="count">{len(v['recent'])}</span></h2>{_done(v["recent"], t)}</div>
 </div>
 </div>
+{v["briefs_card"] if v.get("briefs_card") else ""}
 <div class="card lane" id="activity"><h2>Activity, last 24h<span class="count">{len(v.get("activity", []))}</span></h2>{_timeline(v.get("activity", []), t, 24)}</div>
 <script>/* the page auto-refreshes, so keep drilled-in clients open across reloads */
 try {{ const k = "coord-open", o = new Set(JSON.parse(localStorage.getItem(k) || "[]"));
@@ -2647,6 +2648,11 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v["activity"] = store.activity(conn)
                 from . import commitments
                 commitments.annotate(v, commitments.due_map(conn))
+                try:  # today's meeting briefs; never costs the board
+                    from .workflows import briefs
+                    v["briefs_card"] = briefs.board_card(briefs.today(conn, int(time.time())))
+                except Exception:
+                    v["briefs_card"] = ""
                 client = (self._query.get("client") or [""])[0].strip() or None
                 return board_page(v, client=client).encode("utf-8")
             if m := re.fullmatch(r"/board/question/(\d+)/file", path):
@@ -2704,6 +2710,11 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 client = (self._query.get("client") or [""])[0].strip() or None
                 return drafts_page(store.draft_replies(conn, days=max(1, min(window, 365)),
                                                        client=client)).encode("utf-8")
+            if path.startswith("/brief/"):
+                from urllib.parse import unquote
+                from .workflows import briefs
+                b = briefs.brief(conn, unquote(path[len("/brief/"):]), int(time.time()))
+                return briefs.render(b).encode("utf-8") if b else None
             if path == "/workflows":
                 from .workflows import view
                 wf = (self._query.get("wf") or [""])[0].strip() or None
