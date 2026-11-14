@@ -1097,6 +1097,22 @@ def minder_line(m: dict[str, Any] | None, t: int) -> str:
     return f"Minder: {head}, {why}"
 
 
+def _idle(rows: list[dict[str, Any]], t: int) -> str:
+    """Free client sessions beside owed, dispatchable work (sessions.idle_sessions).
+    Nothing renders when none are idle: it is an alarm, not a lane."""
+    if not rows:
+        return ""
+    items = "".join(
+        f'<li><b>{esc(o["client"])}</b> <code>{esc(o["session_id"])}</code> ({esc(o.get("role", ""))}), '
+        f'idle {max(0, (t - o["idle_since"]) // 60)} min beside '
+        + ", ".join(f'<a class="drill" href="/board/task/{esc(tid)}"><code>{esc(tid[:8])}</code></a>'
+                    for tid in o["task_ids"]) + "</li>"
+        for o in rows)
+    return (f'<div class="card lane alert" id="idle"><h2>Idle beside owed work<span class="count">{len(rows)}</span></h2>'
+            f'<p class="muted">Free client sessions with dispatchable work waiting 15+ min: dispatch, '
+            f'or record why it waits.</p><ul>{items}</ul></div>')
+
+
 def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None = None) -> str:
     """Operator command center: the fleet, what is in flight, what finished,
     what waits on Ben, and a timeline of what happened. `client` narrows every
@@ -1109,7 +1125,8 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
                                "recent", "deferred", "acknowledged") if k in v}}
         v["parked"] = [d for d in v.get("parked", []) if d.get("client") == client]
         v["activity"] = [e for e in v.get("activity", []) if e.get("client") == client]
-    fresh = [d for d in v["needs_you"] if t - d["since"] <= STALE_DAYS * 86400]
+        v["idle"] = [o for o in v.get("idle", []) if o.get("client") == client]
+    fresh =[d for d in v["needs_you"] if t - d["since"] <= STALE_DAYS * 86400]
     stale = [d for d in v["needs_you"] if t - d["since"] > STALE_DAYS * 86400]
     n = len(fresh)
     typed: dict[str, list[dict[str, Any]]] = {}
@@ -1143,6 +1160,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
                f'{_button("cleanup", "Board cleanup")}{queued_note}{minder_note}{SEEN_BOX}')
     body = f"""{health_banner(v.get("health"))}{_kpis(v, n, len(done_24h))}
 {_fleet(fleet_rows, t, client)}
+{_idle(v.get("idle", []), t)}
 {_next_up(fresh, t, v.get("question"))}
 <div class="lanes">
 <div class="col">
@@ -2656,6 +2674,16 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         return
                     self._json(200, r)
                     return
+                if path == "/api/dispatch/manual":  # coord-rules saw master hand-send "Do task <id>"
+                    from . import sessions
+                    one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+                    try:
+                        r = sessions.mark_manual(conn, one("task_id"), one("session_id") or None)
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    self._json(200, r)
+                    return
                 if path == "/api/pipeline-note/claim":  # the mod's tick: one SharePoint note, under a lease
                     from . import queue
                     self._json(200, {"note": queue.pipeline_note_claim(conn)})
@@ -2704,6 +2732,8 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v["minder"] = store.minder_status(conn)
                 v["fleet"] = store.fleet(conn, v, hours.CLIENTS)
                 v["activity"] = store.activity(conn)
+                from . import sessions
+                v["idle"] = sessions.idle_sessions(conn)
                 from . import commitments
                 commitments.annotate(v, commitments.due_map(conn))
                 try:  # today's meeting briefs; never costs the board

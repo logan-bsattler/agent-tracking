@@ -226,6 +226,12 @@ def test_dispatch_endpoints(tmp_path, monkeypatch):
     assert post("/api/dispatch/sent", f"task_id={tid}&status=bogus".encode())[0] == 400
     code, body = post("/api/dispatch/sent", f"task_id={tid}&status=delivered&detail=ok".encode())
     assert code == 200 and body["status"] == "delivered"
+    hand = _task(c)
+    assert post("/api/dispatch/manual", b"task_id=nosuchtask00")[0] == 400
+    code, body = post("/api/dispatch/manual", f"task_id={hand}&session_id=local_mag".encode())
+    assert code == 200 and body == {"ok": True, "task_id": hand, "stamped": True, "session_id": "local_mag"}
+    row = c.execute("SELECT dispatch_status, dispatch_session FROM tasks WHERE id=?", (hand,)).fetchone()
+    assert (row["dispatch_status"], row["dispatch_session"]) == ("manual", "local_mag")
     c.close()
 
 

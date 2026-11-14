@@ -31,6 +31,9 @@ const saysClear = (text: string) =>
 
 const TASK_ID = /"task_id"\s*:\s*\\?"([0-9a-f]{12})\\?"/
 
+const DO_TASK = /Do task ([0-9a-f]{12})/
+const DASH = 'http://127.0.0.1:8765'
+
 const bare = (tool: string) => String(tool).split('__').pop() ?? ''
 
 // The master session's folder; client sessions live under OneDrive Documents.
@@ -84,7 +87,22 @@ export const register: Register = on => {
     if (name === 'send_message' || name === 'SendMessage') {
       const sent = JSON.stringify(e)
       for (const id of [...pending.keys()]) if (sent.includes(id)) pending.delete(id)
-      return next(e)
+      const ran = await next(e)
+      if (ran.deny !== undefined || ran.isError) return ran
+      // A hand-sent dispatch: stamp it on the board, so auto-dispatch counts
+      // that session busy before the client picks the task up (2026-11-14).
+      const params = ((e as Record<string, unknown>).params ?? {}) as Record<string, unknown>
+      const id = DO_TASK.exec(String(params.message ?? ''))?.[1]
+      if (id) {
+        const session = String(params.session_id ?? params.to ?? '')
+        try {
+          await $.http.fetch(`${DASH}/api/dispatch/manual`, {
+            method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `task_id=${encodeURIComponent(id)}&session_id=${encodeURIComponent(session)}`,
+          })
+        } catch { /* the stamp is a hint; a down dashboard must not fail the send */ }
+      }
+      return ran
     }
 
     if (name === 'coord_record_decision') {
