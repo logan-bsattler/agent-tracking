@@ -2359,7 +2359,13 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     # Workflow cases past their step's time limit (workflows/sla.py).
     from .workflows import sla
     over = sla.minder_owed(conn, now_ts)
-    return {"holds": owed_holds, "parked": parked, "stalled": stalled, "undelivered": undelivered, "unread": unread, "loose": loose,
+    # Free client sessions sitting beside owed, dispatchable work for 15+ min
+    # (sessions.idle_sessions): auto-dispatch should have sent it, so master
+    # dispatches or records why it waits.
+    idle = [f"{o['client']} {o['session_id']} ({','.join(o['task_ids'])})"
+            for o in sessions.idle_sessions(conn, now_ts)]
+    return {"holds": owed_holds, "parked": parked, "stalled": stalled, "undelivered": undelivered,
+            "idle": idle, "unread": unread, "loose": loose,
             "failed": failed, "intents": intents, "unreviewed": unreviewed,
             "undrafted": undrafted, "pipeline": pipeline, "commitments": owed_commitments,
             "superseded": superseded, "case_sla": over["master"], "case_sla_ben": over["ben"]}
@@ -2369,6 +2375,7 @@ _MINDER_LABELS = (("holds", "holds behind Ben with a default (supersede, task it
                   ("parked", "parked awaiting re-dispatch"),
                   ("stalled", "picked up but the client session went silent (get_session; if idle, re-dispatch)"),
                   ("undelivered", "never delivered"),
+                  ("idle", "free client sessions beside owed work 15+ min (dispatch, or record why it waits)"),
                   ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids)"),
                   ("failed", "failed with no decision"), ("intents", "open intents"),
                   ("unreviewed", "client deliverables with no dod_review (CVC code, emails)"),

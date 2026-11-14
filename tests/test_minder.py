@@ -416,7 +416,7 @@ def test_text_is_built_from_rows_only(conn):
             "untracked, 0 questions superseded unanswered, 0 cases past step limit for master, "
             "0 cases past step limit for Ben." in text)
     assert text.endswith("Run the Board check procedure for these ids only, then reply Done / Next for you.")
-    assert "ignore the above" not in text and len(text) < 680  # 600 before the case step-limit labels (11-14)
+    assert "ignore the above" not in text and len(text) < 730  # 600 before the case step-limit labels, 680 before idle (11-14)
     assert r["prompt_id"] == conn.execute("SELECT MAX(id) FROM operator_prompts").fetchone()[0]
 
 
@@ -424,7 +424,7 @@ def test_long_id_lists_are_capped(conn):
     ids = [_task(conn, "LNK") for _ in range(8)]
     text = store.minder_text(store.minder_owed(conn, now() + (store.MINDER_UNDELIVERED + 1) * MIN), now())
     assert f"8 never delivered ({', '.join(ids[:5])}, +3 more)" in text
-    assert ids[6] not in text and len(text) < 720  # 650 before the case step-limit labels (11-14)
+    assert ids[6] not in text and len(text) < 770  # 650 before the case step-limit labels, 720 before idle (11-14)
 
 
 def test_a_page_cannot_queue_a_minder_prompt(conn):
@@ -500,3 +500,44 @@ def test_board_lists_open_tasks_ahead_of_old_failures(conn):
         store.complete_task(conn, f, {"done": False, "reason": "x", "retryable": False})
     tid = _task(conn)
     assert tid in [d["id"] for d in store.board(conn)["live"]]
+
+
+# ------------------------------------------------------------ idle sessions
+
+
+def test_a_free_session_beside_owed_work_is_owed_after_15_min(conn):
+    from coord_mcp import sessions
+    sessions.set_session(conn, "MAG", "primary", "local_mag")
+    a = _task(conn)
+    t = now()
+    conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (t - 10 * MIN, a))
+    assert store.minder_owed(conn, t)["idle"] == []
+    conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (t - 20 * MIN, a))
+    owed = store.minder_owed(conn, t)
+    assert owed["idle"] == [f"MAG local_mag ({a})"]
+    text = store.minder_text(owed, t)
+    assert f"1 free client sessions beside owed work 15+ min (dispatch, or record why it waits) (MAG local_mag ({a}))" in text
+    # busy is not idle
+    store.get_task(conn, a, reader="MAG")
+    assert store.minder_owed(conn, t)["idle"] == []
+
+
+def test_no_idle_without_registered_sessions(conn):
+    a = _task(conn)
+    conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (now() - 60 * MIN, a))
+    owed = store.minder_owed(conn, now())
+    assert owed["idle"] == []
+    assert "0 free client sessions beside owed work 15+ min," in store.minder_text(owed, now())
+
+
+def test_board_shows_idle_sessions_with_task_links(conn):
+    t = now()
+    tid = "abcdef012345"
+    v = store.operator_view(conn)
+    assert 'id="idle"' not in report.board_page(v)
+    v["idle"] = [{"session_id": "local_mag", "client": "MAG", "role": "primary",
+                  "idle_since": t - 25 * MIN, "task_ids": [tid]}]
+    page = report.board_page(v)
+    assert 'id="idle"' in page and "local_mag" in page and "idle 25 min" in page
+    assert f'href="/board/task/{tid}"' in page
+    assert 'id="idle"' not in report.board_page(v, client="LNK")
