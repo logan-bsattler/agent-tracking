@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Procedures-in-code review</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#1f2328;--muted:#5d6670;--line:#e3e0d8;--card:#fff;--ok:#1a7f37;--warn:#9a6700;--acc:#0b5cad}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15171a;--fg:#e6e6e3;--muted:#9aa3ab;--line:#2c3036;--card:#1c1f23;--ok:#4ac26b;--warn:#d4a72c;--acc:#6cb6ff}}
+:root[data-theme="dark"]{--bg:#15171a;--fg:#e6e6e3;--muted:#9aa3ab;--line:#2c3036;--card:#1c1f23;--ok:#4ac26b;--warn:#d4a72c;--acc:#6cb6ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:860px;margin:0 auto;padding:32px 16px 64px}
+h1{font-size:1.6rem;margin:0 0 4px}
+h2{font-size:1.15rem;margin:36px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+h3{font-size:1rem;margin:0 0 6px}
+.sub{color:var(--muted);margin:0 0 20px}
+.bluf{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--ok);border-radius:8px;padding:14px 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin:12px 0}
+.tag{display:inline-block;font-size:.75rem;font-weight:600;padding:1px 8px;border-radius:99px;border:1px solid currentColor;margin-left:6px;vertical-align:1px}
+.on{color:var(--ok)}.watch{color:var(--warn)}
+code{font:0.88em ui-monospace,Consolas,monospace;background:color-mix(in srgb,var(--line) 55%,transparent);padding:1px 5px;border-radius:4px}
+ul{padding-left:20px;margin:6px 0}li{margin:3px 0}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600}
+.scroll{overflow-x:auto}
+</style>
+</head>
+<body>
+<main>
+<h1>Master procedures in code: review and rollout</h1>
+<p class="sub">agent-tracking · 2026-11-13 · four recommendations from the agent branch <code>worktree-agent-a04c5a0ff8253d524</code></p>
+
+<div class="bluf">
+<strong>All four recommendations are merged, pushed and live.</strong> Each passed review. Two needed a fix before merging: the SharePoint note now leaves out the agent's summary, and decision text no longer carries stale "rec" labels. The full suite (520 tests) and the stdio smoke test pass. Auto-dispatch and pipeline notes are switched on for the worker and start sending from its next fresh session.
+</div>
+
+<h2>What landed</h2>
+<div class="scroll">
+<table>
+<tr><th>Rec</th><th>What it does</th><th>Commit</th><th>State</th></tr>
+<tr><td>1 · Closes</td><td>An <code>email-closes</code> or <code>teams-status</code> intent at id-match is settled in the dashboard loop: one decision citing the evidence, its loose ends resolved, the intent closed.</td><td><code>58cdb3e</code></td><td><span class="tag on">live</span></td></tr>
+<tr><td>2 · Reviews</td><td><code>complete_task</code> creates the <code>dod_review</code> a finished deliverable, or gated CVC code or client email, is owed, in the same transaction.</td><td><code>e2164e7</code></td><td><span class="tag on">live</span></td></tr>
+<tr><td>3 · Dispatch</td><td>A client-session registry on the board. The board picks the next safe task and the master-console mod sends it under a 60-second lease.</td><td><code>33b5968</code></td><td><span class="tag on">on, next worker session</span></td></tr>
+<tr><td>4 · Pipeline notes</td><td>The board writes the one-line SharePoint note. The mod adds it with <code>add_task_note</code> and records the clearing decision.</td><td><code>528f430</code> + <code>95282f9</code></td><td><span class="tag on">on, next worker session</span></td></tr>
+<tr><td>Cleanup</td><td>Stale "(rec 3)" and "(rec D)" labels removed from decision text.</td><td><code>076c6ae</code></td><td><span class="tag on">live</span></td></tr>
+</table>
+</div>
+
+<h2>Review findings</h2>
+
+<div class="card">
+<h3>Fixed: client-visible SharePoint note carried the agent's summary <span class="tag on">fixed in 95282f9</span></h3>
+<p>Rec 4 appended the result's free-text <code>summary</code> to every code-change note. SharePoint is what clients see, and a summary is written for master, so internal wording ("Ben still needs to chase the client") could have reached the client. The note is now only what the manual asks for: the date, what landed, and its name or CVC/ticket. The ticket is still read from the summary. A test covers it.</p>
+</div>
+
+<div class="card">
+<h3>Fixed: rec 4's tests depended on rec 2 <span class="tag on">fixed in 95282f9</span></h3>
+<p>The promotion test relied on <code>complete_task</code> creating the review, which only rec 2 does. The code itself had no such dependency. The helper now creates the review when there isn't one, so each change merged and tested on its own.</p>
+</div>
+
+<div class="card">
+<h3>Fixed: stale labels in decision text <span class="tag on">fixed in 076c6ae</span></h3>
+<p>Auto-close decisions said "(rec 3)" and pipeline-note decisions said "(rec D)". Neither matched the numbering used here, and both would have shown on the board.</p>
+</div>
+
+<div class="card">
+<h3>Accepted: master's own sends are invisible to auto-dispatch <span class="tag watch">watch</span></h3>
+<p>If master sends a task and the client session is busy with something that isn't a board task, code can send the same <code>Do task X</code> line again after 2 minutes. That's a duplicate message, not lost work.</p>
+</div>
+
+<div class="card">
+<h3>Accepted: a lapsed lease can duplicate a SharePoint note <span class="tag watch">watch</span></h3>
+<p>If <code>add_task_note</code> succeeds but the report back to the board fails, the 2-minute lease lapses and the same note is offered again. The client would see a duplicate. This is unlikely, since the call takes seconds.</p>
+</div>
+
+<div class="card">
+<h3>Accepted: auto-created reviews quiet "result unread" for deliverables <span class="tag watch">watch</span></h3>
+<p>The minder treats a child task as master acting on a result. The new open review still surfaces through "never delivered" or auto-dispatch, so master is still woken, just under a different item.</p>
+</div>
+
+<div class="card">
+<h3>Policy check: rec 1 matches the manual</h3>
+<p>The manual says an id-match close is enough on its own. Topic-match, any intent naming commitments, and any unknown or already-closed loose-end id all stay with master. Each intent is closed in its own savepoint, so one failure doesn't block the rest.</p>
+</div>
+
+<h2>Testing</h2>
+<ul>
+<li>Each rec was applied on its own on top of current main in a scratch worktree before merging.</li>
+<li>Final state: <strong>520 passed</strong>, smoke test <strong>ALL PASS</strong>.</li>
+<li>Two timing tests failed once under load and passed on rerun: <code>test_minder.py::test_an_unchanged_list_backs_off_doubling_to_the_cap</code> and <code>test_queue.py::test_queue_posts_through_the_server</code>. One full run went past 10 minutes; it was restarted to print a traceback for any test that hung, and the rerun finished clean in about 6 minutes.</li>
+</ul>
+
+<h2>Rollout done</h2>
+<ul>
+<li><code>python -m coord_mcp.sessions seed</code>: 13 primary client sessions registered. None has a side session, so reviews stay with master.</li>
+<li><code>COORD_AUTO_DISPATCH=1</code> and <code>COORD_AUTO_PIPELINE_NOTES=1</code> set in the worker's <code>C:\development\agents\.claude\settings.local.json</code> only. The desk is left off.</li>
+<li>Dashboard restarted (scheduled task "Coord Usage Dashboard"). Both new endpoints were checked to answer.</li>
+</ul>
+
+<h2>Still to happen</h2>
+<ul>
+<li><strong>Worker restart:</strong> the mod reads both switches at session start, so sending begins on the worker's next clear or new session.</li>
+<li><strong>Coord servers:</strong> sessions opened before the merge run the old code. Rec 2's automatic reviews apply in sessions opened since.</li>
+<li><strong>Side sessions:</strong> register them with <code>python -m coord_mcp.sessions set &lt;client&gt; side &lt;id&gt;</code> as they appear, so reviews and drafts can dispatch automatically.</li>
+<li><strong>Housekeeping:</strong> the agent branch and its locked worktree are still on disk. Everything they held is now on main.</li>
+<li><strong>Turning off:</strong> remove a switch's line from the settings file and restart the session. Failures show as a toast and on <code>/api/health</code>.</li>
+</ul>
+</main>
+</body>
+</html>
