@@ -125,3 +125,24 @@ def test_sync_switch(monkeypatch):
     assert not cs.enabled()
     monkeypatch.delenv("COORD_WORKFLOW_SYNC")
     assert cs.enabled()
+
+
+def test_workflows_page_shows_open_cases_and_per_workflow_rows(db):
+    from coord_mcp import report
+    from coord_mcp.workflows import view
+    _, c = db
+    root = store.create_task(c, "investigation", "LNK: why the AMEX report fails", {}, assigned_to="LNK")["task_id"]
+    store.complete_task(c, root, {**INV, "follow_ups": [{"who": "Ben", "what": "approve the fix"}]})
+    done = store.create_task(c, "investigation", "MAG: reconcile the keeper list", {}, assigned_to="MAG")["task_id"]
+    store.complete_task(c, done, INV)
+    cs.sync(c)
+    v = view.overview(c)
+    assert v["totals"] == {"cases": 2, "open": 1, "waits": {"ben": 1, "master": 0, "agent": 0}}
+    a3 = next(r for r in v["workflows"] if r["workflow"] == "A3")
+    assert (a3["open"], a3["ben_touches"], a3["engine"]) == (1, 1.0, True)
+    c3 = next(r for r in v["workflows"] if r["workflow"] == "C3")
+    assert c3["median_cycle_h"] is not None
+    html = view.render(v)
+    assert "AMEX" in html and "waits on <b>ben</b>" in html and "keeper" not in html
+    assert '<a href="/workflows">Workflows</a>' in report.board_page(store.operator_view(c))
+    assert "AMEX" not in view.render(v, waits="master")

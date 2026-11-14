@@ -1248,7 +1248,8 @@ button.kpi { font:inherit; text-align:left; cursor:pointer; width:100%; }
 
 # Nav links in the order every page shows them; the current page is bold.
 NAV = (("/", "Usage"), ("/board", "Board"), ("/clients", "Clients"), ("/queue", "Queue"), ("/hours", "Hours"), ("/drafts", "Drafts"),
-       ("/deliverables", "Deliverables"), ("/intents", "Intents"), ("/commitments", "Commitments"))
+       ("/deliverables", "Deliverables"), ("/intents", "Intents"), ("/commitments", "Commitments"),
+       ("/workflows", "Workflows"))
 
 SEEN_BOX = ('<span class="seenbox"><span id="newcount" class="age"></span>'
             '<button id="seen" type="button">Mark seen</button></span>')
@@ -2693,6 +2694,11 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 client = (self._query.get("client") or [""])[0].strip() or None
                 return drafts_page(store.draft_replies(conn, days=max(1, min(window, 365)),
                                                        client=client)).encode("utf-8")
+            if path == "/workflows":
+                from .workflows import view
+                wf = (self._query.get("wf") or [""])[0].strip() or None
+                waits = (self._query.get("waits") or [""])[0].strip() or None
+                return view.render(view.overview(conn), wf, waits).encode("utf-8")
             if path == "/intents":
                 window = int((self._query.get("days") or ["7"])[0] or 7)
                 client = (self._query.get("client") or [""])[0].strip() or None
