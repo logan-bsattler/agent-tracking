@@ -20,6 +20,8 @@ Left for master, never chosen here:
     python -m coord_mcp.sessions list
     python -m coord_mcp.sessions set <client> <primary|side> <session_id> [--title T]
     python -m coord_mcp.sessions seed        # the primary table from the master manual
+    python -m coord_mcp.sessions dry-run     # what auto-dispatch would send now
+    python -m coord_mcp.sessions idle        # free sessions beside owed work 15+ min
 """
 
 from __future__ import annotations
@@ -145,11 +147,37 @@ def _busy_sessions(conn: sqlite3.Connection, reg: dict[str, dict[str, str]], t: 
     return out
 
 
-def next_dispatch(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any] | None:
-    """At most one {task_id, client, role, session_id, message}: the oldest
-    undelivered task (minder's set: open, never picked up, never parked, not
-    held, not waiting; not sent in RESEND_AFTER, no attempt in RETRY_AFTER,
-    at least DISPATCH_AFTER old) whose target session is free."""
+def _candidates(conn: sqlite3.Connection, t: int, *, paced: bool = True) -> list[sqlite3.Row]:
+    """Open, never picked up, never parked tasks with a client, earliest-due
+    commitment first (commitments.due_map), then oldest. paced adds the
+    send timers: DISPATCH_AFTER old, not sent in RESEND_AFTER, no attempt in
+    RETRY_AFTER."""
+    from .commitments import due_map
+    sql = """SELECT t.id, t.kind, t.assigned_to, t.created_at FROM tasks t
+             WHERE t.state='open' AND t.picked_up_at IS NULL AND t.assigned_to IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id)"""
+    args: tuple[Any, ...] = ()
+    if paced:
+        sql += """ AND t.created_at <= ? AND (t.dispatched_at IS NULL OR t.dispatched_at <= ?)
+                   AND NOT EXISTS (SELECT 1 FROM dispatch_attempts a WHERE a.task_id = t.id AND a.created_at > ?)"""
+        args = (t - DISPATCH_AFTER, t - RESEND_AFTER, t - RETRY_AFTER)
+    rows = conn.execute(sql + " ORDER BY t.created_at, t.rowid", args).fetchall()
+    try:
+        dues = due_map(conn)
+    except sqlite3.Error:
+        dues = {}
+    inf = float("inf")
+    # sorted() is stable: equal dues keep the created_at order.
+    return sorted(rows, key=lambda r: (dues.get(r["id"]) or {}).get("due_at") or inf)
+
+
+def next_dispatch(conn: sqlite3.Connection, now_ts: int | None = None,
+                  exclude_sessions: set[str] | frozenset[str] = frozenset()) -> dict[str, Any] | None:
+    """At most one {task_id, client, role, session_id, message}: the
+    earliest-due, then oldest, undelivered task (minder's set: open, never
+    picked up, never parked, not held, not waiting; not sent in RESEND_AFTER,
+    no attempt in RETRY_AFTER, at least DISPATCH_AFTER old) whose target
+    session is free. exclude_sessions counts as busy (the dry run)."""
     from . import store
     t = now() if now_ts is None else now_ts
     ensure_dispatch(conn)
@@ -159,24 +187,136 @@ def next_dispatch(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[s
     held = store.held_tasks(conn, t)
     waiting = store.waiting_on(conn)
     busy = _busy_sessions(conn, reg, t)
-    for r in conn.execute(
-        """SELECT t.id, t.kind, t.assigned_to FROM tasks t
-           WHERE t.state='open' AND t.picked_up_at IS NULL AND t.assigned_to IS NOT NULL AND t.created_at <= ?
-             AND NOT EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id)
-             AND (t.dispatched_at IS NULL OR t.dispatched_at <= ?)
-             AND NOT EXISTS (SELECT 1 FROM dispatch_attempts a WHERE a.task_id = t.id AND a.created_at > ?)
-           ORDER BY t.created_at, t.rowid""", (t - DISPATCH_AFTER, t - RESEND_AFTER, t - RETRY_AFTER)):
+    for r in _candidates(conn, t):
         if r["id"] in held or r["id"] in waiting:
             continue
         tg = target(reg, r["assigned_to"], r["kind"])
         if tg is None:
             continue
         role, sid = tg
-        if busy.get(sid, set()) - {r["id"]}:
+        if sid in exclude_sessions or busy.get(sid, set()) - {r["id"]}:
             continue
         return {"task_id": r["id"], "client": r["assigned_to"], "role": role, "session_id": sid,
                 "kind": r["kind"], "message": MESSAGE.format(task_id=r["id"])}
     return None
+
+
+def dry_run(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any]:
+    """What auto-dispatch would send over the next ticks if nothing else
+    changed (one per tick, each session at most once), and why every other
+    undelivered task is left. Reads only; claims nothing."""
+    from . import store
+    from .db import ensure_deps
+    t = now() if now_ts is None else now_ts
+    ensure_dispatch(conn)
+    ensure_deps(conn)
+    sends: list[dict[str, Any]] = []
+    used: set[str] = set()
+    while (d := next_dispatch(conn, t, used)) is not None:
+        sends.append(d)
+        used.add(d["session_id"])
+    reg = registry(conn)
+    held = store.held_tasks(conn, t)
+    waiting = store.waiting_on(conn)
+    busy = _busy_sessions(conn, reg, t)
+    paced = {r["id"] for r in _candidates(conn, t)}
+    chosen = {d["task_id"] for d in sends}
+    left: list[dict[str, Any]] = []
+    for r in _candidates(conn, t, paced=False):
+        if r["id"] in chosen:
+            continue
+        tg = target(reg, r["assigned_to"], r["kind"])
+        if r["id"] in held:
+            why = f"held by decision {held[r['id']]['id']}"
+        elif r["id"] in waiting:
+            why = "waiting on " + ", ".join(b["id"] for b in waiting[r["id"]])
+        elif tg is None:
+            why = ("review with no side session: primary must clear first (master)"
+                   if r["kind"] == "dod_review" and (reg.get(r["assigned_to"].casefold()) or {})
+                   else "no session registered for this client (master)")
+        elif r["id"] not in paced:
+            why = "pacing: too new, just sent, or just attempted"
+        elif busy.get(tg[1], set()) - {r["id"]}:
+            why = "session busy with " + ", ".join(sorted(busy[tg[1]] - {r["id"]}))
+        else:
+            why = "session gets an earlier task first"
+        left.append({"task_id": r["id"], "client": r["assigned_to"], "kind": r["kind"], "why": why})
+    for r in conn.execute("SELECT t.id, t.kind, t.assigned_to FROM tasks t WHERE t.state='open' "
+                          "AND t.picked_up_at IS NULL AND EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id=t.id)"):
+        left.append({"task_id": r["id"], "client": r["assigned_to"], "kind": r["kind"],
+                     "why": "parked: master confirms the clear and the decisions first"})
+    return {"sends": sends, "left": left}
+
+
+IDLE_AFTER = 15 * 60  # a free session beside dispatchable work this long is an alert
+
+
+def idle_sessions(conn: sqlite3.Connection, now_ts: int | None = None,
+                  after: int = IDLE_AFTER) -> list[dict[str, Any]]:
+    """Registered client sessions with nothing in flight on the board while
+    their client has owed, dispatchable work (open, undelivered, never
+    parked, not held, not waiting), both true for `after` seconds: since the
+    later of the oldest such task's creation and the client's last finished
+    task on that session. [{session_id, client, role, idle_since, task_ids}].
+    A review with no side session counts against the primary (master clears
+    it first)."""
+    from . import store
+    from .db import ensure_deps
+    t = now() if now_ts is None else now_ts
+    ensure_dispatch(conn)
+    ensure_deps(conn)
+    reg = registry(conn)
+    if not reg:
+        return []
+    held = store.held_tasks(conn, t)
+    waiting = store.waiting_on(conn)
+    busy = _busy_sessions(conn, reg, t)
+    owed: dict[str, dict[str, Any]] = {}
+    for r in _candidates(conn, t, paced=False):
+        if r["id"] in held or r["id"] in waiting:
+            continue
+        sess = reg.get(r["assigned_to"].casefold()) or {}
+        tg = target(reg, r["assigned_to"], r["kind"])
+        role, sid = tg if tg else ("primary", sess.get("primary"))
+        if not sid or busy.get(sid):
+            continue
+        o = owed.setdefault(sid, {"session_id": sid, "client": r["assigned_to"], "role": role,
+                                  "first": r["created_at"], "task_ids": []})
+        o["first"] = min(o["first"], r["created_at"])
+        o["task_ids"].append(r["id"])
+    out = []
+    for sid, o in owed.items():
+        last = conn.execute("SELECT MAX(completed_at) FROM tasks WHERE assigned_to = ? COLLATE NOCASE "
+                            "AND (dispatch_session = ? OR dispatch_session IS NULL)",
+                            (o["client"], sid)).fetchone()[0] or 0
+        since = max(o["first"], last)
+        if since <= t - after:
+            out.append({"session_id": sid, "client": o["client"], "role": o["role"],
+                        "idle_since": since, "task_ids": o["task_ids"]})
+    return sorted(out, key=lambda o: o["idle_since"])
+
+
+def mark_manual(conn: sqlite3.Connection, task_id: str, session_id: str | None = None,
+                now_ts: int | None = None) -> dict[str, Any]:
+    """Master sent 'Do task <id>' by hand (coord-rules saw the send_message):
+    stamp the task as dispatched to that session, so code counts the session
+    busy before the client picks it up and never sends it a second task."""
+    t = now() if now_ts is None else now_ts
+    ensure_dispatch(conn)
+    r = conn.execute("SELECT id, kind, assigned_to, state, picked_up_at FROM tasks WHERE id=?",
+                     (task_id,)).fetchone()
+    if r is None:
+        raise ValueError(f"no task {task_id!r}")
+    if r["state"] != "open" or r["picked_up_at"]:
+        return {"ok": True, "task_id": task_id, "stamped": False}
+    sid = (session_id or "").strip()
+    if not sid:
+        reg = registry(conn)
+        tg = target(reg, r["assigned_to"], r["kind"])
+        sid = tg[1] if tg else ((reg.get((r["assigned_to"] or "").casefold()) or {}).get("primary") or "")
+    conn.execute("UPDATE tasks SET dispatched_at=?, dispatch_status='manual', dispatch_session=? WHERE id=?",
+                 (t, sid or None, task_id))
+    return {"ok": True, "task_id": task_id, "stamped": True, "session_id": sid or None}
 
 
 # ------------------------------------------------------------ claim and report
@@ -189,6 +329,8 @@ def claim(conn: sqlite3.Connection, claimer: str | None = None, now_ts: int | No
     from .db import ensure_deps
     ensure_dispatch(conn)  # before BEGIN: executescript would commit it
     ensure_deps(conn)      # (waiting_on, inside next_dispatch)
+    from .db import ensure_commitments
+    ensure_commitments(conn)  # (due_map, inside next_dispatch)
     conn.execute("BEGIN IMMEDIATE")
     try:
         d = next_dispatch(conn, t)
@@ -267,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("session_id")
     s.add_argument("--title")
     sub.add_parser("seed", help="load the primary sessions from the master manual's table")
+    sub.add_parser("dry-run", help="what auto-dispatch would send now, and why the rest waits")
+    sub.add_parser("idle", help="free sessions beside owed work for 15+ minutes")
     a = p.parse_args(argv)
     conn = connect()
     try:
@@ -275,6 +419,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{r['client']} {r['role']}: {r['session_id']} ({r['title']})")
         elif a.cmd == "seed":
             print(f"{len(seed(conn))} primary sessions seeded")
+        elif a.cmd == "dry-run":
+            r = dry_run(conn)
+            print(f"would send ({len(r['sends'])}, one per 10s tick):")
+            for d in r["sends"]:
+                print(f"  {d['task_id']}  {d['client']:<10} {d['role']:<8} {d['kind']:<14} -> {d['session_id']}")
+            print(f"left ({len(r['left'])}):")
+            for x in r["left"]:
+                print(f"  {x['task_id']}  {(x['client'] or ''):<10} {x['kind']:<14} {x['why']}")
+        elif a.cmd == "idle":
+            rows = idle_sessions(conn)
+            for o in rows:
+                mins = (now() - o["idle_since"]) // 60
+                print(f"{o['client']:<10} {o['role']:<8} {o['session_id']}  idle {mins} min  "
+                      f"tasks {', '.join(o['task_ids'])}")
+            print(f"{len(rows)} idle")
         else:
             rows = list_sessions(conn)
             for r in rows:

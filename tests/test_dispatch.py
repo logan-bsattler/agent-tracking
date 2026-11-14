@@ -227,3 +227,87 @@ def test_dispatch_endpoints(tmp_path, monkeypatch):
     code, body = post("/api/dispatch/sent", f"task_id={tid}&status=delivered&detail=ok".encode())
     assert code == 200 and body["status"] == "delivered"
     c.close()
+
+
+# ------------------------------------------------------------ 2026-11-14: keep agents working
+
+def test_earliest_due_commitment_goes_first(conn):
+    from coord_mcp import commitments
+    sessions.set_session(conn, "LNK", "primary", "local_lnk")
+    older = _task(conn, age=OLD + 600)
+    later = _task(conn, client="LNK", age=OLD + 300)
+    urgent = _task(conn, age=OLD)
+    commitments.add(conn, "MAG", "Pat", "send the fix", due="2026-11-16", task_id=urgent)
+    commitments.add(conn, "LNK", "Lee", "send the plan", due="2026-11-20", task_id=later)
+    assert store.next_dispatch(conn)["task_id"] == urgent  # before the older MAG task
+    r = sessions.dry_run(conn)
+    assert [d["task_id"] for d in r["sends"]] == [urgent, later]
+    assert {x["task_id"]: x["why"] for x in r["left"]} == {older: "session gets an earlier task first"}
+
+
+def test_dry_run_sends_one_per_session_and_says_why_the_rest_wait(conn):
+    sessions.set_session(conn, "LNK", "primary", "local_lnk")
+    sessions.set_session(conn, "MAG", "side", "local_mag2")
+    code = _task(conn, kind="code_change", age=OLD + 300)
+    code2 = _task(conn, kind="deliverable", age=OLD + 200)
+    draft = _task(conn, kind="draft_reply", age=OLD + 100)
+    held = _task(conn, client="LNK")
+    store.record_decision(conn, "hold", "waiting on access", task_id=held)
+    royal = _task(conn, client="Royal")
+    new = _task(conn, client="LNK", age=10)
+    r = sessions.dry_run(conn)
+    assert [(d["task_id"], d["session_id"]) for d in r["sends"]] == [(code, "local_mag"), (draft, "local_mag2")]
+    why = {x["task_id"]: x["why"] for x in r["left"]}
+    assert why[code2] == "session gets an earlier task first"  # never a second code task to the primary
+    assert why[held].startswith("held by decision")
+    assert why[royal].startswith("no session registered")
+    assert why[new].startswith("pacing")
+    assert store.next_dispatch(conn)["task_id"] == code  # the dry run claimed nothing
+
+
+def test_a_hand_sent_task_occupies_its_session(conn):
+    a = _task(conn, age=OLD + 60)
+    b = _task(conn)
+    assert sessions.mark_manual(conn, a)["session_id"] == "local_mag"
+    assert store.next_dispatch(conn) is None  # a is in flight though not yet picked up
+    assert sessions.mark_manual(conn, b, "local_x")["stamped"]
+    store.get_task(conn, a, reader="MAG")
+    assert sessions.mark_manual(conn, a)["stamped"] is False
+    with pytest.raises(ValueError):
+        sessions.mark_manual(conn, "nope")
+
+
+def test_idle_session_beside_owed_work(conn):
+    t = now()
+    a = _task(conn, age=20 * 60)
+    assert [(o["session_id"], o["task_ids"]) for o in sessions.idle_sessions(conn, t)] == [("local_mag", [a])]
+    assert sessions.idle_sessions(conn, t, after=30 * 60) == []
+    # a task finished on that session ten minutes ago restarts the clock
+    done = _task(conn, age=60 * 60)
+    store.get_task(conn, done, reader="MAG")
+    store.complete_task(conn, done, INV)
+    conn.execute("UPDATE tasks SET completed_at=? WHERE id=?", (t - 600, done))
+    assert sessions.idle_sessions(conn, t) == []
+    conn.execute("UPDATE tasks SET completed_at=? WHERE id=?", (t - 1800, done))
+    assert len(sessions.idle_sessions(conn, t)) == 1
+    # busy is not idle; held work is not owed
+    running = _task(conn, age=OLD)
+    store.get_task(conn, running, reader="MAG")
+    assert sessions.idle_sessions(conn, t) == []
+    store.complete_task(conn, running, INV)
+    conn.execute("UPDATE tasks SET completed_at=? WHERE id=?", (t - 1800, running))
+    store.record_decision(conn, "hold", "access", task_id=a)
+    assert sessions.idle_sessions(conn, t) == []
+
+
+def test_idle_counts_a_review_with_no_side_session_against_the_primary(conn):
+    r = _task(conn, kind="dod_review", age=20 * 60)
+    assert sessions.idle_sessions(conn)[0]["task_ids"] == [r]
+
+
+def test_cli_dry_run_and_idle(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("COORD_DB", str(tmp_path / "cli2.db"))
+    assert sessions.main(["dry-run"]) == 0
+    assert sessions.main(["idle"]) == 0
+    out = capsys.readouterr().out
+    assert "would send (0" in out and "0 idle" in out
