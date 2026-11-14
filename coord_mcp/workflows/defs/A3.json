@@ -11,7 +11,10 @@
       "who": "code",
       "kinds": [],
       "gate": "triage proposes the intent",
-      "next": "master tasks an investigation"
+      "next": "master tasks an investigation",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "investigate",
@@ -23,7 +26,10 @@
         "review"
       ],
       "gate": "result validates",
-      "next": "result names a fix for the client agent"
+      "next": "result names a fix for the client agent",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "fix",
@@ -34,6 +40,9 @@
       ],
       "gate": "build and dev-compile only",
       "next": "fix lands",
+      "sla": {
+        "business_days": 3
+      },
       "spawn": {
         "on": "client_follow_up",
         "kind": "code_change",
@@ -58,7 +67,10 @@
         "dod_review"
       ],
       "gate": "cvc-code checklist",
-      "next": "approve"
+      "next": "approve",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "checkin_ok",
@@ -66,7 +78,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben approves the check-in",
-      "next": "master creates the check-in"
+      "next": "master creates the check-in",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "checkin",
@@ -77,6 +92,9 @@
       ],
       "gate": "gate.check_checkin: code approved and unchanged",
       "next": "checked in",
+      "sla": {
+        "business_days": 1
+      },
       "match": {
         "spec_has": "checkin_of"
       }
@@ -87,7 +105,10 @@
       "who": "code",
       "kinds": [],
       "gate": "pipeline-note claim",
-      "next": "note added"
+      "next": "note added",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "reply",
@@ -98,6 +119,9 @@
       ],
       "gate": "nothing sends",
       "next": "draft lands",
+      "sla": {
+        "business_days": 1
+      },
       "spawn": {
         "on": "result",
         "after": "checkin",
@@ -125,7 +149,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 1
+      }
     }
   ]
 }

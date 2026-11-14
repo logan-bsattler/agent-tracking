@@ -11,7 +11,10 @@
       "who": "code",
       "kinds": [],
       "gate": "triage",
-      "next": "master tasks the in-flight list"
+      "next": "master tasks the in-flight list",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "inflight",
@@ -22,7 +25,10 @@
         "data_pull"
       ],
       "gate": "result lists what the refresh wipes",
-      "next": "list lands"
+      "next": "list lands",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "confirm",
@@ -30,7 +36,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben confirms the timing with QAD",
-      "next": "Ben's ruling"
+      "next": "Ben's ruling",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "restore",
@@ -40,7 +49,10 @@
         "code_change"
       ],
       "gate": "build and dev-compile only",
-      "next": "setup restored"
+      "next": "setup restored",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "reverify",
@@ -51,6 +63,9 @@
       ],
       "gate": "checked against data",
       "next": "case done",
+      "sla": {
+        "business_days": 1
+      },
       "spawn": {
         "on": "result",
         "after": "restore",

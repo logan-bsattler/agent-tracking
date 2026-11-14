@@ -16,7 +16,10 @@
         "investigation"
       ],
       "gate": "dod/<type>.md exists; never Markdown",
-      "next": "file lands"
+      "next": "file lands",
+      "sla": {
+        "business_days": 3
+      }
     },
     {
       "key": "review",
@@ -26,7 +29,10 @@
         "dod_review"
       ],
       "gate": "up to two rounds",
-      "next": "approve"
+      "next": "approve",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "promote",
@@ -34,7 +40,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben's click on /deliverables",
-      "next": "promoted"
+      "next": "promoted",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "cover",
@@ -44,7 +53,10 @@
         "draft_reply"
       ],
       "gate": "points at the promoted copy",
-      "next": "draft lands"
+      "next": "draft lands",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "send",
@@ -52,7 +64,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 1
+      }
     }
   ]
 }

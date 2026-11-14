@@ -12,7 +12,10 @@
       "who": "code",
       "kinds": [],
       "gate": "calendar imported for the day",
-      "next": "brief page ready"
+      "next": "brief page ready",
+      "sla": {
+        "business_hours": 2
+      }
     },
     {
       "key": "prep",
@@ -25,7 +28,10 @@
         "data_pull"
       ],
       "gate": "result validates",
-      "next": "material lands"
+      "next": "material lands",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "review",
@@ -35,7 +41,10 @@
         "dod_review"
       ],
       "gate": "checklist",
-      "next": "approve"
+      "next": "approve",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "read",
@@ -43,7 +52,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 1
+      }
     }
   ]
 }

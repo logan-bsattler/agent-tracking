@@ -12,7 +12,10 @@
       "who": "code",
       "kinds": [],
       "gate": "triage proposes the intent",
-      "next": "master tasks a readiness read"
+      "next": "master tasks a readiness read",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "ready",
@@ -23,7 +26,10 @@
         "data_pull"
       ],
       "gate": "result lists each CVC and its status",
-      "next": "result lands"
+      "next": "result lands",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "approve",
@@ -31,7 +37,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben names the tickets to move",
-      "next": "Ben's ruling"
+      "next": "Ben's ruling",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "moves",
@@ -41,7 +50,10 @@
         "code_change"
       ],
       "gate": "only tickets Ben named; no comments on tickets",
-      "next": "moves recorded in the result"
+      "next": "moves recorded in the result",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "qsm",
@@ -49,7 +61,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "qad-qsm-deployment skill; Ben submits",
-      "next": "QAD installs"
+      "next": "QAD installs",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "confirm",
@@ -59,7 +74,10 @@
         "investigation"
       ],
       "gate": "checked in the target environment",
-      "next": "install confirmed"
+      "next": "install confirmed",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "reply",
@@ -70,6 +88,9 @@
       ],
       "gate": "nothing sends",
       "next": "draft lands",
+      "sla": {
+        "business_days": 1
+      },
       "spawn": {
         "on": "result",
         "after": "confirm",
@@ -97,7 +118,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 1
+      }
     }
   ]
 }

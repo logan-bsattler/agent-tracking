@@ -11,7 +11,10 @@
       "who": "code",
       "kinds": [],
       "gate": "hourly triage proposes the intent",
-      "next": "master tasks a status read"
+      "next": "master tasks a status read",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "status_read",
@@ -22,7 +25,10 @@
         "data_pull"
       ],
       "gate": "result validates",
-      "next": "result lands done"
+      "next": "result lands done",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "draft",
@@ -33,6 +39,9 @@
       ],
       "gate": "nothing sends",
       "next": "draft lands",
+      "sla": {
+        "business_days": 1
+      },
       "spawn": {
         "on": "result",
         "kind": "draft_reply",
@@ -61,7 +70,10 @@
         "dod_review"
       ],
       "gate": "client-email checklist, when the gate is on",
-      "next": "approve"
+      "next": "approve",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "outlook",
@@ -69,7 +81,10 @@
       "who": "code",
       "kinds": [],
       "gate": "minder lists finished drafts; master types it into Drafts",
-      "next": "draft in Outlook"
+      "next": "draft in Outlook",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "send",
@@ -77,7 +92,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben reads and sends",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 1
+      }
     }
   ]
 }

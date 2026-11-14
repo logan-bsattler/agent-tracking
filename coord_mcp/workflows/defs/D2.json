@@ -12,7 +12,10 @@
       "who": "code",
       "kinds": [],
       "gate": "transcripts and meetings",
-      "next": "draft on /hours"
+      "next": "draft on /hours",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "edit",
@@ -20,7 +23,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben",
-      "next": "billed"
+      "next": "billed",
+      "sla": {
+        "business_days": 5
+      }
     }
   ]
 }

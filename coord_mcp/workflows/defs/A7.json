@@ -12,7 +12,10 @@
       "who": "code",
       "kinds": [],
       "gate": "triage",
-      "next": "intent proposed"
+      "next": "intent proposed",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "match",
@@ -20,7 +23,10 @@
       "who": "code",
       "kinds": [],
       "gate": "id-match in code; topic-match by master",
-      "next": "decision recorded, loose ends resolved"
+      "next": "decision recorded, loose ends resolved",
+      "sla": {
+        "business_days": 1
+      }
     }
   ]
 }

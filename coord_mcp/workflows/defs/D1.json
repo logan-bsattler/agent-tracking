@@ -13,7 +13,10 @@
         "investigation"
       ],
       "gate": "board cleanup procedure",
-      "next": "closes recorded"
+      "next": "closes recorded",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "close",
@@ -21,7 +24,10 @@
       "who": "code",
       "kinds": [],
       "gate": "decisions cite the evidence",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 1
+      }
     }
   ]
 }

@@ -14,7 +14,10 @@
         "data_pull"
       ],
       "gate": "result validates",
-      "next": "regen named"
+      "next": "regen named",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "regen",
@@ -26,7 +29,10 @@
         "deliverable"
       ],
       "gate": "one workbook, one item",
-      "next": "workbook lands"
+      "next": "workbook lands",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "review",
@@ -36,7 +42,10 @@
         "dod_review"
       ],
       "gate": "checklist",
-      "next": "approve"
+      "next": "approve",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "rulings",
@@ -44,7 +53,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "per-row rulings; precedent may settle covered rows (build step 6)",
-      "next": "rulings recorded"
+      "next": "rulings recorded",
+      "sla": {
+        "business_days": 3
+      }
     },
     {
       "key": "apply",
@@ -56,7 +68,10 @@
         "data_pull"
       ],
       "gate": "rulings cited",
-      "next": "regenerate"
+      "next": "regenerate",
+      "sla": {
+        "business_days": 2
+      }
     }
   ]
 }

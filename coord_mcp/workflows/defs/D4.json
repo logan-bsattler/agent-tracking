@@ -11,7 +11,10 @@
       "who": "code",
       "kinds": [],
       "gate": "qad-client-onboard skill",
-      "next": "key generated"
+      "next": "key generated",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "key",
@@ -19,7 +22,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben installs the public key",
-      "next": "verified"
+      "next": "verified",
+      "sla": {
+        "business_days": 5
+      }
     },
     {
       "key": "characterize",
@@ -30,7 +36,10 @@
         "code_change"
       ],
       "gate": "CLAUDE.md 'Not yet characterized' filled",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 3
+      }
     }
   ]
 }

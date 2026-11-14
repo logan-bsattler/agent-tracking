@@ -14,6 +14,10 @@ A definition is ordered steps. Each step says:
               (a CVC check-in is a code_change whose spec has checkin_of)
   gate        what must hold before the step counts
   next        what starts the next step
+  sla         optional time limit at the step: {"business_hours": n} or
+              {"business_days": n} (exactly one, n > 0), plus an optional
+              "why". Business time skips Saturdays and Sundays (sla.py).
+              Past it, the minder lists the case (sla.minder_owed).
   spawn       optional, for the engine (engine.py): how the step's task is
               created from the case when the step before it lands.
               on: "result" (the step before finished done) or
@@ -43,6 +47,29 @@ SPAWN_ON = ("result", "client_follow_up")
 # sends); a code_change it creates is CVC-bound and dev-compile only; a
 # check-in, a promotion or a tracker post is never in reach.
 ENGINE_KINDS = ("investigation", "data_pull", "draft_reply", "code_change", "deliverable")
+
+
+SLA_UNITS = ("business_hours", "business_days")
+
+
+def sla_errors(v: Any) -> list[str]:
+    """Problems with one step's sla; empty when it is sound."""
+    if not isinstance(v, dict):
+        return ["sla must be an object"]
+    units = [k for k in v if k in SLA_UNITS]
+    extra = [k for k in v if k not in SLA_UNITS and k != "why"]
+    errs = []
+    if len(units) != 1:
+        errs.append(f"sla names exactly one of {SLA_UNITS}")
+    for k in units:
+        n = v[k]
+        if isinstance(n, bool) or not isinstance(n, (int, float)) or n <= 0:
+            errs.append(f"sla {k} must be a positive number")
+    if extra:
+        errs.append(f"sla has unknown fields {extra}")
+    if "why" in v and not (isinstance(v["why"], str) and v["why"].strip()):
+        errs.append("sla why must be text")
+    return errs
 
 
 def validate(d: dict[str, Any], kinds: tuple[str, ...] | list[str] | None = None) -> list[str]:
@@ -75,6 +102,8 @@ def validate(d: dict[str, Any], kinds: tuple[str, ...] | list[str] | None = None
         for f in ("name", "gate", "next"):
             if not st.get(f):
                 errs.append(f"{where}: no {f}")
+        if "sla" in st:
+            errs.extend(f"{where}: {e}" for e in sla_errors(st["sla"]))
         sp = st.get("spawn")
         if sp:
             if st.get("who") != "agent":

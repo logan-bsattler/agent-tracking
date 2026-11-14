@@ -11,7 +11,10 @@
       "who": "code",
       "kinds": [],
       "gate": "triage",
-      "next": "master tasks it"
+      "next": "master tasks it",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "work",
@@ -25,7 +28,10 @@
         "draft_reply"
       ],
       "gate": "result validates",
-      "next": "result lands"
+      "next": "result lands",
+      "sla": {
+        "business_days": 2
+      }
     }
   ]
 }

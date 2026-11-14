@@ -14,7 +14,10 @@
         "deliverable"
       ],
       "gate": "from the spec and past rework",
-      "next": "checklist lands"
+      "next": "checklist lands",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "review",
@@ -24,7 +27,10 @@
         "dod_review"
       ],
       "gate": "checklist",
-      "next": "approve"
+      "next": "approve",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "approve",
@@ -32,7 +38,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "what counts as client-ready is Ben's",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 3
+      }
     }
   ]
 }

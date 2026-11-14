@@ -12,7 +12,10 @@
       "who": "code",
       "kinds": [],
       "gate": "routine",
-      "next": "intents proposed"
+      "next": "intents proposed",
+      "sla": {
+        "business_hours": 2
+      }
     },
     {
       "key": "recap",
@@ -20,7 +23,10 @@
       "who": "code",
       "kinds": [],
       "gate": "routine",
-      "next": "Ben reads it"
+      "next": "Ben reads it",
+      "sla": {
+        "business_hours": 4
+      }
     }
   ]
 }

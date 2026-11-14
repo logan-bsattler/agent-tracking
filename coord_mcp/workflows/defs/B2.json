@@ -12,7 +12,10 @@
       "who": "code",
       "kinds": [],
       "gate": "pipeline intent",
-      "next": "master tasks an investigation"
+      "next": "master tasks an investigation",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "investigate",
@@ -22,7 +25,10 @@
         "investigation"
       ],
       "gate": "result validates",
-      "next": "fix named"
+      "next": "fix named",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "fix",
@@ -32,7 +38,10 @@
         "code_change"
       ],
       "gate": "build and dev-compile only",
-      "next": "B1 from review on"
+      "next": "B1 from review on",
+      "sla": {
+        "business_days": 3
+      }
     }
   ]
 }

@@ -11,7 +11,10 @@
       "who": "code",
       "kinds": [],
       "gate": "triage proposes an email-reply intent",
-      "next": "master specs the draft around the options"
+      "next": "master specs the draft around the options",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "draft",
@@ -22,7 +25,10 @@
         "investigation"
       ],
       "gate": "options listed in the summary",
-      "next": "draft lands"
+      "next": "draft lands",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "decide",
@@ -30,7 +36,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "never decided for him",
-      "next": "Ben's ruling"
+      "next": "Ben's ruling",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "send",
@@ -38,7 +47,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 1
+      }
     }
   ]
 }

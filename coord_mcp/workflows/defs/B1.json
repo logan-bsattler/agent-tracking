@@ -11,7 +11,10 @@
       "who": "code",
       "kinds": [],
       "gate": "pipeline item or intent",
-      "next": "master tasks sizing"
+      "next": "master tasks sizing",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "sizing",
@@ -23,7 +26,10 @@
         "data_pull"
       ],
       "gate": "sizing checklist",
-      "next": "estimate lands"
+      "next": "estimate lands",
+      "sla": {
+        "business_days": 3
+      }
     },
     {
       "key": "estimate_ok",
@@ -31,7 +37,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben approves the estimate; status and dates stay his",
-      "next": "Ben's ruling"
+      "next": "Ben's ruling",
+      "sla": {
+        "business_days": 3
+      }
     },
     {
       "key": "handoff",
@@ -42,7 +51,10 @@
         "investigation"
       ],
       "gate": "qad-architect-handoff",
-      "next": "handoff names the build"
+      "next": "handoff names the build",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "build",
@@ -53,6 +65,9 @@
       ],
       "gate": "build and dev-compile only; do not check in",
       "next": "build lands",
+      "sla": {
+        "business_days": 5
+      },
       "spawn": {
         "on": "client_follow_up",
         "after": "handoff",
@@ -78,7 +93,10 @@
         "dod_review"
       ],
       "gate": "cvc-code checklist",
-      "next": "approve"
+      "next": "approve",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "checkin_ok",
@@ -86,7 +104,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben approves the check-in",
-      "next": "master creates the check-in"
+      "next": "master creates the check-in",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "checkin",
@@ -97,6 +118,9 @@
       ],
       "gate": "gate.check_checkin",
       "next": "checked in",
+      "sla": {
+        "business_days": 1
+      },
       "match": {
         "spec_has": "checkin_of"
       }
@@ -107,7 +131,10 @@
       "who": "code",
       "kinds": [],
       "gate": "pipeline-note claim",
-      "next": "note added"
+      "next": "note added",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "evidence",
@@ -118,7 +145,10 @@
         "investigation"
       ],
       "gate": "test-evidence checklist",
-      "next": "evidence lands"
+      "next": "evidence lands",
+      "sla": {
+        "business_days": 3
+      }
     },
     {
       "key": "promote",
@@ -126,7 +156,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "promotion asks are Ben's (A4)",
-      "next": "installed"
+      "next": "installed",
+      "sla": {
+        "business_days": 3
+      }
     },
     {
       "key": "signoff",
@@ -134,7 +167,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "client signs off; Ben records it",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 10
+      }
     }
   ]
 }

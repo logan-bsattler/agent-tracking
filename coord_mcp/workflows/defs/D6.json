@@ -16,7 +16,10 @@
         "data_pull"
       ],
       "gate": "result validates",
-      "next": "result lands"
+      "next": "result lands",
+      "sla": {
+        "business_days": 3
+      }
     },
     {
       "key": "review",
@@ -26,7 +29,10 @@
         "dod_review"
       ],
       "gate": "checklist",
-      "next": "approve"
+      "next": "approve",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "read",
@@ -34,7 +40,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 5
+      }
     }
   ]
 }

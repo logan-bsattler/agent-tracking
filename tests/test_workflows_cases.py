@@ -137,7 +137,7 @@ def test_workflows_page_shows_open_cases_and_per_workflow_rows(db):
     store.complete_task(c, done, INV)
     cs.sync(c)
     v = view.overview(c)
-    assert v["totals"] == {"cases": 2, "open": 1, "waits": {"ben": 1, "master": 0, "agent": 0}}
+    assert v["totals"] == {"cases": 2, "open": 1, "waits": {"ben": 1, "master": 0, "agent": 0}, "over": 0}
     a3 = next(r for r in v["workflows"] if r["workflow"] == "A3")
     assert (a3["open"], a3["ben_touches"], a3["engine"]) == (1, 1.0, True)
     c3 = next(r for r in v["workflows"] if r["workflow"] == "C3")

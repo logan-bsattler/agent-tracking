@@ -15,7 +15,10 @@
         "investigation"
       ],
       "gate": "tracker-comment checklist",
-      "next": "text lands"
+      "next": "text lands",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "review",
@@ -25,7 +28,10 @@
         "dod_review"
       ],
       "gate": "checklist",
-      "next": "approve"
+      "next": "approve",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "paste",
@@ -33,7 +39,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben pastes; nothing posts in code",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 1
+      }
     }
   ]
 }

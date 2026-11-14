@@ -2324,10 +2324,13 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     # The table is created on first use, so a board without one owes nothing.
     from . import commitments
     owed_commitments = commitments.minder_owed(conn, now_ts)
+    # Workflow cases past their step's time limit (workflows/sla.py).
+    from .workflows import sla
+    over = sla.minder_owed(conn, now_ts)
     return {"parked": parked, "stalled": stalled, "undelivered": undelivered, "unread": unread, "loose": loose,
             "failed": failed, "intents": intents, "unreviewed": unreviewed,
             "undrafted": undrafted, "pipeline": pipeline, "commitments": owed_commitments,
-            "superseded": superseded}
+            "superseded": superseded, "case_sla": over["master"], "case_sla_ben": over["ben"]}
 
 
 _MINDER_LABELS = (("parked", "parked awaiting re-dispatch"),
@@ -2339,7 +2342,12 @@ _MINDER_LABELS = (("parked", "parked awaiting re-dispatch"),
                   ("undrafted", "finished drafts not yet in Outlook (draft each, never send)"),
                   ("pipeline", "client-visible work with no SharePoint pipeline note"),
                   ("commitments", "commitments coming due, slipped or untracked (commitment ids)"),
-                  ("superseded", "questions superseded unanswered (q ids; re-present each, or record why not)"))
+                  ("superseded", "questions superseded unanswered (q ids; re-present each, or record why not)"),
+                  ("case_sla", "cases past step limit for master (case workflow/step +over who; waits on an agent or master: "
+                               "chase, re-dispatch or task the next step, "
+                               "or record a decision on the case why it waits)"),
+                  ("case_sla_ben", "cases past step limit for Ben "
+                                   "(case workflow/step +over; put each in his queue, or record why it waits)"))
 
 
 def superseded_questions(conn: sqlite3.Connection) -> list[str]:

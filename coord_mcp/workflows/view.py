@@ -8,6 +8,7 @@ Per workflow:
   Ben touches mean Ben loose ends raised per case (open, done, deferred alike)
   stalls      the steps where cases sit longest: median hours between
               entering a step and the next event, over every case's history
+  over limit  open cases past their step's sla (sla.py), the whole backlog
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from typing import Any
 
 from . import CATALOG, GROUPS, name
 from . import definitions as defs
+from . import sla
 from .cases import ensure_workflows
 
 WAITS = ("ben", "master", "agent")
@@ -84,13 +86,19 @@ def overview(conn: sqlite3.Connection, t: int | None = None) -> dict[str, Any]:
             continue
         d = defs.get(c["workflow"])
         st = next((s for s in (d or {}).get("steps") or [] if s["key"] == c["step"]), None)
+        lim = sla.status(c, t)
         open_cases.append({**c, "step_name": st["name"] if st else (c["step"] or "—"),
                            "age_h": round((t - (c["step_at"] or c["created_at"])) / 3600, 1),
-                           "ben_touches": ben[c["id"]]})
+                           "ben_touches": ben[c["id"]],
+                           "limit_h": round(lim["limit"] / 3600, 1) if lim else None,
+                           "over_h": round(lim["over"] / 3600, 1) if lim and lim["over"] > 0 else None})
+    for r in rows:
+        r["over"] = sum(1 for c in open_cases if c["workflow"] == r["workflow"] and c["over_h"])
     open_cases.sort(key=lambda c: -c["age_h"])
     return {"as_of": t, "open": open_cases, "workflows": rows,
             "totals": {"cases": len(cases), "open": len(open_cases),
-                       "waits": {w: sum(1 for c in open_cases if c["waits_on"] == w) for w in WAITS}}}
+                       "waits": {w: sum(1 for c in open_cases if c["waits_on"] == w) for w in WAITS},
+                       "over": sum(1 for c in open_cases if c["over_h"])}}
 
 
 def _engine_on() -> bool:
@@ -108,7 +116,8 @@ def render(v: dict[str, Any], wf: str | None = None, waits: str | None = None) -
     from ..report import _task_link, esc, page  # report imports this module lazily
     tot = v["totals"]
     sub = (f'{tot["open"]} open of {tot["cases"]} cases: {tot["waits"]["ben"]} wait on Ben, '
-           f'{tot["waits"]["master"]} on master, {tot["waits"]["agent"]} on an agent. Read-only; '
+           f'{tot["waits"]["master"]} on master, {tot["waits"]["agent"]} on an agent; '
+           f'<b>{tot["over"]}</b> past their step limit. Read-only; '
            'the dashboard loop re-derives each case from the board. Engine '
            + ('<b>on</b> (COORD_WORKFLOW_ENGINE=1)' if _engine_on() else 'off')
            + '.')
@@ -116,11 +125,11 @@ def render(v: dict[str, Any], wf: str | None = None, waits: str | None = None) -
             + "".join(f'<option value="{c}"{" selected" if c == wf else ""}>{c} {esc(n)}</option>'
                       for c, (n, _) in CATALOG.items())
             + '</select><select name="waits"><option value="">anyone</option>'
-            + "".join(f'<option{" selected" if w == waits else ""}>{w}</option>' for w in WAITS)
+            + "".join(f'<option{" selected" if w == waits else ""}>{w}</option>' for w in WAITS + ("over limit",))
             + '</select><button>Filter</button></form>')
 
     head = ('<tr><th>Workflow</th><th class="n">Cases</th><th class="n">Open</th><th class="n">Ben</th>'
-            '<th class="n">Master</th><th class="n">Agent</th><th class="n">Median cycle</th>'
+            '<th class="n">Master</th><th class="n">Agent</th><th class="n">Over limit</th><th class="n">Median cycle</th>'
             '<th class="n">Ben touches / case</th><th>Where cases sit longest</th></tr>')
     body = []
     for r in v["workflows"]:
@@ -133,13 +142,19 @@ def render(v: dict[str, Any], wf: str | None = None, waits: str | None = None) -
                  if r["workflow"] else "untagged")
         body.append(f'<tr><td>{label}{eng}</td><td class="n">{r["cases"]}</td><td class="n">{r["open"]}</td>'
                     f'<td class="n">{r["waits"]["ben"]}</td><td class="n">{r["waits"]["master"]}</td>'
-                    f'<td class="n">{r["waits"]["agent"]}</td><td class="n">{_hours(r["median_cycle_h"])}</td>'
+                    f'<td class="n">{r["waits"]["agent"]}</td><td class="n">{r.get("over") or 0}</td>'
+                    f'<td class="n">{_hours(r["median_cycle_h"])}</td>'
                     f'<td class="n">{r["ben_touches"] if r["ben_touches"] is not None else "—"}</td>'
                     f'<td>{stalls}</td></tr>')
     table = (f'<div class="card"><h2>By workflow</h2><div class="wrap"><table>{head}{"".join(body)}'
              '</table></div></div>')
 
-    shown = [c for c in v["open"] if (not wf or c["workflow"] == wf) and (not waits or c["waits_on"] == waits)]
+    def _wanted(c: dict[str, Any]) -> bool:
+        if waits == "over limit":
+            return bool(c.get("over_h"))
+        return not waits or c["waits_on"] == waits
+
+    shown = [c for c in v["open"] if (not wf or c["workflow"] == wf) and _wanted(c)]
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for c in shown:
         groups[c["workflow"] or ""].append(c)
@@ -149,6 +164,8 @@ def render(v: dict[str, Any], wf: str | None = None, waits: str | None = None) -
             f'<li data-since="{int(c["step_at"] or c["created_at"])}"><b>{esc(c["client"] or "—")}</b> · '
             f'{_task_link(c["root_task_id"], c["title"])} · at <b>{esc(c["step_name"])}</b> '
             f'{_hours(c["age_h"])}, waits on <b>{esc(c["waits_on"] or "—")}</b>'
+            + (f' <b class="over" style="color:#c0392b">over limit by {_hours(c["over_h"])}</b>'
+               f' <span class="muted">(limit {_hours(c["limit_h"])} business)</span>' if c.get("over_h") else "")
             + (f' <span class="muted">{c["ben_touches"]} Ben loose end(s)</span>' if c["ben_touches"] else "")
             + f' <span class="muted"><code>{esc(c["id"])}</code></span></li>'
             for c in groups[code])

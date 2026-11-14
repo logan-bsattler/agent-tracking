@@ -11,7 +11,10 @@
       "who": "code",
       "kinds": [],
       "gate": "triage or meeting",
-      "next": "master tasks an investigation"
+      "next": "master tasks an investigation",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "answer",
@@ -23,7 +26,10 @@
         "data_pull"
       ],
       "gate": "result validates",
-      "next": "answer lands"
+      "next": "answer lands",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "reply",
@@ -35,7 +41,10 @@
         "code_change"
       ],
       "gate": "nothing sends",
-      "next": "draft lands"
+      "next": "draft lands",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "ben",
@@ -43,7 +52,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 2
+      }
     }
   ]
 }

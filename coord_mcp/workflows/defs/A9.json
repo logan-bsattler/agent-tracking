@@ -12,7 +12,10 @@
       "who": "code",
       "kinds": [],
       "gate": "transcript import",
-      "next": "intent proposed"
+      "next": "intent proposed",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "work",
@@ -25,7 +28,10 @@
         "data_pull"
       ],
       "gate": "master routes it",
-      "next": "result lands"
+      "next": "result lands",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "reply",
@@ -35,7 +41,10 @@
         "draft_reply"
       ],
       "gate": "nothing sends",
-      "next": "draft lands"
+      "next": "draft lands",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "ben",
@@ -43,7 +52,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends or presents",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 2
+      }
     }
   ]
 }

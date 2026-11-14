@@ -12,7 +12,10 @@
       "who": "code",
       "kinds": [],
       "gate": "triage",
-      "next": "commitments add"
+      "next": "commitments add",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "link",
@@ -26,7 +29,10 @@
         "data_pull"
       ],
       "gate": "a task that does the work",
-      "next": "work lands"
+      "next": "work lands",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "deliver",
@@ -34,7 +40,11 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben delivers",
-      "next": "commitments close on evidence"
+      "next": "commitments close on evidence",
+      "sla": {
+        "business_days": 2,
+        "why": "an undated promise is due two working days after it was made; a dated commitment's own due date governs on /commitments"
+      }
     }
   ]
 }

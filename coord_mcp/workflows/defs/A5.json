@@ -11,7 +11,10 @@
       "who": "code",
       "kinds": [],
       "gate": "triage proposes the intent",
-      "next": "master tasks a read"
+      "next": "master tasks a read",
+      "sla": {
+        "business_hours": 4
+      }
     },
     {
       "key": "read",
@@ -22,7 +25,10 @@
         "data_pull"
       ],
       "gate": "result validates",
-      "next": "result names the findings document"
+      "next": "result names the findings document",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "findings",
@@ -34,6 +40,9 @@
       ],
       "gate": "HTML or the Logan format; never Markdown",
       "next": "document lands",
+      "sla": {
+        "business_days": 2
+      },
       "spawn": {
         "on": "client_follow_up",
         "kind": "deliverable",
@@ -62,7 +71,10 @@
         "dod_review"
       ],
       "gate": "checklist for the deliverable type",
-      "next": "approve"
+      "next": "approve",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "ben",
@@ -70,7 +82,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Promote on /deliverables",
-      "next": "Ben promotes"
+      "next": "Ben promotes",
+      "sla": {
+        "business_days": 2
+      }
     },
     {
       "key": "reply",
@@ -81,7 +96,10 @@
         "deliverable"
       ],
       "gate": "nothing sends or posts",
-      "next": "draft lands"
+      "next": "draft lands",
+      "sla": {
+        "business_days": 1
+      }
     },
     {
       "key": "send",
@@ -89,7 +107,10 @@
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends or pastes",
-      "next": "case done"
+      "next": "case done",
+      "sla": {
+        "business_days": 1
+      }
     }
   ]
 }
