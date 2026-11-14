@@ -58,7 +58,7 @@ def test_report_settles_only_on_a_ruling_and_apply_is_switched(db, monkeypatch, 
 
     out = tmp_path / "p.html"
     assert cli.main(["precedent", "--db", str(path), "--out", str(out)]) == 0
-    assert "openpyxl" in out.read_text(encoding="utf-8")
+    assert "Workbook rows" in out.read_text(encoding="utf-8")
 
     monkeypatch.setenv("COORD_WORKFLOW_PRECEDENT", "1")
     done = pc.apply(c, rep)
@@ -68,3 +68,67 @@ def test_report_settles_only_on_a_ruling_and_apply_is_switched(db, monkeypatch, 
     st = c.execute("SELECT statement, because FROM decisions WHERE id=?", (r["resolved_by"],)).fetchone()
     assert dec in st["statement"] and "Ben may override" in st["because"]
     assert pc.apply(c, rep) == []
+
+
+def _xlsx(path, sheets):
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for title, rows in sheets.items():
+        ws = wb.create_sheet(title)
+        for r in rows:
+            ws.append(r)
+    wb.save(path)
+
+
+def test_workbook_rows_counts_past_rulings_and_apply_leaves_workbooks_alone(db, monkeypatch, tmp_path):
+    path, c = db
+    work = tmp_path / "docs" / "MAG" / "work"
+    work.mkdir(parents=True)
+    target = work / "MAG-Keeper-List-DRAFT-20261112-r2.xlsx"
+    _xlsx(target, {"Read me": [["DRAFT"]],
+                   "Keeper - Ben to rule (3)": [["FDD #", "Title", "Consultant"],
+                                                ["826", "FDD-O2S-826 SO flags", "Lou"],
+                                                ["#900", "FDD-P2F-900 thing", "Dave"],
+                                                ["901", "FDD-P2F-901 other", "Dave"]],
+                   "Flagged (1)": [["FDD #", "Title", "Consultant"], ["5", "x", "y"]]})
+    _xlsx(work / "MAG-Old-Rulings-20261020.xlsx", {"Rulings": [["Tracker ID", "Title", "Ben's ruling"],
+                                                                ["900", "t", "Keep"], ["901", "t", "Open"]]})
+    _xlsx(work / "MAG-Client-20261020.xlsx", {"P": [["Tracker ID", "Title", "Client decision source"],
+                                                     ["901", "t", "client workbook"]]})
+    _xlsx(work / "MAG-Old-Rulings-20261020.bak-1.xlsx", {"Rulings": [["Tracker ID", "T", "Ruling"], ["901", "t", "Keep"]]})
+    store.record_decision(c, "Ben: keep FDD-O2S-826 as a keeper", because="Ben")
+    store.record_decision(c, "Proceed on master default for FDD 901: cancel", because="master default; Ben may override")
+    le = _ben(c, "MAG", f"Rule the 3 keepers in work/{target.name} and work/missing.xlsx")
+
+    rep = pc.report(c, rows_root=tmp_path / "docs")
+    wb = rep["workbooks"]
+    f = {x["file"]: x for x in wb["files"]}
+    hit = f[f"work/{target.name}"]
+    assert hit["follow_up"] == le and hit["sheets"] == ["Keeper - Ben to rule (3)"]
+    assert (hit["open_rows"], hit["by_decision"], hit["by_workbook"], hit["unruled"]) == (3, 1, 1, 1)
+    assert {x["key"] for x in hit["examples"]} == {"FDD 826", "FDD 900"}
+    assert f["work/missing.xlsx"]["status"] == "not found"
+    assert wb["totals"]["loose_ends"] == 1 and wb["totals"]["open_rows"] == 3
+
+    out = tmp_path / "p.html"
+    pc.write_report(rep, out)
+    assert "Workbook rows" in out.read_text(encoding="utf-8")
+
+    before = {p: p.stat().st_mtime_ns for p in work.iterdir()}
+    monkeypatch.setenv("COORD_WORKFLOW_PRECEDENT", "1")
+    pc.apply(c, rep)
+    assert {p: p.stat().st_mtime_ns for p in work.iterdir()} == before
+    assert c.execute("SELECT state FROM follow_ups WHERE id=?", (le,)).fetchone()["state"] == "open"
+
+
+def test_workbook_rows_status_ruling_and_single_sheet(tmp_path):
+    from coord_mcp.workflows import workbook_rows as wr
+    a = tmp_path / "a.xlsx"
+    _xlsx(a, {"Summary": [["#", "Integration", "Now"]],
+              "Fields": [["Integration", "Field / group", "Status"], ["E80", "ADP-E80-04 Transfer", "Ruling"],
+                         ["E80", "ADP-E80-05 Other", "Open"]]})
+    assert wr.open_rows(a) == (["ADP-E80-04"], ["Fields (Status=Ruling)"])
+    b = tmp_path / "b.xlsx"
+    _xlsx(b, {"Eliminated": [["112 rows"], ["Program", "Source", "Action"], ["xxgldab.p", "SE", "Keep"]]})
+    assert wr.open_rows(b) == (["xxgldab.p"], ["Eliminated"])

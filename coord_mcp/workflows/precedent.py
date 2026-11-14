@@ -22,8 +22,12 @@ Ben may override", citing the precedent's decision) and resolves the loose
 end with it. A "tasked" precedent would mean creating work in Ben's name, so
 it is reported and never applied.
 
-Workbook rows (the per-row rulings files under a client's work/) are not
-read: openpyxl is not a declared dependency of coord-mcp.
+Workbook rows: an open Ben loose end that names a workbook ("Rule on the
+rows in work/X.xlsx") is a batch of rulings. The report reads it with
+openpyxl (workbook_rows.py) and counts its rows waiting on a ruling, and how
+many a past ruling covers: a Ben decision naming the row's key, or a settled
+ruling column for the same key in another workbook of the client's work/.
+Counts only: apply never reads or edits a workbook.
 """
 
 from __future__ import annotations
@@ -94,15 +98,18 @@ def precedents(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return out
 
 
-def report(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Read-only: every open Ben loose end and what precedent says about it."""
+def report(conn: sqlite3.Connection, rows_root: Path | None = None) -> dict[str, Any]:
+    """Read-only: every open Ben loose end and what precedent says about it,
+    plus the workbook rows those loose ends point at (under rows_root, default
+    the clients' Documents folder)."""
     pool = defaultdict(list)
     for p in precedents(conn):
         pool[p["client"]].append(p)
-    rows, tally, by_client = [], Counter(), defaultdict(Counter)
+    rows, tally, by_client, open_les = [], Counter(), defaultdict(Counter), []
     for r in conn.execute(f"""SELECT f.id, f.what, f.created_at, f.task_id, {_client_expr()} AS client
                               FROM follow_ups f LEFT JOIN tasks t ON t.id=f.task_id
                               WHERE lower(trim(f.who))='ben' AND f.state='open' ORDER BY f.created_at"""):
+        open_les.append({"id": r["id"], "client": r["client"], "what": r["what"]})
         sh = shape(r["what"], r["client"])
         hits = sorted(((s, p) for p in pool.get(r["client"], [])
                        for s in [_sim(sh, p["shape"])] if s >= MATCH), key=lambda x: -x[0])
@@ -117,9 +124,13 @@ def report(conn: sqlite3.Connection) -> dict[str, Any]:
                          "score": round(s, 2), "matches": len(hits), "precedent": p["id"],
                          "precedent_what": p["what"], "outcome": p["state"], "cite": p["resolved_by"],
                          "statement": p.get("statement")})
+    from . import workbook_rows as wr
+    if rows_root is None:
+        from ..store import DOCS_ROOT as rows_root
     return {"as_of": int(time.time()), "open": sum(tally.values()), "tally": dict(tally),
             "by_client": {k: dict(v) for k, v in sorted(by_client.items())}, "rows": rows,
-            "pool": sum(len(v) for v in pool.values()), "match": MATCH, "bulk": BULK}
+            "pool": sum(len(v) for v in pool.values()), "match": MATCH, "bulk": BULK,
+            "workbooks": wr.scan(conn, open_les, Path(rows_root))}
 
 
 def apply(conn: sqlite3.Connection, rep: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -163,6 +174,15 @@ def write_report(rep: dict[str, Any], out: Path) -> None:
         f'<td>{e(r["what"][:220])}</td><td>{e(r["precedent_what"][:220])}</td>'
         f'<td><code>{e(r["cite"] or "")}</code> {e((r["statement"] or "")[:160])}</td></tr>'
         for r in sorted(rep["rows"], key=lambda r: (r["verdict"], -r["score"]))[:300])
+    wb = rep.get("workbooks") or {"totals": {}, "files": []}
+    wt = {k: 0 for k in ("loose_ends", "files_read", "open_rows", "by_decision", "by_workbook", "unruled")}
+    wt.update(wb["totals"])
+    wbrows = "".join(
+        f'<tr><td><code>{e(f["follow_up"])}</code></td><td>{e(f["client"] or "—")}</td><td>{e(f["file"])}</td>'
+        f'<td>{e(f["status"])}</td><td>{e("; ".join(f["sheets"]))}</td><td class="n">{f["open_rows"]}</td>'
+        f'<td class="n">{f["by_decision"]}</td><td class="n">{f["by_workbook"]}</td><td class="n">{f["unruled"]}</td>'
+        f'<td>{e(", ".join(x["key"] + " (" + x["cite"] + ")" for x in f["examples"]))}</td></tr>'
+        for f in wb["files"])
     doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Precedent report</title>
 <style>
@@ -194,8 +214,17 @@ A precedent is an earlier Ben loose end for the same client that was ruled: drop
 at {rep["match"]} word overlap or more. {rep["pool"]} past rulings qualify as precedent.</p>
 <p>Apply would act only on the <b>decided, no work</b> column: one decision per loose end, "precedent; Ben may
 override", citing the earlier decision. "Task it" rows would create work in Ben's name, so they are reported only.</p>
-<p>Not covered: the per-row rulings inside workbooks under a client's <code>work/</code> (mostly MAG). Reading them
-needs openpyxl, which coord-mcp does not declare as a dependency.</p>
+<h2>Workbook rows</h2>
+<p>{wt["loose_ends"]} open Ben loose ends name a workbook. {wt["files_read"]} were read; their sheets asking for a
+ruling ("Ben to rule", "Awaiting ruling", "QAD to confirm", rows with Status=Ruling, or a workbook's only data sheet)
+hold <b>{wt["open_rows"]}</b> rows. A past ruling covers <b>{wt["by_decision"] + wt["by_workbook"]}</b> of them:
+{wt["by_decision"]} by a Ben decision naming the row (FDD or tracker number, ADP/IF item, program), {wt["by_workbook"]}
+by a settled ruling column for the same row in another workbook of the client's <code>work/</code>. {wt["unruled"]}
+have none. Counts only: apply never reads or edits a workbook, and a matched row is a pointer for Ben, not a
+settlement (a row's ruling can turn on context the key does not carry).</p>
+<div class="wrap"><table><tr><th>Loose end</th><th>Client</th><th>Workbook</th><th>Read</th><th>Sheets</th>
+<th class="n">Rows</th><th class="n">By decision</th><th class="n">By workbook</th><th class="n">None</th>
+<th>Examples</th></tr>{wbrows}</table></div>
 <h2>By client</h2>
 <div class="wrap"><table><tr><th>Client</th><th class="n">Decided, no work</th><th class="n">Task it</th>
 <th class="n">Conflicting</th><th class="n">None</th></tr>{clients}</table></div>
