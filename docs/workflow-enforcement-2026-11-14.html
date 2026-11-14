@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workflow Enforcement</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--muted:#5d6675;--line:#dde2ea;--card:#f5f7fa;--accent:#2457a6}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#14171c;--fg:#e4e8ee;--muted:#9aa3b0;--line:#2c323b;--card:#1b1f26;--accent:#7aa7ec}}
+:root[data-theme=dark]{--bg:#14171c;--fg:#e4e8ee;--muted:#9aa3b0;--line:#2c323b;--card:#1b1f26;--accent:#7aa7ec}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,sans-serif;margin:0 auto;max-width:900px;padding:24px 16px}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:26px 0 8px}.muted{color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:14px;display:block;overflow-x:auto}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{background:var(--card)}
+.bluf{background:var(--card);border-left:4px solid var(--accent);padding:10px 14px;border-radius:4px}code{font-size:13px}
+</style>
+</head>
+<body>
+<h1>Workflow enforcement: summary 2026-11-14</h1>
+<p class="muted">coord-mcp · Ben's three pieces: step time limits, engine on, case-step checks · commits 65a1dd4, 049c320</p>
+
+<div class="bluf"><b>All three pieces are live.</b> Cases now have step time limits the minder chases. The workflow
+engine is on and creates the next step's task when a result lands. Creating or closing a task that skips a step or
+splits a case returns a warning. Nothing sends email, posts to Teams or changes SharePoint. The engine creates
+drafts and internal tasks only, and master still dispatches them. Ben has one open call: whether an engine draft
+should wait when the client loose end for that reply is deferred (below).</div>
+
+<h2>What is live</h2>
+<table>
+<tr><th>Piece</th><th>What it does</th><th>Switch</th></tr>
+<tr><td>1. Step time limits</td><td>Every workflow step has a business-hours or business-days limit. Past it, the
+minder lists "cases past step limit for master" or "… for Ben". /workflows shows an Over-limit column. Only cases that
+went over after the start mark (13:31 today) are listed, so the 149-case backlog does not flood the minder.</td>
+<td><code>COORD_WORKFLOW_SLA</code> (on)</td></tr>
+<tr><td>2. Engine on</td><td>When a step lands, the engine creates the next step's task for workflows marked
+<code>engine</code> (A1, A3, A4, A5, B1, B3), with parent, case and a "Workflow engine:" decision. It never
+dispatches, never creates a check-in or promotion, and stops at Ben's steps and at outward or default-less holds.
+It acts only on results that land after its start mark (13:31 today), so turning it on swept up nothing.</td>
+<td><code>COORD_WORKFLOW_ENGINE=1</code> in the "Coord Usage Dashboard" scheduled task</td></tr>
+<tr><td>3. Case-step checks</td><td><code>coord_create_task</code> / <code>coord_complete_task</code> warn when a root
+task looks like a step of an open case of the same workflow for the same client (same intent, same pipeline item,
+or a near-identical title with the same dates), or when its step skips an agent step that has not happened (a reply
+before the fix). Spec <code>case_id</code> attaches a task to a case at create, and
+<code>python -m coord_mcp.workflows attach &lt;task&gt; &lt;case&gt;</code> fixes a stray task afterwards. Replayed on
+the last 30 days, it gives about 3 warnings a week.</td><td><code>python -m coord_mcp.queue switch case_checks on|off</code> (on)</td></tr>
+</table>
+
+<h2>Engine dry runs before switching on</h2>
+<ul>
+<li>72-hour window: nothing.</li>
+<li>60-day window: one case. Royal #231 (case 1174b7ac88d8) would get its reply drafted after status read
+3af628c85705, past hold <code>70dab9ac6902</code>. Fix 6 allows this on purpose under <code>hold_rule</code>: it
+drafts on "Revise once more", and Outlook stays gated while Ben's round-3 question is open. The result predates
+the engine's start mark, so it will never fire live.</li>
+</ul>
+
+<h2>What needed a restart</h2>
+<ul>
+<li>Dashboard: restarted (Stop/Start-ScheduledTask) after the commit. /board and /workflows load, and /workflows
+reads "Engine on". The task's original definition is backed up at
+<code>C:\development\agents\coord-usage-dashboard-task.bak-20261114.xml</code>.</li>
+<li>Coord MCP servers in agent sessions: the case-step warnings take effect when each session restarts. Older
+sessions simply give no warnings.</li>
+<li>Master's <code>CLAUDE.md</code>: added a "Workflow cases and the engine" section under Dispatching. Master
+dispatches engine-created tasks (spec <code>created_by: workflow engine</code>) like its own, never creates a second
+task for the same step, acts on case warnings, and handles the two step-limit minder lines. Backup:
+<code>CLAUDE.md.bak-20261114-engine</code>.</li>
+</ul>
+
+<h2>For Ben to decide</h2>
+<ul>
+<li><b>Deferred reply loose ends.</b> The A1 engine drafts a reply as soon as the status read lands. It does not
+check whether master deferred the client's "reply once X" loose end, as with Royal #231's e390ca8b4892. Today only
+a hold decision stops the engine. Option: the engine also stops when the case has a deferred client loose end
+asking for the same reply. Recommended: yes, it is cheap and errs toward waiting.</li>
+<li>Whether to clear the step-limit backlog: 149 open cases are past their limit (135 waiting on Ben). The minder
+ignores them by design, and /workflows "over limit" lists them.</li>
+</ul>
+
+<h2>Known test flake</h2>
+<p>In the full suite, a different time-sensitive test fails on each run (minder back-off, operator view, dashboard
+routes). Each passes when run alone. Excluding the minder file, 596 tests pass, and the minder file passes 38/38 on
+its own. The smoke test passes. None of these tests touch this change.</p>
+</body>
+</html>
