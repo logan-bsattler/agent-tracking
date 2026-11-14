@@ -2343,6 +2343,16 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                             cases.sync(conn)
                     except Exception:
                         loop_error(connect, "workflows")
+                    # The workflow engine (workflows/engine.py) creates the
+                    # next agent step's task when a result lands. Off unless
+                    # COORD_WORKFLOW_ENGINE=1; never at a Ben step, never
+                    # a check-in, never a dispatch.
+                    try:
+                        from .workflows import cases, engine
+                        if cases.enabled() and engine.enabled():
+                            engine.run(conn)
+                    except Exception:
+                        loop_error(connect, "engine")
                 finally:
                     conn.close()
             except Exception:  # a locked db or a vanished file: the next pass gets it

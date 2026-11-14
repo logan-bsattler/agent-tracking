@@ -93,6 +93,11 @@ def overview(conn: sqlite3.Connection, t: int | None = None) -> dict[str, Any]:
                        "waits": {w: sum(1 for c in open_cases if c["waits_on"] == w) for w in WAITS}}}
 
 
+def _engine_on() -> bool:
+    from .engine import enabled
+    return enabled()
+
+
 def _hours(h: float | None) -> str:
     if h is None:
         return "—"
@@ -104,7 +109,9 @@ def render(v: dict[str, Any], wf: str | None = None, waits: str | None = None) -
     tot = v["totals"]
     sub = (f'{tot["open"]} open of {tot["cases"]} cases: {tot["waits"]["ben"]} wait on Ben, '
            f'{tot["waits"]["master"]} on master, {tot["waits"]["agent"]} on an agent. Read-only; '
-           'the dashboard loop re-derives each case from the board.')
+           'the dashboard loop re-derives each case from the board. Engine '
+           + ('<b>on</b> (COORD_WORKFLOW_ENGINE=1)' if _engine_on() else 'off')
+           + '.')
     filt = ('<form method="get" action="/workflows" class="btns"><select name="wf"><option value="">all workflows</option>'
             + "".join(f'<option value="{c}"{" selected" if c == wf else ""}>{c} {esc(n)}</option>'
                       for c, (n, _) in CATALOG.items())

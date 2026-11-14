@@ -4,6 +4,7 @@
   backfill [--db PATH]                     put every past task in a case (writes the case tables only)
   cases [--db PATH] [--open] [--workflow X] [--json]   list cases and where each stands (read-only)
   case <id> [--db PATH]                    one case with its tasks, decisions and events, as JSON
+  engine --dry-run [--db PATH]             what the engine would create now (writes nothing)
 """
 
 from __future__ import annotations
@@ -34,7 +35,22 @@ def main(argv: list[str] | None = None) -> int:
     one = sub.add_parser("case", help="one case as JSON")
     one.add_argument("id")
     one.add_argument("--db")
+    e = sub.add_parser("engine", help="what the workflow engine would do now")
+    e.add_argument("--db")
+    e.add_argument("--dry-run", action="store_true", required=True,
+                   help="required: the engine itself runs only in the dashboard, behind COORD_WORKFLOW_ENGINE=1")
     a = ap.parse_args(argv)
+
+    if a.cmd == "engine":
+        from ..db import connect
+        from . import cases as cs, engine
+        conn = connect(a.db) if a.db else connect()
+        try:
+            cs.sync(conn)
+            print(json.dumps(engine.run(conn, dry_run=True), indent=1))
+        finally:
+            conn.close()
+        return 0
 
     if a.cmd in ("backfill", "cases", "case"):
         from ..db import connect
