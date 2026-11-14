@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Workflow miner</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--mute:#6b6a64;--line:#e4e1d8;--card:#fff;--acc:#2f5d8a}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#17181a;--fg:#e9e7e1;--mute:#a09d94;--line:#2c2d30;--card:#1f2023;--acc:#8db7e0}}
+:root[data-theme=dark]{--bg:#17181a;--fg:#e9e7e1;--mute:#a09d94;--line:#2c2d30;--card:#1f2023;--acc:#8db7e0}
+body{background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;margin:0}
+main{max-width:920px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:28px 0 8px}.sub{color:var(--mute);margin:0 0 18px}
+table{border-collapse:collapse;width:100%;background:var(--card);font-size:13.5px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mute)}
+.wrap{overflow-x:auto}code{font-size:12.5px}li{margin:4px 0}.mute{color:var(--mute)}
+</style></head><body><main>
+<h1>Weekly workflow miner</h1>
+<p class="sub">Internal, 2026-11-14. How new and drifting workflows reach the catalog without someone hand-writing a definition.</p>
+
+<h2>Bottom line</h2>
+<p>The miner is live. Every Monday at 06:30 the dashboard drafts new or changed workflow definitions from the last
+90 days of the board, and puts at most 3 approval items a week in Ben's queue. Ben approves with one click on
+<code>/workflows/proposed/&lt;id&gt;</code> (or by answering "approve" on /queue), and the definition is adopted,
+recorded and backfilled. The first run will file 3 items (the B1, A1 and C3 changes below), on Monday 2026-11-16.</p>
+
+<h2>What it finds</h2>
+<ul>
+<li><b>New workflows:</b> 5 or more untagged cases or intents with one title pattern. None today: every case tags.</li>
+<li><b>A step the definition lacks:</b> a task kind no step takes, in 5 or more cases. Proposed as an optional step.</li>
+<li><b>A skipped step:</b> an agent step 60% or more of finished cases went past without (5 or more). Proposed as optional.</li>
+<li><b>A stall:</b> 5 or more open cases past a step's limit, where cases that left the step took longer than the limit. Proposed as a refitted limit.</li>
+</ul>
+<p>All drift for one workflow is one proposal, so Ben sees one item per workflow, not one per finding.</p>
+
+<h2>Dry run on the live board</h2>
+<div class="wrap"><table>
+<tr><th>Proposal</th><th>Workflow</th><th>Cases</th><th>Why</th><th>Filed Monday?</th></tr>
+<tr><td><code>B1-2b6573</code></td><td>FDD or requirement to production</td><td>19</td><td>8 cases had a draft reply no step takes; 8 of 13 finished cases skipped Sizing; 6 of 6 skipped Check-in</td><td>yes</td></tr>
+<tr><td><code>A1-545a70</code></td><td>Status request</td><td>13</td><td>13 cases grew a code change no step takes</td><td>yes</td></tr>
+<tr><td><code>C3-cbacbd</code></td><td>Running analysis</td><td>9</td><td>9 cases had a draft reply no step takes</td><td>yes</td></tr>
+<tr><td><code>A4-b0f5aa</code></td><td>Promotion ask</td><td>8</td><td>8 of 8 skipped "CVC ticket moves"; 6 of 7 skipped "Confirm install"</td><td>next week (cap of 3)</td></tr>
+</table></div>
+<p class="mute">The B1 "skipped Check-in" finding probably means check-ins happen outside the board, not that they are skipped. Ben should read it that way before approving.</p>
+
+<h2>Commands</h2>
+<ul>
+<li><code>python -m coord_mcp.workflows propose</code>: dry run. Prints the findings and what it would file. Writes nothing.</li>
+<li><code>python -m coord_mcp.workflows propose --file</code>: writes drafts to <code>coord_mcp/workflows/proposed/</code> (gitignored) and files Ben items.</li>
+<li><code>python -m coord_mcp.workflows adopt &lt;id&gt;</code> and <code>reject &lt;id&gt; [--defer]</code>: the id is the proposal's id or its Ben item's follow-up id.</li>
+</ul>
+
+<h2>Ben's answers</h2>
+<ul>
+<li><b>Approve</b> (page button, or a /queue answer starting "approve", "yes" or "adopt"): writes <code>defs/&lt;code&gt;.json</code>, records "Adopted workflow …", resolves the item and re-derives the workflow's cases. A new workflow lands with the engine off. A change keeps the workflow's engine setting, and an added step never spawns.</li>
+<li><b>Reject</b> or <b>Defer</b> (button, /queue Drop or Defer, or an answer starting "reject"/"drop"/"no" or "defer"/"later"): closes or defers the item. That proposal is never filed again. One left 14 days is auto-deferred by queue expiry and is also not refiled.</li>
+<li>Any other answer goes to master as before.</li>
+</ul>
+
+<h2>Switches</h2>
+<ul>
+<li><code>workflow_propose</code> (on): the weekly run. <code>python -m coord_mcp.queue switch workflow_propose off</code> stops it.</li>
+<li>The run is stored in <code>meta</code> as <code>workflow_propose_week</code>, so it fires once per ISO week. It runs on the first dashboard pass at or after Monday 06:30, so it still catches up if the dashboard was down on Monday morning.</li>
+</ul>
+
+<h2>Schema and restarts</h2>
+<ul>
+<li>All changes are additive. The new table <code>workflow_proposals</code> is created on first use, with no SCHEMA_VERSION bump. Definitions can now carry an optional <code>optional</code> step flag and a <code>tag</code> rule, and the tag rules of adopted workflows run after the built-in ones. No contract changes.</li>
+<li><b>Dashboard:</b> needs a restart to serve <code>/workflows/proposed</code> and run the weekly loop (Stop-ScheduledTask / Start-ScheduledTask 'Coord Usage Dashboard', keeping COORD_WORKFLOW_ENGINE=1). Not yet done; see the handover.</li>
+<li><b>MCP servers</b> (master, desk and the client sessions): no restart needed. The definitions loader re-reads when the defs folder changes, and new code from this change is only used by the dashboard and the CLI.</li>
+<li>An adopted definition is written into the repo's <code>defs/</code> folder. The next maintainer commit should include it (<code>git add coord_mcp/workflows/defs</code>).</li>
+</ul>
+
+<h2>What Ben must decide</h2>
+<ul>
+<li>The three items on Monday: approve, defer or reject each.</li>
+<li>Whether to add one line to master's CLAUDE.md, so that a button answer ("Answer on …: Approve") on a workflow item runs <code>python -m coord_mcp.workflows adopt &lt;id&gt;</code>. /queue answers and the page buttons already do this in code. Not added here: another session was editing that file.</li>
+</ul>
+</main></body></html>

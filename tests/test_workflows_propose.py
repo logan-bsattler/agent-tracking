@@ -187,3 +187,15 @@ def test_proposal_page_renders(c):
     assert "Workflow proposals" in pp.render(c, None)
     assert pp.render(c, "nope") is None
     _ = time
+
+
+@pytest.mark.parametrize("code,after", [("A1", "status_read"), ("A3", "investigate"), ("A5", "read")])
+def test_drift_insert_keeps_each_spawn_waiting_on_the_same_step(code, after):
+    # An inserted optional step must not become what an engine spawn waits on.
+    def waits(d):
+        st = d["steps"]
+        return {s["key"]: s["spawn"].get("after") or st[j - 1]["key"] for j, s in enumerate(st) if s.get("spawn")}
+    before = waits(defs.get(code))
+    d = pp._draft_change(code, [{"type": "lacks", "kind": "data_pull", "after": after, "secs": []}])
+    assert waits(d) == before
+    assert defs.validate(d) == []

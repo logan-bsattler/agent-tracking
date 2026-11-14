@@ -298,6 +298,12 @@ def _draft_new(f: dict[str, Any], conn: sqlite3.Connection, taken: set[str]) -> 
 
 def _draft_change(code: str, fs: list[dict[str, Any]]) -> dict[str, Any]:
     d = json.loads(json.dumps(defs.get(code)))
+    # A spawn without `after` waits on the step just before it. Pin each one
+    # to that step now, so a step inserted below cannot become what it waits
+    # on (an optional step most cases skip would stop the engine silently).
+    for j, st in enumerate(d["steps"]):
+        if st.get("spawn") and not st["spawn"].get("after") and j > 0:
+            st["spawn"]["after"] = d["steps"][j - 1]["key"]
     notes = []
     for f in fs:
         keys = [s["key"] for s in d["steps"]]

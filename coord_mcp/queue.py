@@ -273,6 +273,16 @@ def apply(conn: sqlite3.Connection, action: str, ids: list[str],
         if ret:
             out["return_on"] = defer_mod.day(ret)
         return out
+    # A workflow proposal's approve / reject / defer is applied here, in
+    # code (workflows/propose.answer); anything else goes to master.
+    from .workflows import propose
+    handled = []
+    for i in list(ids):
+        if len(answers[i]) <= ANSWER_MAX and propose.answer(conn, i, answers[i]) is not None:
+            handled.append(i)
+            ids.remove(i)
+    if not ids:
+        return {"ok": True, "action": action, "count": len(handled), "proposals": handled}
     lines = []
     for i in ids:
         a = answers[i]
@@ -381,6 +391,9 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
 #   defer_return    the dashboard reopens a deferred loose end on its return
 #                   date (coord_mcp/defer.py); dates are still recorded
 #                   when it is off.                                       (on)
+#   workflow_propose the dashboard runs `python -m coord_mcp.workflows propose
+#                   --file` once a week, Monday 06:30 local: up to 3
+#                   workflow proposals in Ben's queue.                  (on)
 
 REASONS = ("send", "approve", "scope", "access", "judgement")
 SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_wide": True,
@@ -391,7 +404,9 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             "case_checks": True,
             # defer return dates (coord_mcp/defer.py): the dashboard reopens a
             # deferred item on its return date.
-            "defer_return": True}
+            "defer_return": True,
+            # the weekly workflow miner (workflows/propose.py) files its proposals
+            "workflow_propose": True}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (

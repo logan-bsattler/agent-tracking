@@ -528,6 +528,9 @@ def case_hold(conn: sqlite3.Connection, task_ids: list[str], spawn_kind: str) ->
     ids = set(task_ids)
     ids |= {f["id"] for f in conn.execute(
         f"SELECT id FROM follow_ups WHERE task_id IN ({','.join('?' * len(task_ids))})", task_ids)}
+    # Every hold on the case is weighed, and a stop wins: an outward hold
+    # recorded after an internal one must still stop the spawn.
+    passed: dict[str, dict[str, Any]] = {}
     for h in find_holds(conn):
         refs = {w["ref"] for w in h["work"]} | {w.get("task_id") for w in h["work"] if w.get("task_id")}
         if h["task_id"]:
@@ -536,12 +539,17 @@ def case_hold(conn: sqlite3.Connection, task_ids: list[str], spawn_kind: str) ->
         if not refs & ids:
             continue
         if h["verdict"] == "proceed" and spawn_kind != "checkin" and queue.switch(conn, "hold_rule"):
-            return {"proceed": h}
-        if spawn_kind == "draft_reply" and h["facing"] != "outward":
+            passed.setdefault("proceed", h)
+        elif spawn_kind == "draft_reply" and h["facing"] != "outward":
             # Ben 2026-11-14 (engine.REPLY_RULING): drafts never send, so a
             # hold short of the send does not stop the draft.
-            return {"draft": h}
-        return {"stop": f"held by decision {h['decision_id']} ({h['reason']})", "hold": h["decision_id"]}
+            passed.setdefault("draft", h)
+        else:
+            return {"stop": f"held by decision {h['decision_id']} ({h['reason']})", "hold": h["decision_id"]}
+    if "proceed" in passed:
+        return {"proceed": passed["proceed"]}
+    if "draft" in passed:
+        return {"draft": passed["draft"]}
     return None
 
 

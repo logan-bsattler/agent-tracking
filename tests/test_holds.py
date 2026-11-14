@@ -176,3 +176,14 @@ def test_case_hold_stops_on_outward_and_proceeds_on_internal_under_the_rule(conn
     _hold(conn, t2, ben2, work2)
     assert "stop" in holds.case_hold(conn, [t2], "draft_reply")
     assert holds.case_hold(conn, [_task(conn)], "draft_reply") is None
+
+
+def test_case_hold_outward_hold_stops_even_after_an_internal_one(conn):
+    # Both holds sit on one case; the internal one is recorded first. The
+    # outward one must still stop the draft, not be skipped by a first match.
+    queue.set_switch(conn, "hold_rule", False)
+    t, ben, work = _setup(conn)
+    _hold(conn, t, ben, work)
+    out = _fu(conn, t, "Royal", "Send the change list to John")
+    _hold(conn, t, ben, out)
+    assert "stop" in holds.case_hold(conn, [t], "draft_reply")

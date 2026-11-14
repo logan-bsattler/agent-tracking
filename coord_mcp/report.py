@@ -2383,6 +2383,13 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                             engine.run(conn)
                     except Exception:
                         loop_error(connect, "engine")
+                    # The weekly workflow miner (workflows/propose.py): Monday
+                    # 06:30 local, once a week, behind the workflow_propose switch.
+                    try:
+                        from .workflows import propose
+                        propose.weekly(conn)
+                    except Exception:
+                        loop_error(connect, "propose")
                 finally:
                     conn.close()
             except Exception:  # a locked db or a vanished file: the next pass gets it
@@ -2469,6 +2476,23 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         back = "/board"
                     sent = r.get("intent_id") or "1"
                     self.send_header("Location", back + ("&" if "?" in back else "?") + f"queued={sent}")
+                    self.end_headers()
+                    return
+                if path == "/api/workflow-proposal":  # Approve / Defer / Reject on /workflows/proposed/<id>
+                    from .workflows import propose
+                    pid, act = (form.get("id") or [""])[0], (form.get("action") or [""])[0]
+                    try:
+                        if act == "approve":
+                            propose.adopt(conn, pid)
+                        elif act in ("reject", "defer"):
+                            propose.reject(conn, pid, defer=act == "defer")
+                        else:
+                            raise ValueError(f"unknown action {act!r}")
+                    except (KeyError, ValueError) as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    self.send_response(303)
+                    self.send_header("Location", "/workflows/proposed/" + re.sub(r"[^A-Za-z0-9+_-]", "", pid))
                     self.end_headers()
                     return
                 if path == "/api/open":  # a file link on a task or deliverables page
@@ -2749,6 +2773,9 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 from .workflows import briefs
                 b = briefs.brief(conn, unquote(path[len("/brief/"):]), int(time.time()))
                 return briefs.render(b).encode("utf-8") if b else None
+            if path == "/workflows/proposed" or path.startswith("/workflows/proposed/"):
+                from .workflows import propose
+                return (propose.render(conn, path[len("/workflows/proposed/"):] or None) or "").encode("utf-8") or None
             if path == "/workflows":
                 from .workflows import view
                 wf = (self._query.get("wf") or [""])[0].strip() or None

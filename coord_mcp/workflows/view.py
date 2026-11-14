@@ -126,7 +126,8 @@ def render(v: dict[str, Any], wf: str | None = None, waits: str | None = None) -
                       for c, (n, _) in CATALOG.items())
             + '</select><select name="waits"><option value="">anyone</option>'
             + "".join(f'<option{" selected" if w == waits else ""}>{w}</option>' for w in WAITS + ("over limit",))
-            + '</select><button>Filter</button></form>')
+            + '</select><button>Filter</button></form>'
+            + ' <a class="btn" href="/workflows/proposed">Proposals</a>')
 
     head = ('<tr><th>Workflow</th><th class="n">Cases</th><th class="n">Open</th><th class="n">Ben</th>'
             '<th class="n">Master</th><th class="n">Agent</th><th class="n">Over limit</th><th class="n">Median cycle</th>'
