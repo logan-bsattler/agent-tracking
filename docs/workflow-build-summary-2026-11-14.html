@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Workflow build summary</title>
+<style>
+:root { --bg:#fcfcfb; --ink:#111; --muted:#6b6a66; --grid:#e1e0d9; --accent:#2a78d6; --warn:#b4540a; }
+@media (prefers-color-scheme: dark) { :root { --bg:#141413; --ink:#ecebe6; --muted:#9a9890; --grid:#2c2b28; --accent:#6aa5ea; --warn:#f0a35e; } }
+body { background:var(--bg); color:var(--ink); font:15px/1.55 system-ui, sans-serif; margin:0 auto; max-width:920px; padding:28px 16px 48px; }
+h1 { font-size:24px; margin:0 0 4px } h2 { font-size:17px; margin:30px 0 8px; border-bottom:1px solid var(--grid); padding-bottom:4px }
+.muted { color:var(--muted) } .lead { font-size:16px; margin:14px 0 }
+.wrap { overflow-x:auto } table { border-collapse:collapse; width:100%; font-size:14px }
+th,td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--grid); vertical-align:top }
+code { font-size:13px } .on { color:var(--accent); font-weight:600 } .off { color:var(--warn); font-weight:600 }
+ol li, ul li { margin:4px 0 }
+</style>
+</head>
+<body>
+<h1>Workflow build: summary</h1>
+<p class="muted">2026-11-14 · coord-mcp (agent-tracking) · brief approved by Ben, decision 66bbfd41ad66</p>
+
+<p class="lead"><b>All six steps are built, tested and pushed.</b> The read-only pages and case bookkeeping go live
+when the dashboard restarts. The engine and precedent apply are built but <span class="off">off</span>. Ben has four
+decisions to make, listed at the end. Live agents and the coord MCP servers are unaffected.</p>
+
+<h2>What is live after a dashboard restart</h2>
+<ul>
+<li><b>Cases.</b> Every task belongs to a case: one instance of a workflow per trigger, linking intent, tasks,
+decisions, draft and commitment. The dashboard loop keeps each case's step and who it waits on (agent, Ben,
+master) current. On the board as of today: 407 cases, 222 open, with 195 waiting on Ben, 24 on master and 3 on
+an agent.</li>
+<li><b>/workflows</b> (in the nav on /board and every page). For each workflow: cases, who the open ones wait on,
+median cycle time, Ben loose ends per case, and the three steps where cases sit longest. Below that, every open
+case, the one longest at its step first.</li>
+<li><b>/brief/&lt;meeting&gt;</b> and a <b>Meeting briefs, today</b> card on /board. A brief shows the meeting's
+client: open cases, live commitments, drafts not yet in Outlook, questions Ben owes, and what changed since the
+last meeting with that client or organizer. Today the card reads <i>Calendar not imported for today</i>, because
+the last import was 2026-11-13.</li>
+<li><b>Definitions.</b> One JSON file per catalog workflow in <code>coord_mcp/workflows/defs/</code>. Each step
+says who does it, which task kinds carry it, its gate, and what starts the next step. Tests check every file.</li>
+</ul>
+
+<h2>Switches</h2>
+<div class="wrap"><table>
+<tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+<tr><td><code>COORD_WORKFLOW_SYNC</code></td><td class="on">on</td><td>Case bookkeeping in the dashboard loop.
+Writes only the case tables and the two task columns, so nothing an agent or Ben sees changes. Set it to
+<code>0</code> to stop it.</td></tr>
+<tr><td><code>COORD_WORKFLOW_ENGINE</code></td><td class="off">off</td><td>Set it to <code>1</code> and the engine
+creates the next agent step's task when a result lands. It covers status request (A1), defect (A3), promotion ask
+(A4), FDD review (A5), FDD to production (B1) and DEVL refresh recovery (B3). It never creates a task at or past one
+of Ben's steps, or while a Ben loose end is open on the case. It never creates a check-in, and it never dispatches:
+auto-dispatch or master sends what it creates. It never drafts a reply unless there is a client message to answer.
+It ignores results from before it was first switched on. Each task it creates has a decision ("workflow engine;
+Ben may override").</td></tr>
+<tr><td><code>COORD_WORKFLOW_PRECEDENT</code></td><td class="off">off</td><td>Allows
+<code>python -m coord_mcp.workflows precedent --apply</code>. Apply closes a Ben loose end only when an earlier ruling
+of the same shape closed one like it with no work. It records one decision per loose end, citing the earlier
+one.</td></tr>
+</table></div>
+
+<h2>What needs a restart</h2>
+<ul>
+<li><b>The dashboard</b> (the scheduled task on port 8765). It runs the case sync and the engine and serves the new
+pages. On its first pass it adds two tables (<code>workflow_cases</code>, <code>workflow_case_events</code>) and two
+nullable columns on <code>tasks</code> (<code>case_id</code>, <code>case_step</code>), then puts every past task in a
+case. The schema change is additive and does not bump <code>SCHEMA_VERSION</code>. Older servers read tasks with
+<code>SELECT *</code> and insert by column name, so they never see the new columns.</li>
+<li><b>Nothing else.</b> No MCP tool or result contract changed, so the coord MCP servers and the live client and
+master sessions keep running as they are.</li>
+</ul>
+
+<h2>Commands</h2>
+<ul>
+<li><code>python -m coord_mcp.workflows cases --open</code>: list the open cases and where each stands.</li>
+<li><code>python -m coord_mcp.workflows case &lt;id&gt;</code>: one case with its tasks, decisions and events.</li>
+<li><code>python -m coord_mcp.workflows backfill</code>: put every past task in a case. Safe to run again; the
+dashboard does the same on its own.</li>
+<li><code>python -m coord_mcp.workflows engine --dry-run</code>: what the engine would create now. Writes
+nothing.</li>
+<li><code>python -m coord_mcp.workflows precedent</code>: the read-only precedent report.</li>
+</ul>
+
+<h2>What the precedent report found</h2>
+<p>Earlier rulings would settle only <b>3 of Ben's 685</b> open loose ends
+(<code>docs/workflow-precedent-2026-11-14.html</code>). Loosening the match to 0.4 still settles only 24, and most of
+those are the same item raised twice, not a repeat of a ruling. The repeated per-row rulings Ben makes, mostly for
+MAG, are rows inside workbooks under <code>work/</code>, not loose ends. Reading them needs openpyxl, which coord-mcp
+does not declare as a dependency. It happens to be importable on this machine, but nothing here relies on it.</p>
+
+<h2>Known limits</h2>
+<ul>
+<li>Backfill knows only where each past case stands now, not how it got there. Stall points will sharpen as the
+dashboard records step changes from here on.</li>
+<li>Workflows are assigned by rule, so some cases are mis-tagged (analysis work filed as a status request, for
+example). The engine's reply guard keeps a mis-tagged case from producing an email draft.</li>
+<li>Two existing tests each failed once during a slow full run and passed on every rerun:
+<code>test_open_endpoint_opens_only_the_tasks_files</code> and
+<code>test_an_unchanged_list_backs_off_doubling_to_the_cap</code>. The second compares two <code>now()</code> calls
+that can fall in different seconds.</li>
+</ul>
+
+<h2>Decisions for Ben</h2>
+<ol>
+<li><b>Who imports the calendar each morning</b>, so that briefs exist before the first meeting. Options: the
+hourly-triage routine's first morning run calls <code>coord_import_meetings</code>; master does it on its first turn
+of the day; or Ben does it himself. Until one of these is chosen, the board card reads <i>Calendar not
+imported</i>.</li>
+<li><b>Whether to turn the engine on.</b> Run <code>engine --dry-run</code> first. Across the last 60 days it would
+have acted on one case. Turning it on means setting <code>COORD_WORKFLOW_ENGINE=1</code> in the dashboard task's
+environment and restarting the dashboard.</li>
+<li><b>One new line in master's manual</b>, needed if the engine goes on. Engine-created child tasks carry
+<code>created_by: workflow engine</code> in their spec and have a decision on record. Master dispatches them like its
+own tasks and does not create a second task for the same step.</li>
+<li><b>Precedent apply.</b> The recommendation is to leave it off, since it would settle 3 items. The rulings that
+repeat are workbook rows. Reading them would mean adding openpyxl as a dependency and defining the layout of each
+rulings workbook. That is a separate piece of work for Ben to approve or not.</li>
+</ol>
+
+<h2>Commits</h2>
+<p class="muted">fbc0c99 step 1 miner · f29ffaa step 2 definitions and cases · 6ebd660 step 3 /workflows · 843e190 step 4
+engine · c267ea3 step 5 briefs · step 6 precedent and this summary in the commit after these.</p>
+</body>
+</html>

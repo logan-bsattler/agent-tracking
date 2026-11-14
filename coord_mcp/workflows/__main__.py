@@ -5,6 +5,9 @@
   cases [--db PATH] [--open] [--workflow X] [--json]   list cases and where each stands (read-only)
   case <id> [--db PATH]                    one case with its tasks, decisions and events, as JSON
   engine --dry-run [--db PATH]             what the engine would create now (writes nothing)
+  precedent [--db PATH] [--out FILE] [--json] [--apply]
+                                           open Ben loose ends a past ruling would settle (read-only;
+                                           --apply needs COORD_WORKFLOW_PRECEDENT=1)
 """
 
 from __future__ import annotations
@@ -39,7 +42,39 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--db")
     e.add_argument("--dry-run", action="store_true", required=True,
                    help="required: the engine itself runs only in the dashboard, behind COORD_WORKFLOW_ENGINE=1")
+    pr = sub.add_parser("precedent", help="open Ben loose ends a past ruling would settle")
+    pr.add_argument("--db")
+    pr.add_argument("--out", help="HTML report path (default docs/workflow-precedent-<date>.html)")
+    pr.add_argument("--json", action="store_true")
+    pr.add_argument("--apply", action="store_true", help="resolve the 'decided, no work' rows; needs the switch")
     a = ap.parse_args(argv)
+
+    if a.cmd == "precedent":
+        from . import precedent as pc
+        if a.apply:
+            if not pc.enabled():
+                print("refused: COORD_WORKFLOW_PRECEDENT is not 1 (off until Ben has read the report)", file=sys.stderr)
+                return 1
+            from ..db import connect
+            conn = connect(a.db) if a.db else connect()
+            try:
+                print(json.dumps(pc.apply(conn), indent=1))
+            finally:
+                conn.close()
+            return 0
+        from . import mine as mn
+        conn = mn.connect_ro(a.db)
+        try:
+            rep = pc.report(conn)
+        finally:
+            conn.close()
+        if a.json:
+            print(json.dumps(rep, indent=1, default=list))
+            return 0
+        out = Path(a.out) if a.out else DOCS / f"workflow-precedent-{time.strftime('%Y-%m-%d')}.html"
+        pc.write_report(rep, out)
+        print(f"{out}  {rep['open']} open Ben loose ends: {rep['tally']}")
+        return 0
 
     if a.cmd == "engine":
         from ..db import connect
