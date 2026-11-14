@@ -199,3 +199,23 @@ def test_drift_insert_keeps_each_spawn_waiting_on_the_same_step(code, after):
     d = pp._draft_change(code, [{"type": "lacks", "kind": "data_pull", "after": after, "secs": []}])
     assert waits(d) == before
     assert defs.validate(d) == []
+
+
+def test_uncommitted_defs_lists_untracked_and_changed_definitions(tmp_path):
+    import subprocess
+    run = lambda *a: subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True)
+    run("init", "-q")
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    d = tmp_path / "defs"
+    d.mkdir()
+    (d / "A1.json").write_text("{}", encoding="utf-8")
+    run("add", ".")
+    run("commit", "-qm", "x")
+    assert pp.uncommitted_defs(d) == [] and pp.commit_note([]) == ""
+    (d / "A1.json").write_text('{"a": 1}', encoding="utf-8")
+    (d / "C5.json").write_text("{}", encoding="utf-8")
+    (d / "notes.txt").write_text("x", encoding="utf-8")
+    assert pp.uncommitted_defs(d) == ["A1.json", "C5.json"]
+    assert "C5.json" in pp.commit_note(pp.uncommitted_defs(d))
+    assert pp.uncommitted_defs(tmp_path / "nope") == []

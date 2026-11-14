@@ -555,7 +555,8 @@ def adopt(conn: sqlite3.Connection, ref: str, folder: Path | None = None,
     back = backfill(conn, code, p["kind"], ddir)
     (folder or PROPOSED_DIR).joinpath(f"{pid}.json").unlink(missing_ok=True)
     return {"ok": True, "id": pid, "code": code, "path": str(target), "decision_id": dec["decision_id"],
-            "engine": d["engine"], "backfill": back}
+            "engine": d["engine"], "backfill": back,
+            "commit": commit_note([target.name]) if ddir == defs.DEFS_DIR else ""}
 
 
 def backfill(conn: sqlite3.Connection, code: str, kind: str, ddir: Path | None = None) -> dict[str, int]:
@@ -659,11 +660,38 @@ def weekly(conn: sqlite3.Connection, t: float | None = None) -> dict[str, Any] |
 
 # ------------------------------------------------------------------ page
 
+def uncommitted_defs(ddir: Path | None = None) -> list[str]:
+    """Definition files git does not have as they stand: adopt() writes into
+    defs/ and goes live at once, but nothing commits it (Ben, 2026-11-14:
+    remind instead). Empty when git is missing or the folder is clean."""
+    import subprocess
+    d = Path(ddir or defs.DEFS_DIR)
+    try:
+        out = subprocess.run(["git", "status", "--porcelain", "--", "."], cwd=d, capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    return sorted(Path(ln[3:].strip().strip('"')).name for ln in out.stdout.splitlines()
+                  if ln[3:].strip().strip('"').endswith(".json"))
+
+
+def commit_note(files: list[str]) -> str:
+    """The reminder /workflows/proposed shows while adopted definitions are uncommitted."""
+    if not files:
+        return ""
+    return ("Adopted definitions not yet in git: " + ", ".join(files) + ". They are live already; commit them "
+            "from agent-tracking: git add coord_mcp/workflows/defs and commit, then pull --rebase and push.")
+
+
 def render(conn: sqlite3.Connection, pid: str | None) -> str | None:
     """/workflows/proposed and /workflows/proposed/<id>."""
     from ..report import _task_link, esc, page
     ensure(conn)
     if not pid:
+        note = commit_note(uncommitted_defs())
+        note = f'<div class="card note"><b>Commit needed.</b> {esc(note)}</div>' if note else ""
         rows = list_proposals()
         items = "".join(
             f'<li><a href="/workflows/proposed/{esc(p["id"])}"><b>{esc(p["id"])}</b> {esc(p["name"])}</a> · '
@@ -672,7 +700,7 @@ def render(conn: sqlite3.Connection, pid: str | None) -> str | None:
             for p in rows) or '<p class="clear">No proposals. The miner runs Mondays at 06:30.</p>'
         return page("Workflows", "Workflow proposals", "Workflow proposals",
                     "Drafted by the weekly miner (python -m coord_mcp.workflows propose).",
-                    f'<div class="card"><ul class="queue">{items}</ul></div>')
+                    f'{note}<div class="card"><ul class="queue">{items}</ul></div>')
     p = load_proposal(pid)
     r = record(conn, pid)
     if p is None and r is None:
