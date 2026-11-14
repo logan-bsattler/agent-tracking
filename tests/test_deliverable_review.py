@@ -237,3 +237,10 @@ def test_a_full_path_with_parentheses_stands_whole(tmp_path):
     f = tmp_path / "FDD-1416 Load Orders (35.16.13.2 xxoosold2.p) - DRAFT.docx"
     f.write_bytes(b"x")
     assert store._split_paths(str(f)) == [str(f)]
+
+
+def test_an_elided_directory_is_not_a_bare_extension():
+    raw = ("Darren .../Design/A.md; .../KDD-O2S-117 Bottle Deposit Line-Level Charges Framework.md l.221-240")
+    out = store._split_paths(raw)  # used to raise ValueError and 400 the whole /deliverables page
+    assert out[-1] == ".../KDD-O2S-117 Bottle Deposit Line-Level Charges Framework.md"
+    assert store._split_paths("work/a.csv / .md") == ["work/a.csv", str(store.Path("work/a.md"))]

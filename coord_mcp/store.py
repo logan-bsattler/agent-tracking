@@ -1178,7 +1178,7 @@ def _split_paths(raw: str) -> list[str]:
         tok = tok.strip()
         if not tok or "*" in tok:
             continue
-        if out and tok.startswith("."):
+        if out and re.fullmatch(r"\.[A-Za-z0-9]{1,8}", tok):  # '.md', not '.../x.md'
             tok = str(Path(out[-1]).with_suffix(tok))
         elif out and len(Path(tok).parts) == 1 and len(Path(out[-1]).parts) > 1:
             tok = str(Path(out[-1]).parent / tok)
