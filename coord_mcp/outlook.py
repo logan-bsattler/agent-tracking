@@ -91,6 +91,8 @@ def draft(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
         raise ValueError(f"task {task_id} has no finished draft")
     from .gate import require_approved
     require_approved(conn, task_id, "Draft in Outlook")
+    from .holds import require_ruled
+    require_ruled(conn, task_id, "Draft in Outlook")  # a reply on a master default waits for Ben's answer
     return draft_from_result(r["id"], r["assigned_to"], r["title"], res)
 
 

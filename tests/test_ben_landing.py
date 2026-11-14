@@ -44,7 +44,8 @@ def _open(conn):
 
 def test_defaults_are_on_except_precedent(conn):
     assert {k: queue.switch(conn, k) for k in queue.SWITCHES} == {
-        "ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_wide": True, "ben_precedent": False}
+        "ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_wide": True, "ben_precedent": False,
+        "hold_rule": True, "hold_apply": False}
 
 
 def test_reason_is_an_optional_enum_in_the_contract():

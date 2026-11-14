@@ -27,6 +27,10 @@ What it never does:
     reply_from on the root task's spec or its intent): a mis-tagged case
     must not grow an email,
   - dispatch: open tasks go out by auto-dispatch or master, as now,
+  - move past a hold decision on the case (holds.case_hold) that is
+    outward-facing or has no default; an internal hold with a default it
+    proceeds past only under switch hold_rule, superseding the hold with a
+    "master default; Ben may override" decision and gating Outlook/check-in,
   - act on a result that landed before it was first switched on, or more
     than LOOKBACK hours ago, so turning it on never sweeps up history.
 """
@@ -153,11 +157,35 @@ def plan(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int) -> dic
         spec = {k: v for k, v in spec.items() if v not in ("", None)}
         if spec.get("checkin_of"):
             return None
+        # A hold decision on the case (holds.py): outward or default-less holds
+        # stop it; an internal hold with a default proceeds under hold_rule.
+        from .. import holds
+        held = holds.case_hold(conn, ids, sp["kind"])
+        if held and "stop" in held:
+            return {"stop": st["key"], "prev": prev["id"], "why": held["stop"]}
         title = _fill(sp["title"], ctx)
         title = title if len(title) <= 80 else title[:77] + "..."
         return {"spawn": st["key"], "kind": sp["kind"], "title": title, "spec": spec, "prev": prev["id"],
-                "client": case["client"], "follow_up": take["id"] if take else None}
+                "client": case["client"], "follow_up": take["id"] if take else None,
+                "hold": held["proceed"]["decision_id"] if held else None}
     return None
+
+
+def _proceed_past(conn: sqlite3.Connection, hold_id: str, tid: str) -> None:
+    """Supersede an internal hold the engine moved past with the default it
+    proceeds on, and gate the new task's outward steps until Ben answers."""
+    from .. import holds, store
+    old = conn.execute("SELECT * FROM decisions WHERE id=?", (hold_id,)).fetchone()
+    h = holds.classify(conn, old) if old is not None else None
+    if h is None:
+        return
+    ben = h["open_ben_follow_ups"] or h["ben_follow_ups"]
+    stmt = f"Proceed on master default for {tid}: {h['default'] or ''}"[:150]
+    if ben:
+        stmt += f"; Ben's {', '.join(ben)} stays open"
+    dec = store.record_decision(conn, stmt[:200], f"workflow engine past internal hold {hold_id}; master default; "
+                                "Ben may override", tid, supersedes=hold_id)
+    holds.register(conn, dec["decision_id"], hold_id, ben, [w["ref"] for w in h["work"]] + [tid], tid)
 
 
 def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -> list[dict[str, Any]]:
@@ -202,6 +230,8 @@ def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -
                       f"{p['kind']} {tid} from task {p['prev']}",
                 because="the step before landed; COORD_WORKFLOW_ENGINE on (workflow engine; Ben may override)",
                 task_id=tid)
+            if p.get("hold"):
+                _proceed_past(conn, p["hold"], tid)
             if p["follow_up"]:
                 store.resolve_follow_up(conn, p["follow_up"], task_id=tid)
             event(conn, case["id"], "spawned", p["spawn"], tid, "agent",

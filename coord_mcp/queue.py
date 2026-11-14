@@ -354,10 +354,18 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
 #                   the last GROUP_DAYS, not only within one result.     (on)
 #   ben_precedent   settle a new Ben item an earlier Ben ruling clearly
 #                   implies, as "master default; Ben may override".     (off)
+#   hold_rule       coord_record_decision refuses a new hold on internal
+#                   work behind a Ben question that has a default; the
+#                   engine proceeds past such holds (holds.py).          (on)
+#   hold_apply      allows `python -m coord_mcp.holds apply --yes` on the
+#                   existing holds.                                      (off)
 
 REASONS = ("send", "approve", "scope", "access", "judgement")
 SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_wide": True,
-            "ben_precedent": False}
+            "ben_precedent": False,
+            # holds behind Ben (coord_mcp/holds.py): a new hold on internal work
+            # with a default is refused; the apply on existing holds is Ben's.
+            "hold_rule": True, "hold_apply": False}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (
@@ -750,6 +758,9 @@ def undrafted(conn: sqlite3.Connection, now_ts: int, after: int = 10 * 60) -> li
     out = []
     for d in store.draft_replies(conn, days=3)["drafts"]:
         if d["state"] == "waiting" and now_ts - DRAFT_WINDOW <= d["completed_at"] <= now_ts - after:
+            from .holds import pending_gate
+            if pending_gate(conn, d["task_id"]):
+                continue  # on a master default: Outlook waits for Ben's answer (holds.py)
             out.append(d["task_id"])
     return out
 

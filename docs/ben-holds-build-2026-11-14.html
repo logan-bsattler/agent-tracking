@@ -1,0 +1,41 @@
+<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>Ben Holds Build</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--muted:#5d6675;--line:#dde2ea;--card:#f5f7fa;--accent:#2457a6}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#14171c;--fg:#e4e8ee;--muted:#9aa3b0;--line:#2c323b;--card:#1b1f26;--accent:#7aa7ec}}
+:root[data-theme=dark]{--bg:#14171c;--fg:#e4e8ee;--muted:#9aa3b0;--line:#2c323b;--card:#1b1f26;--accent:#7aa7ec}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,sans-serif;margin:0 auto;max-width:900px;padding:24px 16px}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:26px 0 8px}.muted{color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:14px;display:block;overflow-x:auto}th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{background:var(--card)}
+.bluf{background:var(--card);border-left:4px solid var(--accent);padding:10px 14px;border-radius:4px}code{font-size:13px}
+</style></head><body>
+<h1>Holds behind Ben: build summary</h1>
+<p class=muted>2026-11-14 · coord-mcp · the queue audit's sixth item · report: <a href="ben-holds-defaults-2026-11-14.html">ben-holds-defaults-2026-11-14.html</a> (+ .xlsx)</p>
+<p class=bluf><b>The rule is live for new holds; nothing on the board has changed.</b> From now on, internal work behind a Ben question that has a default proceeds on that default, and his question stays in his queue. Outward steps (Outlook, check-in) wait for his answer. Of the 149 existing live holds behind Ben, 33 would proceed on a default. That apply is off until Ben reads the report and turns it on.</p>
+
+<h2>What is live</h2>
+<table><tr><th>Piece</th><th>What it does</th><th>Switch</th></tr>
+<tr><td>Hold rule at <code>coord_record_decision</code></td><td>Refuses a new hold on internal work when Ben's question has a default (the recommended option of the question presented to him, or a default his loose end names). The refusal says what to record instead. Outward holds, holds on Ben's own actions (access, credential, sync) and questions with no default are recorded as before.</td><td><code>hold_rule</code> on</td></tr>
+<tr><td>Gate on outward steps</td><td>A decision with "master default; Ben may override" that names his still-open loose end (or <code>q&lt;id&gt;</code>) is registered. Until that question is resolved, Draft in Outlook and a check-in of that work, or of any task under it, are refused, and the minder does not list the draft as owed. Promote stays Ben's own button and is not gated.</td><td>always</td></tr>
+<tr><td>Minder</td><td>New condition: "holds on internal work behind a Ben question with a default". It lists holds recorded after the rule went live that it would have refused, for example from a session still on the old code.</td><td><code>hold_rule</code></td></tr>
+<tr><td>Workflow engine</td><td>Before it spawns a step, it reads the case's holds. An outward hold, or a hold with no default, stops the case. An internal hold with a default it moves past only under <code>hold_rule</code>, superseding the hold and gating the new task. The Royal #231 reply held by <code>70dab9ac6902</code> now stops unless <code>hold_rule</code> is on. If it is on, the reply is drafted on "Revise once more", but it cannot go into Outlook while the round-3 question is open.</td><td>engine off (<code>COORD_WORKFLOW_ENGINE</code>)</td></tr>
+<tr><td>Master's instructions</td><td>New "Holds become working defaults" paragraph under Deciding for Ben, and a reworded step 5 of One question at a time. Backup: <code>CLAUDE.md.bak-20261114-holds</code>.</td><td>—</td></tr>
+</table>
+
+<h2>Not live: the existing holds</h2>
+<p><code>python -m coord_mcp.holds report</code> lists them. <code>python -m coord_mcp.holds apply</code> is a dry run of turning the 33 internal holds into defaults. For each one, <code>--yes</code> records a decision that supersedes the hold, reopens the loose ends it deferred (master then tasks them), and registers the outward gate. It refuses while <code>hold_apply</code> is off. Run these in <code>agent-tracking/</code>:</p>
+<pre>python -m coord_mcp.queue switch hold_apply on
+python -m coord_mcp.holds apply --yes</pre>
+
+<h2>Restart</h2>
+<ul><li><b>Master (worker and desk) and every client session</b> run their own server. The refusal and the gate on <code>coord_record_decision</code> apply only in sessions started after this change. Until then the minder catches holds that slip through.</li>
+<li><b>Dashboard (port 8765)</b>: restart it so the minder and the engine load the new code. Outlook drafting through <code>python -m coord_mcp.outlook</code> picks up the gate at once.</li></ul>
+
+<h2>Contract and schema</h2>
+<p>No contract change. One new side table, <code>hold_defaults</code>, created on first use (additive, no version bump). Two new switches in <code>meta</code>. The <code>coord_record_decision</code> result may carry a new optional field, <code>gated_until_ben</code>.</p>
+
+<h2>What Ben must decide</h2>
+<ol><li>Read the holds report and mark the workbook's "Ben: OK?" column. Each verdict was read from the wording, and the default for 30 of the 33 comes from the option master recommended to him.</li>
+<li>Whether to turn on <code>hold_apply</code> and run the apply.</li>
+<li>Whether <code>hold_rule</code> stays on. It is on now. To turn it off: <code>python -m coord_mcp.queue switch hold_rule off</code>.</li></ol>
+</body></html>

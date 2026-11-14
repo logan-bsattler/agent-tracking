@@ -2324,16 +2324,20 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     # The table is created on first use, so a board without one owes nothing.
     from . import commitments
     owed_commitments = commitments.minder_owed(conn, now_ts)
+    # Holds behind Ben recorded since hold_rule went live that it would refuse (holds.py).
+    from . import holds
+    owed_holds = holds.minder_owed(conn)
     # Workflow cases past their step's time limit (workflows/sla.py).
     from .workflows import sla
     over = sla.minder_owed(conn, now_ts)
-    return {"parked": parked, "stalled": stalled, "undelivered": undelivered, "unread": unread, "loose": loose,
+    return {"holds": owed_holds, "parked": parked, "stalled": stalled, "undelivered": undelivered, "unread": unread, "loose": loose,
             "failed": failed, "intents": intents, "unreviewed": unreviewed,
             "undrafted": undrafted, "pipeline": pipeline, "commitments": owed_commitments,
             "superseded": superseded, "case_sla": over["master"], "case_sla_ben": over["ben"]}
 
 
-_MINDER_LABELS = (("parked", "parked awaiting re-dispatch"),
+_MINDER_LABELS = (("holds", "holds behind Ben with a default (supersede, task it)"),
+                  ("parked", "parked awaiting re-dispatch"),
                   ("stalled", "picked up but the client session went silent (get_session; if idle, re-dispatch)"),
                   ("undelivered", "never delivered"),
                   ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids)"),

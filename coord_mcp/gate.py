@@ -123,6 +123,8 @@ def check_checkin(conn: sqlite3.Connection, kind: str, spec: dict[str, Any]) -> 
     if row["kind"] != "code_change" or row["state"] != "done":
         raise ValueError(f"checkin_of {ref} must be a finished code_change")
     require_approved(conn, row["id"], "Check-in")
+    from .holds import require_ruled
+    require_ruled(conn, row["id"], "Check-in")  # code built on a master default waits for Ben's answer
 
 
 def main(argv: list[str] | None = None) -> int:

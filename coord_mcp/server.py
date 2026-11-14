@@ -427,9 +427,15 @@ async def coord_record_decision(params: DecisionInput) -> str:
     Returns JSON: {decision_id}
     """
     try:
-        return _ok(store.record_decision(
-            db(), params.statement, params.because, params.task_id, params.supersedes
-        ))
+        from . import holds
+        conn = db()
+        # Holds behind Ben (switch hold_rule): internal work with a default proceeds.
+        holds.check_new_hold(conn, params.statement, params.because, params.task_id)
+        out = store.record_decision(conn, params.statement, params.because, params.task_id, params.supersedes)
+        if gated := holds.after_decision(conn, out["decision_id"], params.statement, params.because,
+                                         params.task_id, params.supersedes):
+            out.update(gated)
+        return _ok(out)
     except Exception as e:
         return _err(e)
 
