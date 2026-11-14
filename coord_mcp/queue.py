@@ -359,13 +359,18 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
 #                   engine proceeds past such holds (holds.py).          (on)
 #   hold_apply      allows `python -m coord_mcp.holds apply --yes` on the
 #                   existing holds.                                      (off)
+#   case_checks     coord_create_task / coord_complete_task warn on a task
+#                   that looks like a step of an open case but has none, or
+#                   skips a step not yet done (workflows/checks.py). Advice
+#                   only, never a refusal.                                (on)
 
 REASONS = ("send", "approve", "scope", "access", "judgement")
 SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_wide": True,
             "ben_precedent": False,
             # holds behind Ben (coord_mcp/holds.py): a new hold on internal work
             # with a default is refused; the apply on existing holds is Ben's.
-            "hold_rule": True, "hold_apply": False}
+            "hold_rule": True, "hold_apply": False,
+            "case_checks": True}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (

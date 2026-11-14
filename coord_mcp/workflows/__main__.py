@@ -47,7 +47,23 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--out", help="HTML report path (default docs/workflow-precedent-<date>.html)")
     pr.add_argument("--json", action="store_true")
     pr.add_argument("--apply", action="store_true", help="resolve the 'decided, no work' rows; needs the switch")
+    at = sub.add_parser("attach", help="move a task into a case (fix for a 'no case' warning)")
+    at.add_argument("task_id")
+    at.add_argument("case_id")
+    at.add_argument("--db")
     a = ap.parse_args(argv)
+
+    if a.cmd == "attach":
+        from ..db import connect
+        from .checks import attach
+        conn = connect(a.db) if a.db else connect()
+        try:
+            out = attach(conn, a.task_id, a.case_id)
+            conn.commit()
+        finally:
+            conn.close()
+        print(json.dumps(out, indent=1, default=str))
+        return 0
 
     if a.cmd == "precedent":
         from . import precedent as pc

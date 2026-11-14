@@ -52,7 +52,12 @@ def create_task(
     )
     out = {"task_id": tid, "kind": kind, "expected_result_shape": contracts.expected_shape(kind)}
     from . import queue
-    if warnings := queue.create_warnings(conn, kind, spec, pipeline_task_id, parent_id):
+    warnings = queue.create_warnings(conn, kind, spec, pipeline_task_id, parent_id)
+    # Case-step advice (workflows/checks.py, 2026-11-14): never a refusal.
+    from .workflows import checks
+    warnings += checks.create_warnings(conn, tid, kind, title, spec, assigned_to, parent_id, from_intent,
+                                       pipeline_task_id)
+    if warnings:
         out["warnings"] = warnings
     return out
 
@@ -198,7 +203,12 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
     ensure_deps(conn)
     ensure_promotions(conn)
     with savepoint(conn, "complete_task"):
-        return _complete(conn, task_id, row, validated)
+        out = _complete(conn, task_id, row, validated)
+    # Case-step advice after the close lands (workflows/checks.py): never a refusal.
+    from .workflows import checks
+    if warnings := checks.complete_warnings(conn, task_id):
+        out["warnings"] = warnings
+    return out
 
 
 class savepoint:
