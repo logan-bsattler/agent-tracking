@@ -19,6 +19,7 @@ DAY = 86400
 def _defer_return_on(monkeypatch):
     # conftest turns every queue switch off; this one is the feature under test.
     monkeypatch.setitem(queue.SWITCHES, "defer_return", True)
+    monkeypatch.setenv("COORD_HOLIDAYS", "")  # weekday arithmetic below; holidays have their own test
 
 
 @pytest.fixture()
@@ -138,6 +139,33 @@ def test_backfill_spreads_ben_first_oldest_first(c):
     items = sorted(real["items"], key=lambda r: r["return_on"])
     assert items[0]["what"] == "item 1"  # Ben's oldest first
     assert defer.backfill(c)["count"] == 0
+
+
+def test_holidays_are_not_business_days(c, monkeypatch):
+    from datetime import date
+    monkeypatch.delenv("COORD_HOLIDAYS")
+    assert defer._add_business(date(2026, 11, 25), 1) == date(2026, 11, 30)  # Thanksgiving Thu+Fri, weekend
+    defer.set_holidays(c, ["2026-11-25"])
+    assert defer.holidays(c) == {date(2026, 11, 25)}
+    assert defer._add_business(date(2026, 11, 24), 1) == date(2026, 11, 26)
+
+
+def test_an_item_back_on_its_date_may_expire_again(c):
+    f = _fu(c)
+    c.execute("UPDATE follow_ups SET created_at=? WHERE id=?", (store.now() - 20 * DAY, f))
+    queue.expire(c, apply=True)
+    ret = defer.returns_for(c)[f]
+    defer.reopen_due(c, now_ts=ret + 60)
+    assert queue.stale(c, now_ts=ret + 3 * DAY) == []  # just back: not stale yet
+    assert [x["id"] for x in queue.stale(c, now_ts=ret + 15 * DAY)] == [f]  # 14 days after it returned
+
+
+def test_an_item_reopened_by_undo_never_expires_again(c):
+    f = _fu(c)
+    c.execute("UPDATE follow_ups SET created_at=? WHERE id=?", (store.now() - 20 * DAY, f))
+    d = queue.expire(c, apply=True)["decision_id"]
+    queue.unexpire(c, d)
+    assert queue.stale(c, now_ts=store.now() + 60 * DAY) == []
 
 
 # ------------------------------------------------ engine and deferred replies

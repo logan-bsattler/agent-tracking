@@ -47,9 +47,47 @@ CREATE TABLE IF NOT EXISTS follow_up_returns (
 CREATE INDEX IF NOT EXISTS follow_up_returns_on ON follow_up_returns(return_on);
 """
 PRESETS = {"tomorrow": 1, "3d": 3, "1w": 5, "2w": 10, "1m": 21}
+# Days that are not business days besides weekends. Ben's list lives in meta
+# (HOLIDAYS_KEY, comma-separated ISO dates; `python -m coord_mcp.defer
+# holidays`); COORD_HOLIDAYS overrides it; DEFAULT_HOLIDAYS when neither is set.
+HOLIDAYS_KEY = "defer_holidays"
+DEFAULT_HOLIDAYS = ("2026-11-26", "2026-11-27", "2026-12-24", "2026-12-25", "2026-12-31", "2027-01-01",
+                    "2027-05-31", "2027-07-05", "2027-09-06", "2027-11-25", "2027-11-26", "2027-12-24")
+_holidays: set[date] | None = None
+
+
+def holidays(conn: sqlite3.Connection | None = None) -> set[date]:
+    """The holiday set; reads meta when a connection is given, else the last one read."""
+    import os
+    global _holidays
+    env = os.environ.get("COORD_HOLIDAYS")
+    if env is not None:
+        raw = env
+    elif conn is not None:
+        r = conn.execute("SELECT value FROM meta WHERE key=?", (HOLIDAYS_KEY,)).fetchone()
+        raw = r[0] if r else ",".join(DEFAULT_HOLIDAYS)
+    elif _holidays is not None:
+        return _holidays
+    else:
+        raw = ",".join(DEFAULT_HOLIDAYS)
+    out = set()
+    for x in raw.split(","):
+        if x.strip():
+            out.add(date.fromisoformat(x.strip()))
+    if env is None and conn is not None:
+        _holidays = out
+    return out
+
+
+def set_holidays(conn: sqlite3.Connection, days: list[str]) -> set[date]:
+    vals = sorted({date.fromisoformat(d.strip()).isoformat() for d in days if d.strip()})
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (HOLIDAYS_KEY, ",".join(vals)))
+    conn.commit()
+    return holidays(conn)
 
 
 def ensure(conn: sqlite3.Connection) -> None:
+    holidays(conn)  # refresh the holiday set from meta
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='follow_up_returns'").fetchone() is None:
         conn.executescript(DDL)
 
@@ -64,9 +102,10 @@ def _start_of(d: date) -> int:
 
 
 def _add_business(d: date, n: int) -> date:
+    off = holidays()
     while n > 0:
         d += timedelta(days=1)
-        if d.weekday() < 5:
+        if d.weekday() < 5 and d not in off:
             n -= 1
     return d
 
@@ -237,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--days", type=int, default=BACKFILL_DAYS)
     sub.add_parser("due", help="dry run: deferred items whose return date has come")
     sub.add_parser("list", help="every deferred item with its return date")
+    h = sub.add_parser("holidays", help="show, or with --set replace, the non-business days")
+    h.add_argument("--set", metavar="YYYY-MM-DD,...")
     a = p.parse_args(argv)
     conn = connect()
     try:
@@ -246,6 +287,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{d}  Ben {n['ben']:>3}  others {n['other']:>3}  total {n['ben'] + n['other']:>3}")
             print(f"{out['count']} deferred item(s) without a return date ({out['ben']} Ben's): "
                   + (f"dated, decision {out['decision_id']}" if out["applied"] else "dry run; --apply to date them"))
+            return 0
+        if a.cmd == "holidays":
+            hs = set_holidays(conn, a.set.split(",")) if a.set is not None else holidays(conn)
+            print(", ".join(d.isoformat() for d in sorted(hs)) or "none")
             return 0
         if a.cmd == "due":
             out = reopen_due(conn, apply=False)

@@ -711,7 +711,9 @@ def stale(conn: sqlite3.Connection, now_ts: int | None = None, days: int = EXPIR
 
     Kept: anything with a due date (its own, its task's, a commitment's), a
     draft reply waiting on him, the question currently presented, and one
-    already expired once (Ben or master reopened it, so it stays)."""
+    already expired that Ben or master reopened by hand (--undo). One that
+    came back on its return date (defer.py) may expire again, `days` after
+    it returned (Ben, 2026-11-14)."""
     from . import commitments, store
     t = now() if now_ts is None else now_ts
     ensure_expiry(conn)
@@ -720,18 +722,23 @@ def stale(conn: sqlite3.Connection, now_ts: int | None = None, days: int = EXPIR
     held = {r["follow_up_id"] for r in conn.execute(
         "SELECT follow_up_id FROM commitments WHERE state IN ('open','slipped') AND follow_up_id IS NOT NULL")} \
         if dues else set()
+    from . import defer as defer_mod
+    defer_mod.ensure(conn)
     once = {r["follow_up_id"] for r in conn.execute("SELECT follow_up_id FROM follow_up_expiry")}
+    back = {r[0]: r[1] for r in conn.execute(
+        "SELECT follow_up_id, returned_at FROM follow_up_returns WHERE returned_at IS NOT NULL")}
     replies = {r["id"] for r in conn.execute("SELECT id FROM tasks WHERE kind='draft_reply'")}
     out = []
     for r in _ben_rows(conn):
-        if r["created_at"] > t - days * 86400 or r["id"] in once or r["id"] in held:
+        since = max(r["created_at"], back.get(r["id"]) or 0)
+        if since > t - days * 86400 or (r["id"] in once and r["id"] not in back) or r["id"] in held:
             continue
         if r["due_at"] is not None or (r["task_id"] and (r["task_id"] in dues or r["task_id"] in replies)):
             continue
         if q and q.get("follow_up_id") == r["id"]:
             continue
         out.append({"id": r["id"], "client": r["client"] or "unassigned", "what": r["what"],
-                    "age_days": (t - r["created_at"]) // 86400})
+                    "age_days": (t - since) // 86400})
     return out
 
 
@@ -773,6 +780,8 @@ def unexpire(conn: sqlite3.Connection, decision_id: str) -> dict[str, Any]:
            WHERE e.decision_id=? AND f.state='deferred' AND f.resolved_by=?""", (decision_id, decision_id))]
     for i in ids:
         store.resolve_follow_up(conn, i, reopen=True)
+        # Reopened by hand: it stays, so it must not read as returned by date.
+        conn.execute("UPDATE follow_up_returns SET returned_at=NULL WHERE follow_up_id=?", (i,))
     conn.commit()
     return {"ok": True, "reopened": len(ids), "decision_id": decision_id}
 
