@@ -12,7 +12,7 @@ table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--li
 code{font-size:13px}.ask{border-left:4px solid var(--accent)}
 </style></head><body><main>
 <h1>Keep agents working</h1>
-<p class="sub">agent-tracking commit a4f344b, 2026-11-14. Auto-dispatch was already on. It now sends the earliest-due commitment's task first, and master can see what it would send and which sessions sit idle.</p>
+<p class="sub">agent-tracking commits a4f344b and 9d7c74c, 2026-11-14. Auto-dispatch was already on. It now sends the earliest-due commitment's task first, and master can see what it would send and which sessions sit idle.</p>
 
 <div class="card ask"><b>What Ben must decide</b>
 <p><b>Switch Royal - MIGR to <code>auto</code>.</b> Every session is in <code>auto</code> permission mode except Royal - MIGR, which is in <code>acceptEdits</code>. When sender and receiver modes differ, <code>send_message</code> waits for an approval nobody sees and times out. Royal - Local hands server work to MIGR, so those handoffs can stall. Recommendation: keep <code>auto</code> everywhere and switch MIGR. It is your call because it widens what that session may do unprompted.</p>
@@ -31,13 +31,12 @@ code{font-size:13px}.ask{border-left:4px solid var(--accent)}
 <tr><td>Auto-dispatch rules (audited, unchanged)</td><td>One task in flight per session (busy = picked up, sent, claimed or parked). A primary never gets a second <code>code_change</code> or <code>deliverable</code>. Parked, held (a decision within a week) and waiting tasks are skipped. A <code>dod_review</code> with no side session stays with master.</td></tr>
 <tr><td><code>sessions dry-run</code></td><td>Lists what the next tick would send, one per session, and why each other task waits. When checked earlier today it sent nothing: MAG <code>98d45fe893f9</code> held by decision <code>0b849306d9ea</code>, LNK <code>49ef90195735</code> (a review) held by <code>21ff25b2c68d</code>.</td></tr>
 <tr><td><code>sessions idle</code></td><td>Lists free registered sessions beside owed, dispatchable work for 15+ minutes. At that check there were none.</td></tr>
-<tr><td><code>sessions.mark_manual</code></td><td>Stamps a task master sent by hand so auto-dispatch counts that session busy. Tested, but not wired yet (Brief A).</td></tr>
+<tr><td><code>sessions.mark_manual</code></td><td>Stamps a task master sent by hand so auto-dispatch counts that session busy. Wired by Brief A (commit 9d7c74c): <code>POST /api/dispatch/manual</code>, called by the coord-rules hook after a successful <code>send_message</code> whose text says <code>Do task &lt;id&gt;</code>. A down dashboard never fails the send.</td></tr>
 <tr><td>Master CLAUDE.md</td><td>"Dispatching" now opens by saying auto-dispatch is on and lists what master still owns: parks and re-dispatch, reviews with no side session, unregistered clients, held tasks, and short tasks queued to busy sessions. Backup: <code>CLAUDE.md.bak-20261114-dispatch</code>.</td></tr>
 </table>
 
 <h2>In progress (not on origin/main when this was written)</h2>
 <ul>
-<li><b>Brief A</b>: <code>POST /api/dispatch/manual</code>, plus a coord-rules hook that stamps master's hand-sent <code>Do task &lt;id&gt;</code>. Until it lands, a hand-sent task can be followed by an auto-dispatch to the same session before the client picks it up.</li>
 <li><b>Brief B</b>: an "idle" minder condition and an idle list on /board.</li>
 <li><b>Brief C</b>: confirm a live tick sends what <code>dry-run</code> lists (<code>dispatch_attempts</code> in the board database).</li>
 </ul>
@@ -50,8 +49,8 @@ code{font-size:13px}.ask{border-left:4px solid var(--accent)}
 
 <h2>Restarts</h2>
 <ul>
-<li><b>Dashboard</b>: needed. The mod claims tasks through the dashboard (<code>/api/dispatch/claim</code>), and the running one started at 2:23 PM, before a4f344b (2:28 PM). Until it restarts, claims stay oldest-first. Restart the at-logon scheduled task and keep <code>COORD_WORKFLOW_ENGINE=1</code>.</li>
-<li><b>Master sessions</b>: needed only for Brief A's hook, once it lands (mods load at session start).</li>
+<li><b>Dashboard</b>: needed. The mod claims tasks through the dashboard (<code>/api/dispatch/claim</code>), and the running one started at 2:23 PM, before a4f344b (2:28 PM). Until it restarts, claims stay oldest-first and <code>/api/dispatch/manual</code> does not exist. Restart the at-logon scheduled task and keep <code>COORD_WORKFLOW_ENGINE=1</code>.</li>
+<li><b>Master sessions</b>: needed for Brief A's coord-rules hook (mods load at session start).</li>
 <li>The CLI commands work now, with no restart.</li>
 </ul>
 
