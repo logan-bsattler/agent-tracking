@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Defer Return Dates</title>
+<style>
+:root{--bg:#fff;--fg:#1b1b1b;--muted:#666;--card:#f6f6f4;--line:#ddd;--accent:#2f6fde}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161616;--fg:#eaeaea;--muted:#9a9a9a;--card:#202020;--line:#333;--accent:#7aa7ff}}
+:root[data-theme="dark"]{--bg:#161616;--fg:#eaeaea;--muted:#9a9a9a;--card:#202020;--line:#333;--accent:#7aa7ff}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0;padding:24px 16px}
+main{max-width:860px;margin:0 auto}h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px}
+.sub{color:var(--muted)}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:10px 0}
+table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--line);padding:4px 8px;text-align:left}
+code{font-size:13px}.ask{border-left:4px solid var(--accent)}
+</style></head><body><main>
+<h1>Defer return dates</h1>
+<p class="sub">agent-tracking commit ab359a8, 2026-11-14. A deferred item now comes back on a date. The workflow engine now drafts a reply even when its reply loose end is deferred.</p>
+
+<div class="card ask"><b>What Ben must decide</b>
+<ol>
+<li><b>Run the backfill?</b> 420 deferred items have no return date, 107 of them Ben's. The dry run spreads them at 42 a day over the next 10 business days, Ben's first: his 107 come back Nov 16 to 18, the clients' 313 from Nov 18 to 27. To turn it on: <code>cd C:\development\agents\agent-tracking</code>, then <code>python -m coord_mcp.defer backfill --apply</code>. Until then they stay parked as before.</li>
+<li><b>Holidays.</b> Business days skip weekends only, so Nov 26 (Thanksgiving week) gets its 42. Re-run with <code>--days 9</code> if that matters.</li>
+<li><b>Expired items come back once.</b> An item the 14-day expiry defers now returns 10 business days later. It is then never expired again, under the existing rule, so it stays on the queue until someone acts on it. Say if you would rather it expire again.</li>
+</ol></div>
+
+<h2>What is live</h2>
+<table>
+<tr><th>Piece</th><th>Behaviour</th></tr>
+<tr><td><code>coord_resolve_follow_up</code></td><td>New optional <code>return_on</code> field, used with <code>defer=true</code>. It takes a date (YYYY-MM-DD), a preset (tomorrow, 3d, 1w, 2w, 1m) or a number of business days. The default is 5 business days, and the result echoes the date.</td></tr>
+<tr><td>/queue Defer</td><td>A preset picker (default: back in 1 week) or a date. A new "Deferred, coming back" list shows Ben's deferred items, each with its return date.</td></tr>
+<tr><td>/board</td><td>Each item in the Deferred lane shows "returns Mon 11-24" or "no return date".</td></tr>
+<tr><td>Dashboard loop</td><td>Every pass, it reopens the deferred items whose date has come, behind one decision (<code>Return dates: reopened N loose end(s) ...</code>). Ben's go back to his queue. A client's becomes an open client loose end, which the minder lists for master.</td></tr>
+<tr><td>14-day expiry</td><td>Each item it defers gets a return date 10 business days out.</td></tr>
+<tr><td>Workflow engine</td><td>Follows decision <code>f294e33095c1</code>. A draft_reply step takes its reply loose end even when it is deferred. An internal hold no longer stops the draft: the engine records a decision citing the ruling and gates Draft in Outlook on the hold's open Ben items. An outward-facing hold still stops it (fix 6). Sending stays Ben's.</td></tr>
+<tr><td>Master CLAUDE.md</td><td>The "Defer" step now says a deferred item returns on its date and is handled then like a newly opened one. The expiry paragraph gives the 10-day return. Backup: <code>CLAUDE.md.bak-20261114-defer</code>.</td></tr>
+</table>
+
+<h2>Switches and commands</h2>
+<ul>
+<li><code>defer_return</code> (on): the dashboard's reopen pass. Dates are still recorded when it is off. To turn it off: <code>python -m coord_mcp.queue switch defer_return off</code>.</li>
+<li><code>python -m coord_mcp.defer backfill [--apply] [--days N]</code>, <code>defer due</code> (dry run of what would reopen now), <code>defer list</code>.</li>
+</ul>
+
+<h2>Schema and restarts</h2>
+<ul>
+<li>Additive only: a new side table <code>follow_up_returns</code>, created on first use. The <code>follow_ups</code> table is not rebuilt, and no existing contract field changed.</li>
+<li><b>Dashboard</b>: restarted and running, with <code>COORD_WORKFLOW_ENGINE=1</code> kept. /queue, /board and /workflows all return 200.</li>
+<li><b>Needs a restart</b>: the master worker and desk, plus client sessions, before they see <code>return_on</code> on <code>coord_resolve_follow_up</code>. Until then a defer from them gets the 5-day default.</li>
+</ul>
+
+<h2>Tests</h2>
+<p>New file <code>tests/test_defer.py</code> (9 tests), covering: dates, reopen, re-defer, the switch, /queue and /board display, expiry, the backfill spread, the engine drafting past a deferral and an internal hold, and the engine stopping at an outward hold. <code>test_holds</code> was updated for the ruling. Full suite: 661 passed. The one failure was the expected holds test, fixed and rerun with its neighbours (97 passed). Smoke: ALL PASS.</p>
+</main></body></html>
