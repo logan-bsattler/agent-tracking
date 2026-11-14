@@ -1,0 +1,103 @@
+{
+  "code": "A4",
+  "name": "Promotion ask",
+  "group": "A",
+  "engine": true,
+  "trigger": "push to TEST, weekend CVC list, QSM, PROD deploy",
+  "notes": "Tracker status changes follow process/cvc-reopen-ticket.md and happen only when Ben asks for that ticket.",
+  "steps": [
+    {
+      "key": "ingest",
+      "name": "Ingest",
+      "who": "code",
+      "kinds": [],
+      "gate": "triage proposes the intent",
+      "next": "master tasks a readiness read"
+    },
+    {
+      "key": "ready",
+      "name": "What is ready",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "data_pull"
+      ],
+      "gate": "result lists each CVC and its status",
+      "next": "result lands"
+    },
+    {
+      "key": "approve",
+      "name": "Approve the moves",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben names the tickets to move",
+      "next": "Ben's ruling"
+    },
+    {
+      "key": "moves",
+      "name": "CVC ticket moves",
+      "who": "agent",
+      "kinds": [
+        "code_change"
+      ],
+      "gate": "only tickets Ben named; no comments on tickets",
+      "next": "moves recorded in the result"
+    },
+    {
+      "key": "qsm",
+      "name": "QSM ticket",
+      "who": "ben",
+      "kinds": [],
+      "gate": "qad-qsm-deployment skill; Ben submits",
+      "next": "QAD installs"
+    },
+    {
+      "key": "confirm",
+      "name": "Confirm install",
+      "who": "agent",
+      "kinds": [
+        "investigation"
+      ],
+      "gate": "checked in the target environment",
+      "next": "install confirmed"
+    },
+    {
+      "key": "reply",
+      "name": "Reply",
+      "who": "agent",
+      "kinds": [
+        "draft_reply"
+      ],
+      "gate": "nothing sends",
+      "next": "draft lands",
+      "spawn": {
+        "on": "result",
+        "after": "confirm",
+        "kind": "draft_reply",
+        "title": "{client}: promotion reply, {root_title}",
+        "spec": {
+          "goal": "Draft the reply to the client email this case answers ({root_title}), from the finished step's result.",
+          "read_first": "coord_get_task_result {prev} with fields [\"verdict\", \"evidence\", \"pointers\", \"summary\"]; the case's intent is {intent}.",
+          "reply_from": "{reply_from}",
+          "reply_date": "{reply_date}",
+          "constraints": [
+            "Nothing sends: write the body to a file and return the draft_reply envelope.",
+            "The body ends with 'Thanks!' and no name; Ben's Outlook signature carries it.",
+            "Promise nothing no task covers; if the answer needs more work, put it in follow_ups instead.",
+            "Say Devoir, never offshore."
+          ],
+          "created_by": "workflow engine ({workflow}, case {case})"
+        },
+        "takes_follow_up": "repl|draft|email|answer|respond|tell|confirm"
+      }
+    },
+    {
+      "key": "send",
+      "name": "Send",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben sends",
+      "next": "case done"
+    }
+  ]
+}

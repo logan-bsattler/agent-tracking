@@ -1,0 +1,44 @@
+{
+  "code": "A2",
+  "name": "Target-date ask",
+  "group": "A",
+  "engine": false,
+  "trigger": "anyone asks Ben for a target, completion or retest date",
+  "steps": [
+    {
+      "key": "ingest",
+      "name": "Ingest",
+      "who": "code",
+      "kinds": [],
+      "gate": "triage proposes the intent",
+      "next": "master specs the draft the same turn"
+    },
+    {
+      "key": "draft",
+      "name": "Propose date and draft",
+      "who": "agent",
+      "kinds": [
+        "draft_reply",
+        "investigation"
+      ],
+      "gate": "date proposed from board and plan, within 1 business day",
+      "next": "draft lands"
+    },
+    {
+      "key": "confirm",
+      "name": "Confirm date",
+      "who": "ben",
+      "kinds": [],
+      "gate": "head of Ben's queue",
+      "next": "Ben confirms or changes the date"
+    },
+    {
+      "key": "send",
+      "name": "Send",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben sends",
+      "next": "case done"
+    }
+  ]
+}

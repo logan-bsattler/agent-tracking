@@ -1,0 +1,31 @@
+{
+  "code": "A10",
+  "name": "Ben's note to himself",
+  "group": "A",
+  "engine": false,
+  "trigger": "mail Ben sends himself",
+  "steps": [
+    {
+      "key": "ingest",
+      "name": "Ingest",
+      "who": "code",
+      "kinds": [],
+      "gate": "triage",
+      "next": "master tasks it"
+    },
+    {
+      "key": "work",
+      "name": "Task it",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "code_change",
+        "deliverable",
+        "data_pull",
+        "draft_reply"
+      ],
+      "gate": "result validates",
+      "next": "result lands"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "code": "A7",
+  "name": "Evidence that closes open items",
+  "group": "A",
+  "engine": false,
+  "trigger": "email-closes or teams-status intent",
+  "notes": "Cases are intents, not tasks: store.auto_close_intents settles id-matches.",
+  "steps": [
+    {
+      "key": "ingest",
+      "name": "Ingest",
+      "who": "code",
+      "kinds": [],
+      "gate": "triage",
+      "next": "intent proposed"
+    },
+    {
+      "key": "match",
+      "name": "Match loose ends",
+      "who": "code",
+      "kinds": [],
+      "gate": "id-match in code; topic-match by master",
+      "next": "decision recorded, loose ends resolved"
+    }
+  ]
+}

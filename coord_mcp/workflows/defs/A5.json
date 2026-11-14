@@ -1,0 +1,95 @@
+{
+  "code": "A5",
+  "name": "FDD review assigned to Ben",
+  "group": "A",
+  "engine": true,
+  "trigger": "a client tracker assigns Ben an FDD to review or size",
+  "steps": [
+    {
+      "key": "ingest",
+      "name": "Ingest",
+      "who": "code",
+      "kinds": [],
+      "gate": "triage proposes the intent",
+      "next": "master tasks a read"
+    },
+    {
+      "key": "read",
+      "name": "Read FDD and code",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "data_pull"
+      ],
+      "gate": "result validates",
+      "next": "result names the findings document"
+    },
+    {
+      "key": "findings",
+      "name": "Findings and questions",
+      "who": "agent",
+      "kinds": [
+        "deliverable",
+        "code_change"
+      ],
+      "gate": "HTML or the Logan format; never Markdown",
+      "next": "document lands",
+      "spawn": {
+        "on": "client_follow_up",
+        "kind": "deliverable",
+        "title": "{client}: findings for {root_title}",
+        "spec": {
+          "goal": "{follow_up}",
+          "read_first": "coord_get_task_result {prev} (the step before this one in case {case}: {root_title}).",
+          "constraints": [
+            "Write in <client>/work/, never deliverables/.",
+            "Format: HTML, or .docx where the FDD format is defined. Never Markdown.",
+            "Say Devoir, never offshore."
+          ],
+          "created_by": "workflow engine ({workflow}, case {case})"
+        },
+        "spec_defaults": {
+          "deliverable_type": "fdd-review",
+          "format": "html"
+        }
+      }
+    },
+    {
+      "key": "review",
+      "name": "Review",
+      "who": "code",
+      "kinds": [
+        "dod_review"
+      ],
+      "gate": "checklist for the deliverable type",
+      "next": "approve"
+    },
+    {
+      "key": "ben",
+      "name": "Ben reviews",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Promote on /deliverables",
+      "next": "Ben promotes"
+    },
+    {
+      "key": "reply",
+      "name": "Reply or tracker comment",
+      "who": "agent",
+      "kinds": [
+        "draft_reply",
+        "deliverable"
+      ],
+      "gate": "nothing sends or posts",
+      "next": "draft lands"
+    },
+    {
+      "key": "send",
+      "name": "Send or paste",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben sends or pastes",
+      "next": "case done"
+    }
+  ]
+}

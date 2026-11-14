@@ -1,0 +1,38 @@
+{
+  "code": "B2",
+  "name": "Repair loop",
+  "group": "B",
+  "engine": false,
+  "trigger": "pipeline item back to In Repair",
+  "notes": "Mining: shows as a loop inside a B1 case; a B2 root is rare.",
+  "steps": [
+    {
+      "key": "change",
+      "name": "Pipeline change",
+      "who": "code",
+      "kinds": [],
+      "gate": "pipeline intent",
+      "next": "master tasks an investigation"
+    },
+    {
+      "key": "investigate",
+      "name": "Investigate",
+      "who": "agent",
+      "kinds": [
+        "investigation"
+      ],
+      "gate": "result validates",
+      "next": "fix named"
+    },
+    {
+      "key": "fix",
+      "name": "Fix",
+      "who": "agent",
+      "kinds": [
+        "code_change"
+      ],
+      "gate": "build and dev-compile only",
+      "next": "B1 from review on"
+    }
+  ]
+}

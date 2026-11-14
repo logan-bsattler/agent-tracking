@@ -1,0 +1,58 @@
+{
+  "code": "C1",
+  "name": "Client document",
+  "group": "C",
+  "engine": false,
+  "trigger": "sizing, FDD plan, status report or meeting material asked for",
+  "steps": [
+    {
+      "key": "draft",
+      "name": "Draft in work/",
+      "who": "agent",
+      "kinds": [
+        "deliverable",
+        "code_change",
+        "data_pull",
+        "investigation"
+      ],
+      "gate": "dod/<type>.md exists; never Markdown",
+      "next": "file lands"
+    },
+    {
+      "key": "review",
+      "name": "Review",
+      "who": "code",
+      "kinds": [
+        "dod_review"
+      ],
+      "gate": "up to two rounds",
+      "next": "approve"
+    },
+    {
+      "key": "promote",
+      "name": "Promote",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben's click on /deliverables",
+      "next": "promoted"
+    },
+    {
+      "key": "cover",
+      "name": "Covering email",
+      "who": "agent",
+      "kinds": [
+        "draft_reply"
+      ],
+      "gate": "points at the promoted copy",
+      "next": "draft lands"
+    },
+    {
+      "key": "send",
+      "name": "Send",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben sends",
+      "next": "case done"
+    }
+  ]
+}

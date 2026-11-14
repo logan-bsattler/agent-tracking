@@ -1,0 +1,26 @@
+{
+  "code": "D3",
+  "name": "Hourly triage and morning recap",
+  "group": "D",
+  "engine": false,
+  "trigger": "hourly routine",
+  "notes": "Runs as a routine; no tasks.",
+  "steps": [
+    {
+      "key": "sweep",
+      "name": "Sweep mail and Teams",
+      "who": "code",
+      "kinds": [],
+      "gate": "routine",
+      "next": "intents proposed"
+    },
+    {
+      "key": "recap",
+      "name": "Recap",
+      "who": "code",
+      "kinds": [],
+      "gate": "routine",
+      "next": "Ben reads it"
+    }
+  ]
+}

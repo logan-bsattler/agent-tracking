@@ -1,0 +1,49 @@
+{
+  "code": "A11",
+  "name": "Technical question",
+  "group": "A",
+  "engine": false,
+  "trigger": "a client or Ben asks how something works, whether QAD can do X, where X lives",
+  "steps": [
+    {
+      "key": "ingest",
+      "name": "Ingest",
+      "who": "code",
+      "kinds": [],
+      "gate": "triage or meeting",
+      "next": "master tasks an investigation"
+    },
+    {
+      "key": "answer",
+      "name": "Investigate",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "review",
+        "data_pull"
+      ],
+      "gate": "result validates",
+      "next": "answer lands"
+    },
+    {
+      "key": "reply",
+      "name": "Reply",
+      "who": "agent",
+      "kinds": [
+        "draft_reply",
+        "deliverable",
+        "code_change"
+      ],
+      "gate": "nothing sends",
+      "next": "draft lands"
+    },
+    {
+      "key": "ben",
+      "name": "Ben reads or sends",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben",
+      "next": "case done"
+    }
+  ]
+}

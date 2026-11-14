@@ -1,0 +1,40 @@
+{
+  "code": "A8",
+  "name": "Commitment Ben made",
+  "group": "A",
+  "engine": false,
+  "trigger": "email-commitment or teams-commitment intent",
+  "notes": "Cases are commitments rows (coord_mcp/commitments.py).",
+  "steps": [
+    {
+      "key": "ingest",
+      "name": "Ingest",
+      "who": "code",
+      "kinds": [],
+      "gate": "triage",
+      "next": "commitments add"
+    },
+    {
+      "key": "link",
+      "name": "Link work",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "code_change",
+        "deliverable",
+        "draft_reply",
+        "data_pull"
+      ],
+      "gate": "a task that does the work",
+      "next": "work lands"
+    },
+    {
+      "key": "deliver",
+      "name": "Deliver",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben delivers",
+      "next": "commitments close on evidence"
+    }
+  ]
+}

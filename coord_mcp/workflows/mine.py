@@ -241,5 +241,5 @@ def findings_for(m: dict[str, Any]) -> list[str]:
 
 def write_report(conn: sqlite3.Connection, out: Path, revisions: list[str] | None = None) -> dict[str, Any]:
     m = mine(conn)
-    out.write_text(render(m, findings_for(m), revisions or []), encoding="utf-8")
+    out.write_text(render(m, findings_for(m), revisions or []), encoding="utf-8", newline="\n")
     return m

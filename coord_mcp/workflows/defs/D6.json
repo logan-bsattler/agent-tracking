@@ -1,0 +1,40 @@
+{
+  "code": "D6",
+  "name": "Tooling and method",
+  "group": "D",
+  "engine": false,
+  "trigger": "a trial of Kiro, Lynx or the board itself",
+  "steps": [
+    {
+      "key": "work",
+      "name": "Investigate or build",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "code_change",
+        "deliverable",
+        "data_pull"
+      ],
+      "gate": "result validates",
+      "next": "result lands"
+    },
+    {
+      "key": "review",
+      "name": "Review",
+      "who": "code",
+      "kinds": [
+        "dod_review"
+      ],
+      "gate": "checklist",
+      "next": "approve"
+    },
+    {
+      "key": "read",
+      "name": "Ben reads it",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben",
+      "next": "case done"
+    }
+  ]
+}

@@ -1,0 +1,140 @@
+{
+  "code": "B1",
+  "name": "FDD or requirement to production",
+  "group": "B",
+  "engine": true,
+  "trigger": "pipeline item, signed FDD or requirement",
+  "steps": [
+    {
+      "key": "spec_in",
+      "name": "Spec in",
+      "who": "code",
+      "kinds": [],
+      "gate": "pipeline item or intent",
+      "next": "master tasks sizing"
+    },
+    {
+      "key": "sizing",
+      "name": "Sizing",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "deliverable",
+        "data_pull"
+      ],
+      "gate": "sizing checklist",
+      "next": "estimate lands"
+    },
+    {
+      "key": "estimate_ok",
+      "name": "Approve estimate",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben approves the estimate; status and dates stay his",
+      "next": "Ben's ruling"
+    },
+    {
+      "key": "handoff",
+      "name": "Architect handoff",
+      "who": "agent",
+      "kinds": [
+        "code_change",
+        "investigation"
+      ],
+      "gate": "qad-architect-handoff",
+      "next": "handoff names the build"
+    },
+    {
+      "key": "build",
+      "name": "Build and dev compile",
+      "who": "agent",
+      "kinds": [
+        "code_change"
+      ],
+      "gate": "build and dev-compile only; do not check in",
+      "next": "build lands",
+      "spawn": {
+        "on": "client_follow_up",
+        "after": "handoff",
+        "kind": "code_change",
+        "title": "{client}: build for {root_title}",
+        "spec": {
+          "goal": "{follow_up}",
+          "read_first": "coord_get_task_result {prev} (the step before this one in case {case}: {root_title}).",
+          "constraints": [
+            "Build and dev-compile only; do not check in.",
+            "Say Devoir, never offshore."
+          ],
+          "created_by": "workflow engine ({workflow}, case {case})"
+        },
+        "cvc": true
+      }
+    },
+    {
+      "key": "review",
+      "name": "Review",
+      "who": "code",
+      "kinds": [
+        "dod_review"
+      ],
+      "gate": "cvc-code checklist",
+      "next": "approve"
+    },
+    {
+      "key": "checkin_ok",
+      "name": "Check-in approval",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben approves the check-in",
+      "next": "master creates the check-in"
+    },
+    {
+      "key": "checkin",
+      "name": "Check-in",
+      "who": "agent",
+      "kinds": [
+        "code_change"
+      ],
+      "gate": "gate.check_checkin",
+      "next": "checked in",
+      "match": {
+        "spec_has": "checkin_of"
+      }
+    },
+    {
+      "key": "note",
+      "name": "Pipeline note",
+      "who": "code",
+      "kinds": [],
+      "gate": "pipeline-note claim",
+      "next": "note added"
+    },
+    {
+      "key": "evidence",
+      "name": "Test evidence",
+      "who": "agent",
+      "kinds": [
+        "deliverable",
+        "investigation"
+      ],
+      "gate": "test-evidence checklist",
+      "next": "evidence lands"
+    },
+    {
+      "key": "promote",
+      "name": "Promote DEVL/TEST/PROD",
+      "who": "ben",
+      "kinds": [],
+      "gate": "promotion asks are Ben's (A4)",
+      "next": "installed"
+    },
+    {
+      "key": "signoff",
+      "name": "UAT sign-off",
+      "who": "ben",
+      "kinds": [],
+      "gate": "client signs off; Ben records it",
+      "next": "case done"
+    }
+  ]
+}

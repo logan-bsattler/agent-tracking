@@ -1,6 +1,9 @@
 """python -m coord_mcp.workflows <command>
 
   mine [--db PATH] [--out FILE] [--json]   tag every task and intent, write the HTML report (read-only)
+  backfill [--db PATH]                     put every past task in a case (writes the case tables only)
+  cases [--db PATH] [--open] [--workflow X] [--json]   list cases and where each stands (read-only)
+  case <id> [--db PATH]                    one case with its tasks, decisions and events, as JSON
 """
 
 from __future__ import annotations
@@ -21,7 +24,45 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--db")
     m.add_argument("--out", help="HTML report path (default docs/workflow-mining-<date>.html)")
     m.add_argument("--json", action="store_true", help="print the numbers as JSON instead")
+    b = sub.add_parser("backfill", help="every past task into a case; safe to re-run")
+    b.add_argument("--db")
+    c = sub.add_parser("cases", help="list cases and where each stands")
+    c.add_argument("--db")
+    c.add_argument("--open", action="store_true", help="open cases only")
+    c.add_argument("--workflow")
+    c.add_argument("--json", action="store_true")
+    one = sub.add_parser("case", help="one case as JSON")
+    one.add_argument("id")
+    one.add_argument("--db")
     a = ap.parse_args(argv)
+
+    if a.cmd in ("backfill", "cases", "case"):
+        from ..db import connect
+        from . import cases as cs
+        conn = connect(a.db) if a.db else connect()
+        try:
+            if a.cmd == "backfill":
+                print(json.dumps(cs.backfill(conn)))
+                return 0
+            if a.cmd == "case":
+                d = cs.case_detail(conn, a.id)
+                if d is None:
+                    print(f"no case {a.id}", file=sys.stderr)
+                    return 1
+                print(json.dumps(d, indent=1))
+                return 0
+            rows = cs.list_cases(conn, open_only=a.open, workflow=a.workflow)
+            if a.json:
+                print(json.dumps(rows, indent=1))
+                return 0
+            from . import name
+            for r in rows:
+                print(f"{r['id']}  {r['workflow'] or '-':4} {r['state']:5} {r['step'] or '-':14} "
+                      f"{r['waits_on'] or '-':7} {r['client'] or '-':9} {r['title'][:70]}")
+            print(f"{len(rows)} case(s)")
+        finally:
+            conn.close()
+        return 0
 
     if a.cmd == "mine":
         from . import mine as mn

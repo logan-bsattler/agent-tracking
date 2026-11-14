@@ -2333,6 +2333,15 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         queue.expire_due(conn)
                     except Exception:
                         loop_error(connect, "expire")
+                    # Workflow cases (workflows/cases.py): attach new tasks to
+                    # their case and re-derive where each open case stands.
+                    # Bookkeeping only; COORD_WORKFLOW_SYNC=0 turns it off.
+                    try:
+                        from .workflows import cases
+                        if cases.enabled():
+                            cases.sync(conn)
+                    except Exception:
+                        loop_error(connect, "workflows")
                 finally:
                     conn.close()
             except Exception:  # a locked db or a vanished file: the next pass gets it

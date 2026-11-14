@@ -1,0 +1,70 @@
+{
+  "code": "B3",
+  "name": "Environment refresh recovery",
+  "group": "B",
+  "engine": true,
+  "trigger": "DEVL refreshed (or about to be) from PROD",
+  "steps": [
+    {
+      "key": "notice",
+      "name": "Notice",
+      "who": "code",
+      "kinds": [],
+      "gate": "triage",
+      "next": "master tasks the in-flight list"
+    },
+    {
+      "key": "inflight",
+      "name": "List in-flight work",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "data_pull"
+      ],
+      "gate": "result lists what the refresh wipes",
+      "next": "list lands"
+    },
+    {
+      "key": "confirm",
+      "name": "Confirm to QAD",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben confirms the timing with QAD",
+      "next": "Ben's ruling"
+    },
+    {
+      "key": "restore",
+      "name": "Restore setup",
+      "who": "agent",
+      "kinds": [
+        "code_change"
+      ],
+      "gate": "build and dev-compile only",
+      "next": "setup restored"
+    },
+    {
+      "key": "reverify",
+      "name": "Re-verify",
+      "who": "agent",
+      "kinds": [
+        "investigation"
+      ],
+      "gate": "checked against data",
+      "next": "case done",
+      "spawn": {
+        "on": "result",
+        "after": "restore",
+        "kind": "investigation",
+        "title": "{client}: re-verify after refresh, {root_title}",
+        "spec": {
+          "question": "After the restore in task {prev}, does each item it restored work again in DEVL? One line per item.",
+          "read_first": "coord_get_task_result {prev}",
+          "constraints": [
+            "Read only."
+          ],
+          "created_by": "workflow engine ({workflow}, case {case})"
+        }
+      }
+    }
+  ]
+}

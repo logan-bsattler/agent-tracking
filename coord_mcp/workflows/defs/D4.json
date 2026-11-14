@@ -1,0 +1,36 @@
+{
+  "code": "D4",
+  "name": "Client onboarding",
+  "group": "D",
+  "engine": false,
+  "trigger": "a new client",
+  "steps": [
+    {
+      "key": "setup",
+      "name": "Folder, scripts, key, session",
+      "who": "code",
+      "kinds": [],
+      "gate": "qad-client-onboard skill",
+      "next": "key generated"
+    },
+    {
+      "key": "key",
+      "name": "Key install",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben installs the public key",
+      "next": "verified"
+    },
+    {
+      "key": "characterize",
+      "name": "Characterize",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "code_change"
+      ],
+      "gate": "CLAUDE.md 'Not yet characterized' filled",
+      "next": "case done"
+    }
+  ]
+}

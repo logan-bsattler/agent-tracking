@@ -1,0 +1,27 @@
+{
+  "code": "D1",
+  "name": "Board hygiene",
+  "group": "D",
+  "engine": false,
+  "trigger": "minder, park, cleanup, 14-day expiry, self-clear",
+  "steps": [
+    {
+      "key": "check",
+      "name": "Evidence check",
+      "who": "agent",
+      "kinds": [
+        "investigation"
+      ],
+      "gate": "board cleanup procedure",
+      "next": "closes recorded"
+    },
+    {
+      "key": "close",
+      "name": "Close on evidence",
+      "who": "code",
+      "kinds": [],
+      "gate": "decisions cite the evidence",
+      "next": "case done"
+    }
+  ]
+}

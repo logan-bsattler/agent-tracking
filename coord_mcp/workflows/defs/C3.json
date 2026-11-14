@@ -1,0 +1,62 @@
+{
+  "code": "C3",
+  "name": "Running analysis",
+  "group": "C",
+  "engine": false,
+  "trigger": "new input to a running analysis (MAG breakdown, wave plan, cancel list)",
+  "steps": [
+    {
+      "key": "input",
+      "name": "New input",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "data_pull"
+      ],
+      "gate": "result validates",
+      "next": "regen named"
+    },
+    {
+      "key": "regen",
+      "name": "Regenerate workbook",
+      "who": "agent",
+      "kinds": [
+        "code_change",
+        "data_pull",
+        "deliverable"
+      ],
+      "gate": "one workbook, one item",
+      "next": "workbook lands"
+    },
+    {
+      "key": "review",
+      "name": "Review",
+      "who": "code",
+      "kinds": [
+        "dod_review"
+      ],
+      "gate": "checklist",
+      "next": "approve"
+    },
+    {
+      "key": "rulings",
+      "name": "Ben rules",
+      "who": "ben",
+      "kinds": [],
+      "gate": "per-row rulings; precedent may settle covered rows (build step 6)",
+      "next": "rulings recorded"
+    },
+    {
+      "key": "apply",
+      "name": "Apply rulings",
+      "who": "agent",
+      "kinds": [
+        "code_change",
+        "deliverable",
+        "data_pull"
+      ],
+      "gate": "rulings cited",
+      "next": "regenerate"
+    }
+  ]
+}

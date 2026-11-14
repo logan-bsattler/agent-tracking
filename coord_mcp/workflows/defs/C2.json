@@ -1,0 +1,39 @@
+{
+  "code": "C2",
+  "name": "Tracker text",
+  "group": "C",
+  "engine": false,
+  "trigger": "RAID log, Jira or ServiceNow text owed",
+  "steps": [
+    {
+      "key": "draft",
+      "name": "Draft text",
+      "who": "agent",
+      "kinds": [
+        "deliverable",
+        "code_change",
+        "investigation"
+      ],
+      "gate": "tracker-comment checklist",
+      "next": "text lands"
+    },
+    {
+      "key": "review",
+      "name": "Review",
+      "who": "code",
+      "kinds": [
+        "dod_review"
+      ],
+      "gate": "checklist",
+      "next": "approve"
+    },
+    {
+      "key": "paste",
+      "name": "Paste",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben pastes; nothing posts in code",
+      "next": "case done"
+    }
+  ]
+}

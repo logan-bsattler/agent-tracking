@@ -1,0 +1,38 @@
+{
+  "code": "D5",
+  "name": "Definition-of-done checklist",
+  "group": "D",
+  "engine": false,
+  "trigger": "a deliverable type with no checklist",
+  "steps": [
+    {
+      "key": "draft",
+      "name": "Draft dod/<type>.md",
+      "who": "agent",
+      "kinds": [
+        "code_change",
+        "deliverable"
+      ],
+      "gate": "from the spec and past rework",
+      "next": "checklist lands"
+    },
+    {
+      "key": "review",
+      "name": "Review",
+      "who": "code",
+      "kinds": [
+        "dod_review"
+      ],
+      "gate": "checklist",
+      "next": "approve"
+    },
+    {
+      "key": "approve",
+      "name": "Ben approves",
+      "who": "ben",
+      "kinds": [],
+      "gate": "what counts as client-ready is Ben's",
+      "next": "case done"
+    }
+  ]
+}

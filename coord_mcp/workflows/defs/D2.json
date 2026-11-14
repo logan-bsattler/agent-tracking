@@ -1,0 +1,26 @@
+{
+  "code": "D2",
+  "name": "Hours",
+  "group": "D",
+  "engine": false,
+  "trigger": "billing period",
+  "notes": "Cases live in time entries and /hours, not tasks.",
+  "steps": [
+    {
+      "key": "draft",
+      "name": "Draft minutes",
+      "who": "code",
+      "kinds": [],
+      "gate": "transcripts and meetings",
+      "next": "draft on /hours"
+    },
+    {
+      "key": "edit",
+      "name": "Edit and bill",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben",
+      "next": "billed"
+    }
+  ]
+}

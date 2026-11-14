@@ -1,0 +1,44 @@
+{
+  "code": "A6",
+  "name": "Decision ask",
+  "group": "A",
+  "engine": false,
+  "trigger": "someone asks Ben to decide scope, price, staffing or a commitment",
+  "steps": [
+    {
+      "key": "ingest",
+      "name": "Ingest",
+      "who": "code",
+      "kinds": [],
+      "gate": "triage proposes an email-reply intent",
+      "next": "master specs the draft around the options"
+    },
+    {
+      "key": "draft",
+      "name": "Draft around the options",
+      "who": "agent",
+      "kinds": [
+        "draft_reply",
+        "investigation"
+      ],
+      "gate": "options listed in the summary",
+      "next": "draft lands"
+    },
+    {
+      "key": "decide",
+      "name": "Ben decides",
+      "who": "ben",
+      "kinds": [],
+      "gate": "never decided for him",
+      "next": "Ben's ruling"
+    },
+    {
+      "key": "send",
+      "name": "Send",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben sends",
+      "next": "case done"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "code": "C4",
+  "name": "Meeting preparation",
+  "group": "C",
+  "engine": false,
+  "trigger": "a meeting on Ben's calendar",
+  "notes": "Per-meeting briefs are built in code at /brief/<meeting> (build step 5).",
+  "steps": [
+    {
+      "key": "brief",
+      "name": "Per-meeting brief",
+      "who": "code",
+      "kinds": [],
+      "gate": "calendar imported for the day",
+      "next": "brief page ready"
+    },
+    {
+      "key": "prep",
+      "name": "Prep material",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "deliverable",
+        "code_change",
+        "data_pull"
+      ],
+      "gate": "result validates",
+      "next": "material lands"
+    },
+    {
+      "key": "review",
+      "name": "Review",
+      "who": "code",
+      "kinds": [
+        "dod_review"
+      ],
+      "gate": "checklist",
+      "next": "approve"
+    },
+    {
+      "key": "read",
+      "name": "Ben reads it",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben",
+      "next": "case done"
+    }
+  ]
+}

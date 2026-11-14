@@ -1,0 +1,83 @@
+{
+  "code": "A1",
+  "name": "Status request",
+  "group": "A",
+  "engine": true,
+  "trigger": "email-status or teams-ask intent, or an email asking where something stands",
+  "steps": [
+    {
+      "key": "ingest",
+      "name": "Ingest",
+      "who": "code",
+      "kinds": [],
+      "gate": "hourly triage proposes the intent",
+      "next": "master tasks a status read"
+    },
+    {
+      "key": "status_read",
+      "name": "Status read",
+      "who": "agent",
+      "kinds": [
+        "investigation",
+        "data_pull"
+      ],
+      "gate": "result validates",
+      "next": "result lands done"
+    },
+    {
+      "key": "draft",
+      "name": "Draft reply",
+      "who": "agent",
+      "kinds": [
+        "draft_reply"
+      ],
+      "gate": "nothing sends",
+      "next": "draft lands",
+      "spawn": {
+        "on": "result",
+        "kind": "draft_reply",
+        "title": "{client}: reply on {root_title}",
+        "spec": {
+          "goal": "Draft the reply to the client email this case answers ({root_title}), from the finished step's result.",
+          "read_first": "coord_get_task_result {prev} with fields [\"verdict\", \"evidence\", \"pointers\", \"summary\"]; the case's intent is {intent}.",
+          "reply_from": "{reply_from}",
+          "reply_date": "{reply_date}",
+          "constraints": [
+            "Nothing sends: write the body to a file and return the draft_reply envelope.",
+            "The body ends with 'Thanks!' and no name; Ben's Outlook signature carries it.",
+            "Promise nothing no task covers; if the answer needs more work, put it in follow_ups instead.",
+            "Say Devoir, never offshore."
+          ],
+          "created_by": "workflow engine ({workflow}, case {case})"
+        },
+        "takes_follow_up": "repl|draft|email|answer|respond|tell|confirm"
+      }
+    },
+    {
+      "key": "review",
+      "name": "Review",
+      "who": "code",
+      "kinds": [
+        "dod_review"
+      ],
+      "gate": "client-email checklist, when the gate is on",
+      "next": "approve"
+    },
+    {
+      "key": "outlook",
+      "name": "Outlook draft",
+      "who": "code",
+      "kinds": [],
+      "gate": "minder lists finished drafts; master types it into Drafts",
+      "next": "draft in Outlook"
+    },
+    {
+      "key": "send",
+      "name": "Send",
+      "who": "ben",
+      "kinds": [],
+      "gate": "Ben reads and sends",
+      "next": "case done"
+    }
+  ]
+}
