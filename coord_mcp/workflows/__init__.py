@@ -42,6 +42,26 @@ CATALOG: dict[str, tuple[str, str]] = {
     "D6": ("Tooling and method", "D"),
 }
 
+
+
+def _adopted() -> None:
+    """Workflows adopted from a proposal (propose.adopt) live only in their
+    defs/<code>.json; put each in CATALOG so every page and check knows it."""
+    import json
+    from pathlib import Path
+    for f in sorted((Path(__file__).with_name("defs")).glob("*.json")):
+        if f.stem in CATALOG:
+            continue
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if d.get("code") == f.stem and d.get("name") and d.get("group") in ("A", "B", "C", "D"):
+            CATALOG[f.stem] = (d["name"], d["group"])
+
+
+_adopted()
+
 GROUPS = {"A": "Triggered by something arriving", "B": "Pipeline development",
           "C": "Documents and analysis", "D": "Upkeep"}
 

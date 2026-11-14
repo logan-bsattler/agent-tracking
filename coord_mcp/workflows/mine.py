@@ -86,7 +86,7 @@ def tag_board(conn: sqlite3.Connection) -> dict[str, Any]:
         for tid in json.loads(r["task_ids"] or "[]") if (r["task_ids"] or "").startswith("[") else []:
             if tid in tasks:
                 codes.append(tasks[tid]["workflow"])
-        code, rule = tag_intent(r["source"], codes)
+        code, rule = tag_intent(r["source"], codes, r["summary"] or "")
         intents[r["id"]] = {"workflow": code, "rule": rule, "source": r["source"], "state": r["state"],
                             "summary": r["summary"]}
     return {"tasks": tasks, "intents": intents, "cases": cases}

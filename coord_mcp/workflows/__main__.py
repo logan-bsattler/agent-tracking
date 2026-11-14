@@ -5,6 +5,12 @@
   cases [--db PATH] [--open] [--workflow X] [--json]   list cases and where each stands (read-only)
   case <id> [--db PATH]                    one case with its tasks, decisions and events, as JSON
   engine --dry-run [--db PATH]             what the engine would create now (writes nothing)
+  propose [--db PATH] [--file] [--json]    find new or drifting workflows and draft definitions under
+                                           proposed/ (dry run by default: prints, writes no file, files
+                                           nothing); --file writes the drafts and puts up to 3 a week in
+                                           Ben's queue
+  adopt <id> [--db PATH]                   move an approved proposal into defs/, record it, backfill
+  reject <id> [--defer] [--db PATH]        close (or defer) a proposal's item in Ben's queue
   precedent [--db PATH] [--out FILE] [--json] [--apply]
                                            open Ben loose ends a past ruling would settle (read-only;
                                            --apply needs COORD_WORKFLOW_PRECEDENT=1)
@@ -51,7 +57,70 @@ def main(argv: list[str] | None = None) -> int:
     at.add_argument("task_id")
     at.add_argument("case_id")
     at.add_argument("--db")
+    po = sub.add_parser("propose", help="weekly miner: new or drifting workflows")
+    po.add_argument("--db")
+    po.add_argument("--file", action="store_true", help="write drafts and file Ben items (default: dry run)")
+    po.add_argument("--json", action="store_true")
+    ad = sub.add_parser("adopt", help="adopt a proposal (its id or its Ben item's follow-up id)")
+    ad.add_argument("id")
+    ad.add_argument("--db")
+    rj = sub.add_parser("reject", help="reject or defer a proposal")
+    rj.add_argument("id")
+    rj.add_argument("--defer", action="store_true")
+    rj.add_argument("--db")
     a = ap.parse_args(argv)
+
+    if a.cmd == "propose":
+        from . import propose as pp
+        if a.file:
+            from ..db import connect
+            from . import cases as cs
+            conn = connect(a.db) if a.db else connect()
+            cs.sync(conn)
+        else:
+            from . import mine as mn
+            conn = mn.connect_ro(a.db)
+        try:
+            props = pp.draft(conn, pp.find(conn))
+            if a.file:
+                pp.write(props)
+                filing = pp.file(conn, props)
+            else:
+                filing = pp.file(conn, props, dry_run=True) if pp._has(conn, "workflow_proposals") else                     {"filed": [{"id": p["id"], "what": pp.item_text(p)} for p in props
+                               if not p["errors"]][:pp.WEEKLY_CAP], "skipped": []}
+        finally:
+            conn.close()
+        if a.json:
+            print(json.dumps({"proposals": props, "filing": filing}, indent=1, default=str))
+            return 0
+        for p in props:
+            bad = f"  INVALID: {'; '.join(p['errors'][:2])}" if p["errors"] else ""
+            print(f"{p['id']:16} {p['kind']:6} {p['cases']:4} cases  {p['name']}{bad}")
+            for w in p["why"]:
+                print(f"{'':18}- {w}")
+            print(f"{'':18}examples: {', '.join(p['examples'])}")
+        verb = "filed" if a.file else "would file"
+        for f in filing["filed"]:
+            print(f"{verb}: {f['what']}")
+        for s in filing["skipped"]:
+            print(f"not filed: {s['id']} ({s['why']})")
+        if not props:
+            print("no findings")
+        return 0
+
+    if a.cmd in ("adopt", "reject"):
+        from ..db import connect
+        from . import propose as pp
+        conn = connect(a.db) if a.db else connect()
+        try:
+            out = pp.adopt(conn, a.id) if a.cmd == "adopt" else pp.reject(conn, a.id, defer=a.defer)
+        except (KeyError, ValueError) as e:
+            print(f"refused: {e}", file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
+        print(json.dumps(out, indent=1))
+        return 0
 
     if a.cmd == "attach":
         from ..db import connect

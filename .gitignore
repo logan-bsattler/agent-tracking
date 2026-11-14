@@ -5,3 +5,6 @@ build/
 .preview/
 .venv/
 .mcp.json
+
+# Weekly workflow miner drafts (written by the dashboard; adopt moves them into defs/)
+coord_mcp/workflows/proposed/

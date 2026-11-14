@@ -28,6 +28,13 @@ A definition is ordered steps. Each step says:
                   resolved as tasked by the new task
               cvc: true marks CVC-bound code (dev-compile only, no check-in)
               spec_defaults: spec fields set when the template lacks them
+  optional    optional true: cases often go past the step without it, so
+              the case-step check (checks.py) does not warn when it is
+              skipped. Set by an adopted drift proposal (propose.py).
+
+A definition may also carry `tag` {title_re, kinds?, sources?}: the rule
+that puts a root task (or an intent, by its summary) in the workflow when no
+built-in rule in tag.py does. Adopted proposals for new workflows bring one.
 """
 
 from __future__ import annotations
@@ -72,17 +79,43 @@ def sla_errors(v: Any) -> list[str]:
     return errs
 
 
-def validate(d: dict[str, Any], kinds: tuple[str, ...] | list[str] | None = None) -> list[str]:
-    """Problems with one definition; empty when it is sound."""
+def tag_errors(v: Any) -> list[str]:
+    """Problems with a definition's tag rule; empty when it is sound."""
+    if not isinstance(v, dict):
+        return ["tag must be an object"]
+    errs = []
+    extra = set(v) - {"title_re", "kinds", "sources"}
+    if extra:
+        errs.append(f"tag has unknown fields {sorted(extra)}")
+    try:
+        re.compile(v.get("title_re") or "")
+    except re.error as e:
+        errs.append(f"tag title_re is not a regex ({e})")
+    if not (v.get("title_re") or "").strip():
+        errs.append("tag needs a title_re")
+    for k in ("kinds", "sources"):
+        if k in v and not (isinstance(v[k], list) and all(isinstance(x, str) for x in v[k])):
+            errs.append(f"tag {k} must be a list of text")
+    return errs
+
+
+def validate(d: dict[str, Any], kinds: tuple[str, ...] | list[str] | None = None,
+             catalog: dict[str, tuple[str, str]] | None = None) -> list[str]:
+    """Problems with one definition; empty when it is sound. `catalog`
+    defaults to CATALOG; a proposal for a new workflow passes one that also
+    holds its own code (propose.py)."""
     if kinds is None:
         from ..contracts import CONTRACTS
         kinds = tuple(CONTRACTS)
+    catalog = CATALOG if catalog is None else catalog
     errs: list[str] = []
     code = d.get("code")
-    if code not in CATALOG:
+    if code not in catalog:
         errs.append(f"code {code!r} is not in the catalog")
-    elif d.get("name") != CATALOG[code][0]:
-        errs.append(f"{code}: name {d.get('name')!r} differs from the catalog's {CATALOG[code][0]!r}")
+    elif d.get("name") != catalog[code][0]:
+        errs.append(f"{code}: name {d.get('name')!r} differs from the catalog's {catalog[code][0]!r}")
+    if "tag" in d:
+        errs.extend(f"{code}: {e}" for e in tag_errors(d["tag"]))
     steps = d.get("steps") or []
     if not steps:
         errs.append(f"{code}: no steps")
@@ -102,6 +135,8 @@ def validate(d: dict[str, Any], kinds: tuple[str, ...] | list[str] | None = None
         for f in ("name", "gate", "next"):
             if not st.get(f):
                 errs.append(f"{where}: no {f}")
+        if "optional" in st and not isinstance(st["optional"], bool):
+            errs.append(f"{where}: optional must be true or false")
         if "sla" in st:
             errs.extend(f"{where}: {e}" for e in sla_errors(st["sla"]))
         sp = st.get("spawn")
@@ -135,7 +170,7 @@ def validate(d: dict[str, Any], kinds: tuple[str, ...] | list[str] | None = None
 
 
 @lru_cache(maxsize=4)
-def _load(path: str) -> dict[str, dict[str, Any]]:
+def _load(path: str, stamp: float = 0.0) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for f in sorted(Path(path).glob("*.json")):
         d = json.loads(f.read_text(encoding="utf-8"))
@@ -147,8 +182,17 @@ def _load(path: str) -> dict[str, dict[str, Any]]:
 
 def load(path: Path | None = None) -> dict[str, dict[str, Any]]:
     """Every definition by code. Validated by tests, not here, so a bad file
-    never stops the dashboard: get() falls back to an empty step list."""
-    return _load(str(path or DEFS_DIR))
+    never stops the dashboard: get() falls back to an empty step list.
+
+    Cached per directory mtime: an adopted proposal (propose.adopt) writes
+    its file by rename, which moves the mtime, so every process sees it on
+    its next read without a restart."""
+    p = Path(path or DEFS_DIR)
+    try:
+        stamp = p.stat().st_mtime
+    except OSError:
+        stamp = 0.0
+    return _load(str(p), stamp)
 
 
 def get(code: str | None) -> dict[str, Any] | None:

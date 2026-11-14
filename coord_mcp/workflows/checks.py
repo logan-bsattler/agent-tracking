@@ -168,7 +168,7 @@ def skipped(conn: sqlite3.Connection, case: sqlite3.Row, kind: str, spec: dict[s
     gate_on = gate.since(conn) is not None
     miss = []
     for st in steps[max(reached, 0):at]:
-        if st["key"] in done or not st.get("kinds"):
+        if st["key"] in done or not st.get("kinds") or st.get("optional"):
             continue
         if st["who"] == "agent" or (st["who"] == "code" and gate_on):
             miss.append(st)

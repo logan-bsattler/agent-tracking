@@ -153,10 +153,31 @@ def tag_root(kind: str, title: str, spec: Any = None, client: str | None = None,
         return SOURCE_WORKFLOW[source], f"source:{source}"
     if kind == "investigation":
         return "A11", "question"
+    return adopted_rule(t, kind, source)
+
+
+def adopted_rule(text: str, kind: str | None, source: str | None) -> tuple[str | None, str]:
+    """A workflow adopted from a proposal (propose.py) carries its own `tag`
+    rule in its definition. Tried only when no built-in rule matched, which
+    is where its cluster came from."""
+    from . import definitions as defs
+    for code, d in defs.load().items():
+        tg = d.get("tag")
+        if not isinstance(tg, dict) or not tg.get("title_re"):
+            continue
+        if tg.get("kinds") and kind not in tg["kinds"]:
+            continue
+        if tg.get("sources") and source not in tg["sources"]:
+            continue
+        try:
+            if re.search(tg["title_re"], text or "", _I):
+                return code, f"adopted:{code}"
+        except re.error:
+            continue
     return None, "none"
 
 
-def tag_intent(source: str, task_codes: list[str | None]) -> tuple[str | None, str]:
+def tag_intent(source: str, task_codes: list[str | None], summary: str = "") -> tuple[str | None, str]:
     """An intent's workflow: the one its own source names when the source is
     the workflow (closes, commitments), else its first task's, else the
     source's default."""
@@ -167,7 +188,7 @@ def tag_intent(source: str, task_codes: list[str | None]) -> tuple[str | None, s
             return c, "task"
     if source in SOURCE_WORKFLOW:
         return SOURCE_WORKFLOW[source], f"source:{source}"
-    return None, "none"
+    return adopted_rule(summary, None, source)
 
 
 def pattern(title: str, kind: str) -> str:
