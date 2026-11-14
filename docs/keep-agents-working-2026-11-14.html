@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Keep Agents Working</title>
+<style>
+:root{--bg:#fff;--fg:#1b1b1b;--muted:#666;--card:#f6f6f4;--line:#ddd;--accent:#2f6fde}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161616;--fg:#eaeaea;--muted:#9a9a9a;--card:#202020;--line:#333;--accent:#7aa7ff}}
+:root[data-theme="dark"]{--bg:#161616;--fg:#eaeaea;--muted:#9a9a9a;--card:#202020;--line:#333;--accent:#7aa7ff}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0;padding:24px 16px}
+main{max-width:860px;margin:0 auto}h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px}
+.sub{color:var(--muted)}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:10px 0}
+table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
+code{font-size:13px}.ask{border-left:4px solid var(--accent)}
+</style></head><body><main>
+<h1>Keep agents working</h1>
+<p class="sub">agent-tracking commit a4f344b, 2026-11-14. Auto-dispatch was already on. It now sends the earliest-due commitment's task first, and master can see what it would send and which sessions sit idle.</p>
+
+<div class="card ask"><b>What Ben must decide</b>
+<p><b>Switch Royal - MIGR to <code>auto</code>.</b> Every session is in <code>auto</code> permission mode except Royal - MIGR, which is in <code>acceptEdits</code>. When sender and receiver modes differ, <code>send_message</code> waits for an approval nobody sees and times out. Royal - Local hands server work to MIGR, so those handoffs can stall. Recommendation: keep <code>auto</code> everywhere and switch MIGR. It is your call because it widens what that session may do unprompted.</p>
+<table>
+<tr><th>Mode</th><th>Sessions</th></tr>
+<tr><td><code>auto</code></td><td>Master Agent (worker), Master Desktop; all 13 client "- Local" sessions (Moog, Royal, Cascade, LNK, TS Tech, PBE, MAG, Furlani, Yamamoto, GHSP, JBSS, Acument, P&amp;C); Royal - DEVL, Moog - DEVL, Yamamoto - DEVL</td></tr>
+<tr><td><code>acceptEdits</code></td><td><b>Royal - MIGR</b> (<code>local_7c785e66</code>)</td></tr>
+</table>
+<p class="sub">No "- Local 2" side sessions exist. Source: the app's session metadata files (<code>permissionMode</code>); <code>get_session</code> does not report it. To switch: open Royal - MIGR and pick Auto in its mode menu.</p>
+</div>
+
+<h2>What is live</h2>
+<table>
+<tr><th>Piece</th><th>Behaviour</th></tr>
+<tr><td>Auto-dispatch order</td><td><code>sessions.next_dispatch</code> picks, per free session, the task under the earliest-due commitment, then the oldest. It was oldest-first before.</td></tr>
+<tr><td>Auto-dispatch rules (audited, unchanged)</td><td>One task in flight per session (busy = picked up, sent, claimed or parked). A primary never gets a second <code>code_change</code> or <code>deliverable</code>. Parked, held (a decision within a week) and waiting tasks are skipped. A <code>dod_review</code> with no side session stays with master.</td></tr>
+<tr><td><code>sessions dry-run</code></td><td>Lists what the next tick would send, one per session, and why each other task waits. When checked earlier today it sent nothing: MAG <code>98d45fe893f9</code> held by decision <code>0b849306d9ea</code>, LNK <code>49ef90195735</code> (a review) held by <code>21ff25b2c68d</code>.</td></tr>
+<tr><td><code>sessions idle</code></td><td>Lists free registered sessions beside owed, dispatchable work for 15+ minutes. At that check there were none.</td></tr>
+<tr><td><code>sessions.mark_manual</code></td><td>Stamps a task master sent by hand so auto-dispatch counts that session busy. Tested, but not wired yet (Brief A).</td></tr>
+<tr><td>Master CLAUDE.md</td><td>"Dispatching" now opens by saying auto-dispatch is on and lists what master still owns: parks and re-dispatch, reviews with no side session, unregistered clients, held tasks, and short tasks queued to busy sessions. Backup: <code>CLAUDE.md.bak-20261114-dispatch</code>.</td></tr>
+</table>
+
+<h2>In progress (not on origin/main when this was written)</h2>
+<ul>
+<li><b>Brief A</b>: <code>POST /api/dispatch/manual</code>, plus a coord-rules hook that stamps master's hand-sent <code>Do task &lt;id&gt;</code>. Until it lands, a hand-sent task can be followed by an auto-dispatch to the same session before the client picks it up.</li>
+<li><b>Brief B</b>: an "idle" minder condition and an idle list on /board.</li>
+<li><b>Brief C</b>: confirm a live tick sends what <code>dry-run</code> lists (<code>dispatch_attempts</code> in the board database).</li>
+</ul>
+
+<h2>Switches and commands</h2>
+<ul>
+<li><code>COORD_AUTO_DISPATCH=1</code> and <code>COORD_AUTO_PIPELINE_NOTES=1</code>: already set in <code>C:\development\agents\.claude\settings.local.json</code>, read by the master-console mod.</li>
+<li><code>python -m coord_mcp.sessions dry-run</code>, <code>sessions idle</code>, <code>sessions list</code> (run in <code>agent-tracking/</code>).</li>
+</ul>
+
+<h2>Restarts</h2>
+<ul>
+<li><b>Dashboard</b>: needed. The mod claims tasks through the dashboard (<code>/api/dispatch/claim</code>), and the running one started at 2:23 PM, before a4f344b (2:28 PM). Until it restarts, claims stay oldest-first. Restart the at-logon scheduled task and keep <code>COORD_WORKFLOW_ENGINE=1</code>.</li>
+<li><b>Master sessions</b>: needed only for Brief A's hook, once it lands (mods load at session start).</li>
+<li>The CLI commands work now, with no restart.</li>
+</ul>
+
+<h2>Tests</h2>
+<p>a4f344b added 6 tests in <code>tests/test_dispatch.py</code> (due order, dry run, idle, manual stamp). This page and the doc edits change no code; both suites were rerun before the push.</p>
+</main></body></html>

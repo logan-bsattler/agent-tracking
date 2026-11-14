@@ -325,12 +325,16 @@ Four of master's per-turn procedures run without it (2026-11-13):
   (`store.create_review`), unless one exists or two `request_changes`
   rounds already ran (that goes to Ben through master).
 - **Dispatch.** `python -m coord_mcp.sessions seed|set|list` keeps each
-  client's primary and side session. `sessions.next_dispatch` picks the
-  oldest undelivered task whose session is free; the master-console mod
+  client's primary and side session. `sessions.next_dispatch` picks, per
+  free session, the undelivered task under the earliest-due commitment
+  (`commitments.due_map`), then the oldest; the master-console mod
   claims it (`/api/dispatch/claim`, a lease), sends
   `Do task <id>. Start with coord_get_task.` and reports back
   (`/api/dispatch/sent`). Parked tasks, reviews with no side session and
   unregistered clients stay master's. Off unless `COORD_AUTO_DISPATCH=1`.
+  `python -m coord_mcp.sessions dry-run` lists what the next tick would
+  send and why each other task waits; `sessions idle` lists free sessions
+  sitting beside owed, dispatchable work for 15+ minutes.
 - **Pipeline notes.** `queue.pipeline_note_text` writes the one-line note;
   the mod claims one (`/api/pipeline-note/claim`), adds it with
   sharepoint-pipeline's `add_task_note`, and reports back
