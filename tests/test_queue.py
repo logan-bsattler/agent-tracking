@@ -42,7 +42,7 @@ def _ben(what):
     ("Decide whether to keep xxsonwivpald.p", "MAG", None),
     ("Run the package on the MAG VM with Darren", "MAG", None),
     ("Run the Kiro package against DEVL", "MAG", None),
-    ("Confirm with the client that the 34 group conflicts are fine", "MAG", None),
+    ("Confirm with the client that the 34 group conflicts are fine", "MAG", "reply"),  # a draft, since 2026-11-14
     ("Run DEVL tests 1-15 from the test plan", "LNK", None),  # LNK has no server leg
     ("Run DEVL tests 1-15 from the test plan", "Moog", "agent"),
     ("Reply to Dave", None, None),  # no client to send it to

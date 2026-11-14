@@ -43,6 +43,9 @@ _FOLLOW_UPS = {
     "items": {"type": "dict", "fields": {
         "who": {"type": "str", "max": 40, "required": True},
         "what": {"type": "str", "max": 200, "required": True},
+        # Why an item for Ben is his (queue.check_ben_test, 2026-11-14).
+        # Optional and additive: results without it validate as before.
+        "reason": {"type": "enum", "values": ["send", "approve", "scope", "access", "judgement"]},
     }},
 }
 

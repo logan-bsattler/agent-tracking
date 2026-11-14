@@ -235,7 +235,7 @@ def test_home_is_served_from_the_ingest_threads_copy(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- loose ends
 
-FU = [{"who": "Shannon", "what": "Answer Q2, Q6, Q9-Q12"}, {"who": "Ben", "what": "Chase Shannon for a date"}]
+FU = [{"who": "Shannon", "what": "Answer Q2, Q6, Q9-Q12"}, {"who": "Ben", "what": "Approve the date Shannon gave"}]
 
 
 def test_follow_ups_surface_on_board_and_operator_view(conn):
@@ -246,10 +246,10 @@ def test_follow_ups_surface_on_board_and_operator_view(conn):
     v = store.operator_view(conn)
     # Ben's own items are in Needs you only; the page no longer lists them twice.
     assert [d["title"] for d in v["loose_ends"]] == ["Answer Q2, Q6, Q9-Q12"]
-    assert [d["title"] for d in v["needs_you"]] == ["Chase Shannon for a date"]
+    assert [d["title"] for d in v["needs_you"]] == ["Approve the date Shannon gave"]
     html = report.board_page(v)
     assert "Others owe" in html and "Answer Q2, Q6, Q9-Q12" in html
-    assert html.count("Chase Shannon for a date") == 2  # Next up, and its Needs-you type group
+    assert html.count("Approve the date Shannon gave") == 2  # Next up, and its Needs-you type group
 
 
 def test_resolving_clears_the_loose_end(conn):
@@ -320,7 +320,7 @@ def test_defer_takes_it_off_the_board_until_reopened(conn):
     board = store.board(conn)
     assert [x["id"] for x in board["loose_ends"]] == [a] and board["deferred_total"] == 1
     v = store.operator_view(conn)
-    assert v["needs_you"] == [] and [d["title"] for d in v["deferred"]] == ["Chase Shannon for a date"]
+    assert v["needs_you"] == [] and [d["title"] for d in v["deferred"]] == ["Approve the date Shannon gave"]
     assert "Deferred" in report.board_page(v)
     with pytest.raises(ValueError):
         store.resolve_follow_up(conn, b, decision_id=dec, defer=True)
@@ -328,7 +328,7 @@ def test_defer_takes_it_off_the_board_until_reopened(conn):
         store.resolve_follow_up(conn, a, reopen=True)  # only a deferred one reopens
     assert store.resolve_follow_up(conn, b, reopen=True)["state"] == "open"
     assert store.board(conn)["deferred_total"] == 0
-    assert [d["title"] for d in store.operator_view(conn)["needs_you"]] == ["Chase Shannon for a date"]
+    assert [d["title"] for d in store.operator_view(conn)["needs_you"]] == ["Approve the date Shannon gave"]
     store.resolve_follow_up(conn, b, decision_id=dec, defer=True)
     assert store.resolve_follow_up(conn, b, task_id=t)["state"] == "tasked"  # a deferred one still resolves
 

@@ -185,11 +185,15 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
     # workbook item (queue.check_grouped; Ben, 2026-11-13).
     from . import queue as _queue
     _queue.check_grouped(validated.get("follow_ups") or [], row["assigned_to"])
+    # The who-Ben test, repeats, and the workbook rule across his open queue
+    # (queue.check_landing; audit 2026-11-14).
+    _queue.check_landing(conn, validated.get("follow_ups") or [], row["assigned_to"], _queue.lineage(conn, task_id))
     # One transaction: the close, its loose ends and the dod_review it owes
     # land together or not at all. The tables made on first use are made
     # first: executescript commits, which would end the savepoint early.
     from .db import ensure_commitments
     _queue.ensure_routes(conn)
+    _queue.ensure_tags(conn)
     ensure_commitments(conn)
     ensure_deps(conn)
     ensure_promotions(conn)
@@ -228,18 +232,25 @@ def _complete(conn: sqlite3.Connection, task_id: str, row: sqlite3.Row, validate
     )
     _event(conn, task_id, state if state == "failed" else "completed", row["assigned_to"])
     fus = validated.get("follow_ups") or []
+    from . import queue
+    ids = [_id() for _ in fus]
     conn.executemany(
         "INSERT INTO follow_ups(id, task_id, idx, who, what, state, created_at) VALUES (?,?,?,?,?,'open',?)",
-        [(_id(), task_id, i, f["who"], f["what"], now()) for i, f in enumerate(fus)],
+        [(ids[i], task_id, i, f["who"], f["what"], now()) for i, f in enumerate(fus)],
     )
+    for i, f in enumerate(fus):
+        if f.get("reason") and queue.is_ben(f["who"]):
+            queue.tag(conn, ids[i], f["reason"])
     out = {"ok": True, "task_id": task_id, "state": state}
     if fus:
         out["follow_ups"] = len(fus)
         # Agent work and replies handed to Ben come back to this client, so
         # they never reach his queue (queue.route_for says which).
-        from . import queue
         if moved := queue.route_new(conn, task_id):
             out["routed_to_you"] = moved
+        # Older Ben items this result re-raises or says it covers close
+        # behind it; with ben_precedent on, items a ruling settles close too.
+        out.update(queue.settle_landing(conn, task_id))
     if state == "done":
         # Not echoed to the producer: the review is another session's job.
         create_review(conn, task_id)
@@ -297,6 +308,7 @@ def file_draft(conn: sqlite3.Connection, client: str | None, result: dict[str, A
             if prior and _resolve(str(Path(prior).expanduser()), client, root) == body:
                 raise ValueError(f"{validated['body_path']} is already on the board as task {r['id']}. "
                                  f"If this is a revision of it, file again with parent_id={r['id']}.")
+    queue.check_landing(conn, validated.get("follow_ups") or [], client, queue.lineage(conn, parent_id))
     spec = {"from": BEN_DIRECT, "asked": asked, "reply_date": validated.get("reply_date")}
     spec = {k: v for k, v in spec.items() if v}
     title = (title or validated["subject"]).strip()[:80] or "Draft reply"
@@ -304,6 +316,7 @@ def file_draft(conn: sqlite3.Connection, client: str | None, result: dict[str, A
     # executescript commits, which would end it early.
     from .db import ensure_commitments
     queue.ensure_routes(conn)
+    queue.ensure_tags(conn)
     ensure_commitments(conn)
     ensure_deps(conn)
     ensure_promotions(conn)

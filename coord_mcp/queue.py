@@ -46,13 +46,28 @@ _CHECKS = r"(check|verify|confirm|find|determine|identify)"
 _ON = (r"\b(tables?|data|db|database|records?|fields?|code|source|programs?|\w+\.(p|i|w|cls)|logs?|query|harness"
        r"|user-exits?|xx\w+|CIM|BOM|spec|file)\b")
 _AGENT = re.compile(rf"^\s*({_DOES}\b|{_CHECKS}\b.*{_ON})", re.I)
-# Anything that needs a person, a judgement or a conversation stays Ben's,
-# whatever verb it opens with.
+# A question for a client person is a draft the agent writes, never a chore
+# for Ben (audit 2026-11-14: "Ask QAD ...", "Get X from Rajesh", "Confirm
+# with Ari" sat on his queue). "Ask Ben" is not one.
+_ASK_PERSON = re.compile(
+    r"^\s*((ask|chase|ping|nudge|remind)\s+(?!ben\b)\S|(follow up|check|confirm|clarify|agree|align)\s+with\s+(?!ben\b)\S"
+    r"|get\b.{1,80}\bfrom\s+(?!ben\b)[A-Z])", re.I)
+# Work the agent does itself: edits and drafts, besides reads and runs.
+_EDITS = r"(draft|write|edit|update|fix|correct|revise|re-?point|rename|re-?generate|rebuild|re-?cut|reconcile" \
+         r"|add|fill( in)?|test|compare|capture|export|re-?word|amend)"
+# What only Ben can do, whatever verb it opens with (the "who: Ben" test,
+# 2026-11-14): send or publish, approve or sign off, client-visible scope,
+# cost or dates, access only he has, and judgement with no precedent. Tighter
+# than before: ask, raise, tell, confirm, whether-to and "with <Name>" no
+# longer keep an item on him; they are a draft or a read.
 _PERSON = re.compile(
-    r"\b(approve|approval|decide|decision|ask|raise|tell|send|sign[- ]?off|accept|choose|pick|prioriti[sz]e"
-    r"|your call|Ben'?s call|with (the )?client|call|meeting|budget|scope|estimate|quote|contract|whether to"
-    r"|VM|Kiro|AUX|manual(ly)?|by hand|WebUI|in the (UI|browser))\b", re.I)
-_WITH_SOMEONE = re.compile(r"\bwith [A-Z][a-z]+\b")  # "with Darren": a person is in the loop
+    r"\b(approve[sd]?|approval|sign[- ]?off|promote|publish|send|submit|post to|decide|decision|rule|ruling"
+    r"|your call|Ben'?s call|choose|pick|prioriti[sz]e|accept|reject|override|scope|estimate[sd]?|quote"
+    r"|pric(e|ing)|budget|contract|invoice|bill(ed|ing)?|staffing|timesheets?|commit to|credentials?|password"
+    r"|access|licen[cs]e|VPN|sign[- ]?in|log ?in|MFA|SharePoint|pipeline|meeting|on (a|the) call|phone"
+    r"|review|VM|Kiro|AUX|manual(ly)?|by hand|WebUI|in the (UI|browser))\b", re.I)
+_WITH_SOMEONE = re.compile(r"\bwith [A-Z][a-z]+\b")  # "Run it on the VM with Darren": a person is in the loop
+_EDIT = re.compile(rf"^\s*{_EDITS}\b", re.I)
 # Clients whose agent has no server leg: anything on a server is a person's.
 NO_SERVER = {"lnk", "ts tech", "pbe", "ghsp", "jbss", "acument"}
 _SERVER = re.compile(r"\b(DEVL|TEST|PROD|MIGR|server|CVC)\b")
@@ -65,7 +80,9 @@ def route_for(what: str, client: str | None) -> str | None:
         return None
     if _REPLY.search(what):
         return "reply"
-    if not _AGENT.search(what) or _PERSON.search(what) or _WITH_SOMEONE.search(what):
+    if _ASK_PERSON.search(what) and not _PERSON.search(what):
+        return "reply"
+    if not (_AGENT.search(what) or _EDIT.search(what)) or _PERSON.search(what) or _WITH_SOMEONE.search(what):
         return None
     if client.strip().casefold() in NO_SERVER and _SERVER.search(what):
         return None
@@ -119,7 +136,10 @@ def route_new(conn: sqlite3.Connection, task_id: str) -> int:
     """Route a just-finished task's Ben loose ends that are agent work back
     to its client. Returns how many moved."""
     n = 0
+    tagged = reasons_for(conn, task_id)
     for r in _ben_rows(conn, task_id):
+        if r["id"] in tagged:
+            continue  # the agent said why it is Ben's (send, access, ...): routing it back would loop
         why = route_for(r["what"], r["client"])
         if why:
             reroute(conn, r["id"], r["client"], why)
@@ -313,6 +333,310 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
             f"(\"{group[0][:60]}\", \"{group[1][:60]}\", ...). Group them: write the rows to one workbook "
             "(.xlsx, a column for his answer) under work/ and hand back ONE follow-up for Ben that names "
             "its path, so he rules on all of them in one pass. Rulings that really differ may stay separate.")
+
+
+# --------------------------------------------- what lands on Ben, 2026-11-14
+#
+# The queue audit (docs/ben-queue-audit-2026-11-14.html) found 358 of 770
+# items on Ben's desk did not need him. Five checks at landing, each behind
+# a switch on the board (meta `switch:<name>`, `python -m coord_mcp.queue
+# switch`), so one can be turned off without a release:
+#
+#   ben_test        a Ben follow-up must be his: it names a send, approval,
+#                   scope or cost, access, or a judgement, or carries a
+#                   `reason` tag saying which. Else refused.            (on)
+#   ben_dedupe      refuse a Ben item that repeats an open one of the same
+#                   client, not just one in the same result.             (on)
+#   ben_cover       when a task's result re-raises an ancestor's Ben item,
+#                   or names open ones it covers, those close behind a
+#                   decision citing the task, instead of expiring.       (on)
+#   ben_group_wide  the workbook rule across the client's open Ben items of
+#                   the last GROUP_DAYS, not only within one result.     (on)
+#   ben_precedent   settle a new Ben item an earlier Ben ruling clearly
+#                   implies, as "master default; Ben may override".     (off)
+
+REASONS = ("send", "approve", "scope", "access", "judgement")
+SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_wide": True,
+            "ben_precedent": False}
+GROUP_DAYS = 7
+TAGS_DDL = """
+CREATE TABLE IF NOT EXISTS follow_up_tags (
+  follow_up_id TEXT PRIMARY KEY REFERENCES follow_ups(id),
+  reason       TEXT NOT NULL,
+  created_at   INTEGER NOT NULL
+);
+"""
+
+
+def switch(conn: sqlite3.Connection, name: str) -> bool:
+    if name not in SWITCHES:
+        raise KeyError(f"unknown switch {name!r}; known: {', '.join(SWITCHES)}")
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (f"switch:{name}",)).fetchone()
+    return SWITCHES[name] if r is None else r["value"] == "on"
+
+
+def set_switch(conn: sqlite3.Connection, name: str, on: bool) -> None:
+    switch(conn, name)  # validates the name
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (f"switch:{name}", "on" if on else "off"))
+    conn.commit()
+
+
+def ensure_tags(conn: sqlite3.Connection) -> None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='follow_up_tags'").fetchone() is None:
+        conn.executescript(TAGS_DDL)
+
+
+def tag(conn: sqlite3.Connection, follow_up_id: str, reason: str) -> None:
+    conn.execute("INSERT OR REPLACE INTO follow_up_tags VALUES (?,?,?)", (follow_up_id, reason, now()))
+
+
+def reasons_for(conn: sqlite3.Connection, task_id: str) -> dict[str, str]:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='follow_up_tags'").fetchone() is None:
+        return {}
+    return {r["follow_up_id"]: r["reason"] for r in conn.execute(
+        "SELECT g.follow_up_id, g.reason FROM follow_up_tags g JOIN follow_ups f ON f.id = g.follow_up_id "
+        "WHERE f.task_id=?", (task_id,))}
+
+
+def is_ben(who: Any) -> bool:
+    return str(who or "").strip().casefold() == "ben"
+
+
+def bens_own(what: str) -> bool:
+    """The text itself names something only Ben does (send, approve, scope,
+    cost, access, judgement)."""
+    return bool(_PERSON.search(what))
+
+
+BEN_TEST = ("A follow-up for Ben must be something only he can do: send or publish (send), approve or sign "
+            "off (approve), client-visible scope, cost or dates (scope), access only he has (access), or a "
+            "judgement with no precedent (judgement). A read, query, test, edit or draft is yours: do it in "
+            "this task or give it to your own client key. A question for a client person is a draft you "
+            "write (who = your key, \"Draft a note to <name> asking ...\"), never \"ask X\" for Ben.")
+
+
+def _ben_new(follow_ups: list[dict[str, Any]], client: str | None) -> list[dict[str, Any]]:
+    """The Ben items of a result that would stay on him: routing does not
+    move a tagged item, and moves an untagged one route_for names."""
+    return [f for f in follow_ups if is_ben(f.get("who"))
+            and (f.get("reason") or not route_for(f["what"], client))]
+
+
+def check_ben_test(follow_ups: list[dict[str, Any]], client: str | None) -> None:
+    bad = [f["what"] for f in _ben_new(follow_ups, client) if not f.get("reason") and not bens_own(f["what"])]
+    if bad:
+        raise ValueError(
+            f"{len(bad)} follow-up(s) for Ben read as agent work: " + "; ".join(f'"{w[:80]}"' for w in bad[:3])
+            + ". " + BEN_TEST + " If it truly is his, add \"reason\": one of " + "|".join(REASONS)
+            + " to that follow-up (a session started before 2026-11-14 refuses the field: reword it to say "
+            "what he must send, approve or decide instead).")
+
+
+_DATEISH = re.compile(r"^\d{1,2}/\d{1,2}(/\d{2,4})?$|^\d{4}-\d{2}-\d{2}$|^[\d.]+-?[\d.]*h$|^\d+-\d+$|^\d+%$|^\d{1,2}$")
+_BOARD_ID = re.compile(r"\b[0-9a-f]{12}\b")
+
+
+def anchors(what: str) -> set[str]:
+    """What an ask is about: tickets, item numbers, file names (not dates,
+    hours, small counts or board ids)."""
+    out = set()
+    for w in re.findall(r"[#\w][\w.#/-]*\w", what or ""):
+        lw = w.lower().lstrip("#")
+        if _BOARD_ID.fullmatch(lw) or _DATEISH.match(lw):
+            continue
+        if re.search(r"\d", lw) or _FILE_NAMED.search(lw) or re.search(r"\.(p|i|w|cls)$", lw):
+            out.add(lw)
+    return out
+
+
+DUP_MATCH = 0.25  # tuned on the audit's duplicates: catches the lexical ones, no false matches seen
+
+
+def duplicate(a: str, b: str) -> bool:
+    """The same ask twice: they share an anchor (ticket, item, file) and
+    their wording overlaps. Per-row rulings on different rows share no anchor."""
+    from .workflows.precedent import shape, _sim
+    if not anchors(a) & anchors(b):
+        return _shape(a) == _shape(b) and "#" not in _shape(a)
+    return _sim(shape(a), shape(b)) >= DUP_MATCH
+
+
+def lineage(conn: sqlite3.Connection, task_id: str | None) -> list[str]:
+    """task_id and its ancestors (parent chain, and the code a check-in checks in)."""
+    out, tid = [], task_id
+    while tid and tid not in out:
+        out.append(tid)
+        r = conn.execute("SELECT parent_id, spec FROM tasks WHERE id=?", (tid,)).fetchone()
+        if r is None:
+            break
+        try:
+            spec = json.loads(r["spec"] or "{}")
+        except ValueError:
+            spec = {}
+        tid = r["parent_id"] or (spec.get("checkin_of") if isinstance(spec, dict) else None)
+    return out
+
+
+def _open_for(conn: sqlite3.Connection, client: str | None, since: int | None = None) -> list[sqlite3.Row]:
+    if not client:
+        return []
+    rows = [r for r in _ben_rows(conn) if (r["client"] or "").strip().casefold() == client.strip().casefold()]
+    return [r for r in rows if since is None or r["created_at"] >= since]
+
+
+def check_landing(conn: sqlite3.Connection, follow_ups: list[dict[str, Any]], client: str | None,
+                  lineage_ids: list[str]) -> None:
+    """The refusals at completion, nothing written: ben_test, ben_dedupe,
+    ben_group_wide. lineage_ids is the finishing task and its ancestors
+    (a repeat of an ancestor's item is a revision, closed by settle_landing)."""
+    if switch(conn, "ben_test"):
+        check_ben_test(follow_ups, client)
+    mine = [f["what"] for f in _ben_new(follow_ups, client)]
+    if not mine:
+        return
+    if switch(conn, "ben_dedupe"):
+        for i, w in enumerate(mine):
+            for o in mine[i + 1:]:
+                if duplicate(w, o):
+                    raise ValueError(f'follow_ups hands Ben the same ask twice ("{w[:60]}", "{o[:60]}"). '
+                                     "Merge them into one item.")
+        ours = set(lineage_ids)
+        for w in mine:
+            for r in _open_for(conn, client):
+                if r["task_id"] not in ours and duplicate(w, r["what"]):
+                    raise ValueError(
+                        f'follow-up for Ben "{w[:80]}" repeats his open loose end {r["id"]} '
+                        f'(task {r["task_id"] or "none"}: "{r["what"][:80]}"). Leave it out: it is already on '
+                        "his queue. If yours adds something it lacks, say so in your summary; if it is a "
+                        "different ask, word it so it names what differs.")
+    if switch(conn, "ben_group_wide"):
+        pool = [f for f in mine if not _FILE_NAMED.search(f)]
+        old = [r for r in _open_for(conn, client, now() - GROUP_DAYS * 86400)
+               if not _FILE_NAMED.search(r["what"]) and route_for(r["what"], client) is None]
+        for w in pool:
+            same = [r for r in old if same_shape(w, r["what"])]
+            if len(same) + sum(1 for o in pool if same_shape(w, o)) >= GROUP_MIN:
+                ids = ", ".join(r["id"] for r in same[:6])
+                raise ValueError(
+                    f'follow-up for Ben "{w[:70]}" is one more ruling of the same shape as {len(same)} open '
+                    f"one(s) of {client}'s from the last {GROUP_DAYS} days ({ids}). Group them: write these rows "
+                    "and yours to one workbook (.xlsx, a column for his answer) under work/, and hand back ONE "
+                    f"follow-up for Ben naming its path and saying it covers {ids or 'them'} (\"covers <id>, <id>\"); "
+                    "those then close behind it.")
+
+
+_COVERS = re.compile(r"\b(covers?|fold(s|ed)?|replac(es|ing)|supersed(es|ing))\b", re.I)
+
+
+def settle_landing(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+    """After a result's loose ends are written (inside its transaction):
+    ben_cover, then ben_precedent. Returns what it closed, for the result."""
+    from . import store
+    out: dict[str, Any] = {}
+    new = _ben_rows(conn, task_id)
+    if not new:
+        return out
+    client = new[0]["client"]
+    line = lineage(conn, task_id)
+    if switch(conn, "ben_cover"):
+        covered = []
+        new_ids = {r["id"] for r in new}
+        for old in _open_for(conn, client):
+            if old["id"] in new_ids:
+                continue
+            by = None
+            for r in new:
+                named = set(_BOARD_ID.findall(r["what"]))
+                if old["id"] in named and _COVERS.search(r["what"]):
+                    by = r
+                elif old["task_id"] in line[1:] and (duplicate(r["what"], old["what"])
+                                                      or same_shape(r["what"], old["what"])):
+                    by = r
+                if by:
+                    break
+            if not by:
+                continue
+            dec = store.record_decision(
+                conn, f"Covered: Ben loose end {old['id']} closed, task {task_id} re-raised it as {by['id']}"[:200],
+                f"ben_cover: newer item on the same {'lineage' if old['task_id'] in line else 'client'}; "
+                "the newer one stays on his queue", old["task_id"])
+            store.resolve_follow_up(conn, old["id"], decision_id=dec["decision_id"])
+            covered.append({"follow_up": old["id"], "by": by["id"], "decision": dec["decision_id"]})
+        if covered:
+            out["covered"] = covered
+    if switch(conn, "ben_precedent"):
+        settled = []
+        for r in _ben_rows(conn, task_id):
+            hit = ruling_for(conn, r["what"], client, line)
+            if not hit:
+                continue
+            dec = store.record_decision(
+                conn, f"Master default: Ben loose end {r['id']} settled by Ben's ruling {hit['decision_id']}"[:200],
+                f"{hit['why']}; master default; Ben may override"[:200], task_id)
+            store.resolve_follow_up(conn, r["id"], decision_id=dec["decision_id"])
+            settled.append({"follow_up": r["id"], "ruling": hit["decision_id"], "decision": dec["decision_id"]})
+        if settled:
+            out["settled_by_ruling"] = settled
+    return out
+
+
+# A decision that records Ben's ruling: his answer from a button or /queue,
+# or master writing down what he said.
+_RULING = re.compile(r"\b(Ben (ruled|rules|chose|approved|answered|said|decided|accepted|rejected|dropped|deferred)"
+                     r"|per Ben|Ben's (ruling|answer|call|direction|decision))\b", re.I)
+PRECEDENT_MATCH = 0.5
+
+
+def ruling_for(conn: sqlite3.Connection, what: str, client: str | None,
+               line: list[str]) -> dict[str, Any] | None:
+    """An earlier Ben ruling that clearly settles `what`, or None. Clearly:
+    either a ruled Ben loose end of the same client with the same shape and
+    one outcome (workflows.precedent, a drop), or a ruling recorded on this
+    task's lineage that shares its anchor and most of its wording."""
+    from .workflows import precedent as p
+    sh = p.shape(what, client)
+    hits = [x for x in p.precedents(conn) if (x["client"] or "").casefold() == (client or "").casefold()
+            and p._sim(sh, x["shape"]) >= p.MATCH]
+    if hits and {x["state"] for x in hits} == {"dropped"}:
+        x = max(hits, key=lambda x: p._sim(sh, x["shape"]))
+        return {"decision_id": x["resolved_by"], "why": f"same ask as {x['id']}, which Ben's ruling closed"}
+    if hits:
+        return None  # mixed or tasked outcomes stay Ben's
+    if not line:
+        return None
+    marks = ",".join("?" * len(line))
+    ours = anchors(what)
+    for d in conn.execute(
+            f"""SELECT id, statement, because FROM decisions WHERE task_id IN ({marks})
+                AND id NOT IN (SELECT supersedes FROM decisions WHERE supersedes IS NOT NULL)
+                ORDER BY created_at DESC""", line):
+        text = f"{d['statement']} {d['because'] or ''}"
+        if not _RULING.search(text) or not ours & anchors(text):
+            continue
+        if p._sim(sh, p.shape(_RULING.sub(" ", d["statement"]), client)) >= PRECEDENT_MATCH:
+            return {"decision_id": d["id"], "why": f"Ben's ruling {d['id']} on this task's lineage covers it"}
+    return None
+
+
+def landing_report(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Read-only: what ben_cover and ben_precedent would close in Ben's open
+    queue as it stands, if every item landed now. For Ben to read before a
+    sweep or before turning ben_precedent on."""
+    covered, settled = [], []
+    rows = _ben_rows(conn)
+    for old in rows:
+        for r in rows:
+            if r["id"] == old["id"] or r["created_at"] < old["created_at"] or not r["task_id"]:
+                continue
+            if old["task_id"] and old["task_id"] in lineage(conn, r["task_id"])[1:] and \
+                    (duplicate(r["what"], old["what"]) or same_shape(r["what"], old["what"])):
+                covered.append({"id": old["id"], "client": old["client"], "by": r["id"], "what": old["what"]})
+                break
+    for r in rows:
+        hit = ruling_for(conn, r["what"], r["client"], lineage(conn, r["task_id"]))
+        if hit:
+            settled.append({"id": r["id"], "client": r["client"], "ruling": hit["decision_id"], "what": r["what"]})
+    return {"covered": covered, "settled": settled}
 
 
 EXPIRE_DAYS = 14
@@ -651,9 +975,28 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--apply", action="store_true")
     e.add_argument("--days", type=int, default=EXPIRE_DAYS)
     e.add_argument("--undo", metavar="DECISION_ID", help="reopen what that expiry decision deferred")
+    w = sub.add_parser("switch", help="show the Ben-queue landing switches, or set one on/off")
+    w.add_argument("name", nargs="?", choices=list(SWITCHES))
+    w.add_argument("state", nargs="?", choices=["on", "off"])
+    sub.add_parser("landing", help="dry run: Ben items ben_cover and ben_precedent would close now")
     a = p.parse_args(argv)
     conn = connect()
     try:
+        if a.cmd == "switch":
+            if a.name and a.state:
+                set_switch(conn, a.name, a.state == "on")
+            for k in SWITCHES:
+                print(f"{k:<15} {'on' if switch(conn, k) else 'off'}" + ("" if switch(conn, k) == SWITCHES[k]
+                                                                       else "  (default " + ("on" if SWITCHES[k] else "off") + ")"))
+            return 0
+        if a.cmd == "landing":
+            rep = landing_report(conn)
+            for r in rep["covered"]:
+                print(f"covered  {r['id']}  {r['client'] or '':<9} by {r['by']}  {r['what'][:90]}")
+            for r in rep["settled"]:
+                print(f"ruling   {r['id']}  {r['client'] or '':<9} by {r['ruling']}  {r['what'][:90]}")
+            print(f"{len(rep['covered'])} covered, {len(rep['settled'])} settled by a ruling (dry run; nothing changed)")
+            return 0
         if a.cmd == "expire":
             if a.undo:
                 print(f"{unexpire(conn, a.undo)['reopened']} reopened")

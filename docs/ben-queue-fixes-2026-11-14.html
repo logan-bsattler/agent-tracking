@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ben Queue Fixes</title>
+<style>
+:root{--bg:#fff;--fg:#1d1d1f;--mut:#5f6368;--line:#e2e2e6;--acc:#0b57d0;--warn:#a15c00;--ok:#137333}
+@media (prefers-color-scheme:dark){:root{--bg:#141416;--fg:#ececf0;--mut:#a0a3aa;--line:#2c2c31;--acc:#8ab4f8;--warn:#f2b45c;--ok:#81c995}}
+body{background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,Segoe UI,sans-serif;margin:0 auto;max-width:900px;padding:24px 16px}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:28px 0 8px;border-bottom:1px solid var(--line);padding-bottom:4px}
+p.lede{font-size:16px}.mut{color:var(--mut)}code{font-size:13px;background:rgba(127,127,127,.12);padding:1px 4px;border-radius:3px}
+table{border-collapse:collapse;width:100%;font-size:14px}td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+.on{color:var(--ok);font-weight:600}.off{color:var(--warn);font-weight:600}.wrap{overflow-x:auto}
+</style></head><body>
+<h1>Ben queue fixes</h1>
+<p class="mut">2026-11-14 · coord-mcp · follows <a href="ben-queue-audit-2026-11-14.html">the queue audit</a></p>
+<p class="lede"><b>All five audit fixes are built. Four are on. "Deciding for Ben" is off until Ben turns it on.</b> They act only on
+results that land from now on, in sessions started after this change. Nothing already on the board was closed or changed:
+cleaning up the 358 existing items is still Ben's call, through the audit workbook's Confirm column.</p>
+
+<h2>What each fix does</h2>
+<div class="wrap"><table>
+<tr><th>Fix (audit count)</th><th>When a result lands</th><th>Switch</th></tr>
+<tr><td>1. Who-Ben test (144)</td><td>A Ben follow-up must name a send, approval, scope or cost, access, or judgement, or carry
+<code>"reason": send|approve|scope|access|judgement</code>. Otherwise the result is refused and the error explains the test.
+<code>route_for</code> is wider: "Ask X…", "Get Y from Z", "Confirm with X" go back to the client as drafts, and edits
+(update, fix, re-point, draft…) as agent work. Ask, tell, confirm, whether-to and "with &lt;Name&gt;" no longer keep an item
+on Ben. A tagged item is never routed back.</td><td><code>ben_test</code> <span class="on">on</span></td></tr>
+<tr><td>2. Repeats (65)</td><td>A Ben item that repeats an open one for the same client (they share a ticket, item or file and the wording overlaps)
+is refused, and the error names the existing id. Two copies inside one result are refused too.</td><td><code>ben_dedupe</code> <span class="on">on</span></td></tr>
+<tr><td>3. Covered items (60)</td><td>If a result re-raises a Ben item from an ancestor task (a revision, review or re-run), the old one is closed behind a
+<code>Covered:</code> decision citing the new task, instead of the 14-day expiry deferring it. An item that says it
+<code>covers &lt;id&gt;</code> closes those ids too.</td><td><code>ben_cover</code> <span class="on">on</span></td></tr>
+<tr><td>4. Workbook rule (47)</td><td>A third same-shape ruling counts the client's open Ben items from the last 7 days, not just one result. The refusal
+tells the agent to write one workbook and hand back one item that covers the open ids.</td><td><code>ben_group_wide</code> <span class="on">on</span></td></tr>
+<tr><td>5. Deciding for Ben (42)</td><td>A new Ben item is settled when one of Ben's rulings already covers it. That is either an earlier item of his with the same shape,
+closed by an individual ruling, or a "Ben ruled …" decision on the same task chain that names the same anchor. It records
+"master default; Ben may override" citing the ruling.</td><td><code>ben_precedent</code> <span class="off">off</span></td></tr>
+</table></div>
+<p>To see or change a switch: <code>python -m coord_mcp.queue switch</code> or <code>… switch ben_precedent on</code>, run in <code>agent-tracking/</code>.
+A switch takes effect on the next result, with no restart.
+<code>python -m coord_mcp.queue landing</code> is a dry run of what fixes 3 and 5 would close in today's queue.</p>
+
+<h2>What needs a restart</h2>
+<ul>
+<li><b>Every coord session started before this change is still running the old code.</b> Each one runs its own server, so its
+results land unchecked. The new checks apply after a client clears, or once a new session opens.</li>
+<li>Those older sessions also refuse the new <code>reason</code> field. The client <code>CLAUDE.md</code> text says what to do then:
+word the item so it says what Ben must send, approve or decide. Restart a client before relying on tags.</li>
+<li>The dashboard (port 8765) needs no restart. Its /queue page still uses <code>route_for</code>, which now marks more items "Send to agent".</li>
+</ul>
+
+<h2>Contract and schema</h2>
+<ul>
+<li>Contract: <code>follow_ups[].reason</code> is a new optional enum. Results without it still validate. <code>CONTRACT_VERSION</code> is unchanged.</li>
+<li>Schema: a new side table, <code>follow_up_tags</code>, is created on first use (the same pattern as <code>follow_up_routes</code>). No <code>SCHEMA_VERSION</code> bump.</li>
+<li>Instructions: step 3 of all 13 client <code>CLAUDE.md</code> files now has the who-Ben test, and master's file has one paragraph under
+"Deciding for Ben". Each file has a <code>CLAUDE.md.bak-20261114</code> backup beside it.</li>
+</ul>
+
+<h2>Limits</h2>
+<ul>
+<li>Duplicates are matched by wording. On the audit's duplicate pairs the test caught 12 of 53, with no false matches in 106k pairs that were not
+duplicates. The rest are duplicates in meaning only, so the client instructions now say to read Ben's open items before raising one.</li>
+<li>The who-Ben word test would have refused about 30% of the items the audit judged genuinely Ben's (124 of 412), mostly
+questions. A refusal costs the agent one resend with a <code>reason</code> tag, so nothing is lost.</li>
+<li>Hold decisions (158) and the workflow engine ignoring holds are not part of these fixes.</li>
+</ul>
+
+<h2>What Ben must decide</h2>
+<ol>
+<li>Whether to turn <code>ben_precedent</code> on. Run <code>python -m coord_mcp.queue landing</code> first to see what it would settle.</li>
+<li>The cleanup of the existing items: fill in the audit workbook's Confirm column. Nothing has been swept.</li>
+<li>Whether to make holds behind Ben working defaults (the audit's sixth item, not built).</li>
+</ol>
+</body></html>
