@@ -235,6 +235,7 @@ def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -
                         "AND (state='open' OR closed_at >= ?) ORDER BY created_at",
                         (*engine_wfs, t - LOOKBACK)).fetchall()
     out = []
+    failed: list[tuple[str, Exception]] = []
     for case in rows:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -273,7 +274,19 @@ def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -
             recompute(conn, case["id"])
             conn.execute("COMMIT")
             out.append({"case": case["id"], "workflow": case["workflow"], "task_id": tid, **p})
-        except Exception:
+        except Exception as exc:  # one bad case must not skip the cases after it
             conn.execute("ROLLBACK")
-            raise
+            failed.append((case["id"], exc))
+    if failed:
+        # The spawned cases are committed; raise so the caller's loop_error records the rest.
+        raise EngineCaseErrors(failed, out)
     return out
+
+
+class EngineCaseErrors(RuntimeError):
+    """run() finished every case it could; these ones raised. `done` is what it did."""
+
+    def __init__(self, failed: list[tuple[str, Exception]], done: list[dict[str, Any]]):
+        self.failed, self.done = failed, done
+        super().__init__(f"{len(failed)} case(s) failed, {len(done)} done: " + "; ".join(
+            f"{cid}: {type(e).__name__}: {e}" for cid, e in failed))

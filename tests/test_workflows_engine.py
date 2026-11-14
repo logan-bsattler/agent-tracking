@@ -109,3 +109,26 @@ def test_a_ben_step_between_stops_the_engine(c, monkeypatch):
     assert c.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
     assert engine.run(c) == []  # recorded once
     assert c.execute("SELECT COUNT(*) FROM workflow_case_events WHERE event='stopped'").fetchone()[0] == 1
+
+
+def test_one_failing_case_does_not_skip_the_next(c, monkeypatch):
+    first, second = _status_case(c), _status_case(c, reply_from="mary@client.example")
+    for t in (first, second):
+        store.complete_task(c, t, {**INV, "follow_ups": [{"who": "LNK", "what": "draft the reply"}]})
+    cs.sync(c)
+    cases = [r["id"] for r in c.execute("SELECT id FROM workflow_cases ORDER BY created_at, rowid")]
+    assert len(cases) == 2
+    real_plan = engine.plan
+
+    def plan(conn, case, t, since):
+        if case["id"] == cases[0]:
+            raise ValueError("boom")
+        return real_plan(conn, case, t, since)
+
+    monkeypatch.setattr(engine, "plan", plan)
+    with pytest.raises(engine.EngineCaseErrors) as err:
+        engine.run(c)
+    assert [cid for cid, _ in err.value.failed] == [cases[0]] and "boom" in str(err.value)
+    assert len(err.value.done) == 1 and err.value.done[0]["case"] == cases[1]
+    assert c.execute("SELECT COUNT(*) FROM tasks WHERE kind='draft_reply'").fetchone()[0] == 1
+    assert not c.in_transaction

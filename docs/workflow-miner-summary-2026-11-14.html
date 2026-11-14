@@ -63,7 +63,7 @@ recorded and backfilled. The first run will file 3 items (the B1, A1 and C3 chan
 <h2>Schema and restarts</h2>
 <ul>
 <li>All changes are additive. The new table <code>workflow_proposals</code> is created on first use, with no SCHEMA_VERSION bump. Definitions can now carry an optional <code>optional</code> step flag and a <code>tag</code> rule, and the tag rules of adopted workflows run after the built-in ones. No contract changes.</li>
-<li><b>Dashboard:</b> needs a restart to serve <code>/workflows/proposed</code> and run the weekly loop (Stop-ScheduledTask / Start-ScheduledTask 'Coord Usage Dashboard', keeping COORD_WORKFLOW_ENGINE=1). Not yet done; see the handover.</li>
+<li><b>Dashboard:</b> needs a restart to serve <code>/workflows/proposed</code> and run the weekly loop (Stop-ScheduledTask / Start-ScheduledTask 'Coord Usage Dashboard', keeping COORD_WORKFLOW_ENGINE=1). Restarted 2026-11-14: /workflows shows the Proposals link, /workflows/proposed loads, an unknown id returns 404.</li>
 <li><b>MCP servers</b> (master, desk and the client sessions): no restart needed. The definitions loader re-reads when the defs folder changes, and new code from this change is only used by the dashboard and the CLI.</li>
 <li>An adopted definition is written into the repo's <code>defs/</code> folder. The next maintainer commit should include it (<code>git add coord_mcp/workflows/defs</code>).</li>
 </ul>
