@@ -272,6 +272,9 @@ class ResolveFollowUpInput(Strict):
                                     max_length=40)
     defer: bool = Field(default=False, description="Park it as deferred behind decision_id instead of dropping it")
     reopen: bool = Field(default=False, description="Put a deferred follow-up back on the board; no other field")
+    return_on: str | None = Field(default=None, max_length=20,
+                                  description="With defer: when it comes back. YYYY-MM-DD, a preset (tomorrow, 3d, "
+                                              "1w, 2w, 1m) or a number of business days; default 5 business days")
 
 
 @tool("coord_resolve_follow_up", title="Resolve follow-up")
@@ -281,14 +284,17 @@ async def coord_resolve_follow_up(params: ResolveFollowUpInput) -> str:
     pursued; record that first).
 
     defer=true with decision_id parks it as deferred: still owed, but off the
-    board's loose_ends (counted in deferred_total) until reopen=true puts it
-    back, or a task_id/decision_id resolves it.
+    board's loose_ends (counted in deferred_total) until its return_on date
+    (default 5 business days), when the dashboard reopens it: Ben's back on
+    his queue, anyone else's as a client loose end. reopen=true puts it back
+    now; a task_id/decision_id resolves it.
 
-    Returns JSON: {ok, follow_up_id, state, resolved_by, loose_ends_left}
+    Returns JSON: {ok, follow_up_id, state, resolved_by, loose_ends_left, return_on?}
     """
     try:
         return _ok(store.resolve_follow_up(db(), params.follow_up_id, params.task_id, params.decision_id,
-                                           defer=params.defer, reopen=params.reopen))
+                                           defer=params.defer, reopen=params.reopen,
+                                           return_on=params.return_on))
     except Exception as e:
         return _err(e)
 

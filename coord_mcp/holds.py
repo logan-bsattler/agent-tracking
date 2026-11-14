@@ -517,7 +517,8 @@ def apply(conn: sqlite3.Connection, write: bool = False) -> dict[str, Any]:
 
 def case_hold(conn: sqlite3.Connection, task_ids: list[str], spawn_kind: str) -> dict[str, Any] | None:
     """What a live hold on any of a case's tasks (or their loose ends) means
-    for the engine's next spawn: {'stop': why} or {'proceed': hold} or None.
+    for the engine's next spawn: {'stop': why}, {'proceed': hold},
+    {'draft': hold} (a reply drafted past a hold short of the send) or None.
     An outward or default-less hold stops it; so does any hold when the
     spawn is outward (a check-in); an internal hold with a default proceeds
     only under hold_rule."""
@@ -536,6 +537,10 @@ def case_hold(conn: sqlite3.Connection, task_ids: list[str], spawn_kind: str) ->
             continue
         if h["verdict"] == "proceed" and spawn_kind != "checkin" and queue.switch(conn, "hold_rule"):
             return {"proceed": h}
+        if spawn_kind == "draft_reply" and h["facing"] != "outward":
+            # Ben 2026-11-14 (engine.REPLY_RULING): drafts never send, so a
+            # hold short of the send does not stop the draft.
+            return {"draft": h}
         return {"stop": f"held by decision {h['decision_id']} ({h['reason']})", "hold": h["decision_id"]}
     return None
 

@@ -833,6 +833,16 @@ def due_chip(d: dict[str, Any], t: int | None = None) -> str:
             f'border:1px solid currentColor;border-radius:8px;padding:0 5px">{esc(label)}</span>')
 
 
+def return_chip(d: dict[str, Any]) -> str:
+    """When a deferred item comes back on its own (coord_mcp/defer.py)."""
+    if "return_on" not in d:
+        return ""
+    label = ("returns " + datetime.fromtimestamp(d["return_on"]).strftime("%a %m-%d")) if d["return_on"]         else "no return date"
+    return (f' <span class="return-chip" data-return="{int(d["return_on"] or 0)}" style="font-size:12px;'
+            f'color:var(--muted,#777);border:1px solid currentColor;border-radius:8px;padding:0 5px">'
+            f'{esc(label)}</span>')
+
+
 def _task_link(tid: str, title: str = "") -> str:
     text = f"{title[:60]} " if title else ""
     return f'<a class="drill" href="/board/task/{esc(tid)}">{esc(text)}<code>{esc(tid[:8])}</code></a>'
@@ -913,7 +923,7 @@ def _items(rows: list[dict[str, Any]], t: int, empty: str, client: bool = True, 
         note = f'<div class="note">{esc(d["note"][:220])}</div>' if d.get("note") else ""
         note += _order_chips(d)
         who = f'<div class="client">{esc(d["client"])}</div>' if client else ""
-        tid += due_chip(d, t)
+        tid += due_chip(d, t) + return_chip(d)
         age = (verb + " " if verb else "") + _age(d["since"], t)
         out.append(f'<div class="item{"" if client else " bare"}" data-since="{int(d["since"])}" '
                    f'data-age="{_age_bucket(d["since"], t)}">{who}'
@@ -1797,10 +1807,22 @@ def queue_page(v: dict[str, Any], done: str = "", fleet: list[dict[str, Any]] | 
             '<button name="action" value="answer" class="primary">Send answers</button>'
             '<button name="action" value="agent">Send to agent</button>'
             '<button name="action" value="defer">Defer</button>'
+            '<select name="return_on" title="when a deferred item comes back to your queue">'
+            '<option value="">back in 1 week</option><option value="tomorrow">back tomorrow</option>'
+            '<option value="3d">back in 3 business days</option><option value="2w">back in 2 weeks</option>'
+            '<option value="1m">back in a month</option></select>'
+            '<input type="date" name="return_date" title="or pick the day it comes back">'
             '<button name="action" value="drop">Drop (done or moot)</button>'
             '<input name="note" maxlength="300" placeholder="note for the batch (optional)" size="40"></div>')
     body = (f'<form method="post" action="/api/queue">{acts}{"".join(groups)}{acts}</form>' if groups
             else '<p class="clear">Nothing waits on you.</p>')
+    dfr = [d for d in v.get("deferred", []) if not client or d.get("client") == client]
+    if dfr:
+        body += ('<div class="card lane" id="deferred"><h2>Deferred, coming back '
+                 f'<span class="count">{len(dfr)}</span></h2><ul>' + "".join(
+                     f'<li>{return_chip(d)} {esc(d.get("client") or "unassigned")} · {esc(d["what"][:160])} '
+                     f'<span class="muted">{_task_link(d["task_id"]) if d["task_id"] else "Ben item"} '
+                     f'<code>{esc(d["id"])}</code></span></li>' for d in dfr) + '</ul></div>')
     if v["moved"]:
         body += ('<div class="card lane"><h2>Sent to agents this week '
                  f'<span class="count">{len(v["moved"])}</span></h2><ul>' + "".join(
@@ -2335,6 +2357,13 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         queue.expire_due(conn)
                     except Exception:
                         loop_error(connect, "expire")
+                    # Deferred loose ends whose return date has come go
+                    # back on the board, one decision per batch (defer.py).
+                    try:
+                        from . import defer
+                        defer.reopen_due(conn)
+                    except Exception:
+                        loop_error(connect, "defer")
                     # Workflow cases (workflows/cases.py): attach new tasks to
                     # their case and re-derive where each open case stands.
                     # Bookkeeping only; COORD_WORKFLOW_SYNC=0 turns it off.
@@ -2507,7 +2536,10 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     ids = form.get("id") or []
                     answers = {k[2:]: v[0] for k, v in form.items() if k.startswith("a.")}
                     try:
-                        r = queue.apply(conn, act, ids, answers, (form.get("note") or [""])[0])
+                        ret = ((form.get("return_date") or [""])[0].strip()
+                               or (form.get("return_on") or [""])[0].strip() or None)
+                        r = queue.apply(conn, act, ids, answers, (form.get("note") or [""])[0],
+                                        return_on=ret if act == "defer" else None)
                     except (ValueError, KeyError) as e:
                         self._json(400, {"ok": False, "error": str(e)})
                         return
@@ -2516,6 +2548,8 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         return
                     word = {"agent": "sent to agents", "defer": "deferred", "drop": "dropped",
                             "answer": "answers sent to master"}[act]
+                    if r.get("return_on"):
+                        word += f', back {r["return_on"]}'
                     self.send_response(303)
                     self.send_header("Location", "/queue?done=" + quote(f'{r["count"]} {word}'))
                     self.end_headers()

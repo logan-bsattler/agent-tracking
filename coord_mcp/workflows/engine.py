@@ -33,6 +33,14 @@ What it never does:
     "master default; Ben may override" decision and gating Outlook/check-in,
   - act on a result that landed before it was first switched on, or more
     than LOOKBACK hours ago, so turning it on never sweeps up history.
+
+Replies proceed past a deferral (Ben, 2026-11-14, decision REPLY_RULING):
+drafting never sends, so a draft_reply step takes its reply loose end even
+when that loose end is deferred, and an internal hold on the case does not
+stop the draft. The hold stays standing; the engine records a decision
+citing the ruling and registers the hold's open Ben items as a gate, so
+Draft in Outlook and the send still wait on Ben (holds.pending_gate). An
+outward-facing hold still stops the draft, as fix 6 has it.
 """
 
 from __future__ import annotations
@@ -48,6 +56,7 @@ from . import definitions as defs
 from .cases import _step_tasks, ensure_workflows, event, recompute
 
 SINCE_KEY = "workflow_engine_since"
+REPLY_RULING = "f294e33095c1"
 LOOKBACK = 72 * 3600
 _PH = re.compile(r"\{(client|root_title|prev|intent|reply_from|reply_date|case|workflow|follow_up)\}")
 
@@ -144,6 +153,12 @@ def plan(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int) -> dic
         rx = re.compile(sp["takes_follow_up"], re.I) if sp.get("takes_follow_up") else None
         mine = [f for f in fus if f["task_id"] == prev["id"] and _is_client(f["who"])]
         take = next((f for f in mine if not rx or rx.search(f["what"] or "")), None)
+        if take is None and sp["kind"] == "draft_reply":
+            # A deferred reply loose end still gets its draft (REPLY_RULING).
+            parked = conn.execute("SELECT id, task_id, who, what FROM follow_ups WHERE state='deferred' "
+                                  "AND task_id=? ORDER BY created_at, id", (prev["id"],)).fetchall()
+            take = next((f for f in parked if _is_client(f["who"]) and (not rx or rx.search(f["what"] or ""))),
+                        None)
         if sp["on"] == "client_follow_up" and take is None:
             return None
         ctx = _context(conn, case, prev, take["what"] if take else "")
@@ -167,7 +182,8 @@ def plan(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int) -> dic
         title = title if len(title) <= 80 else title[:77] + "..."
         return {"spawn": st["key"], "kind": sp["kind"], "title": title, "spec": spec, "prev": prev["id"],
                 "client": case["client"], "follow_up": take["id"] if take else None,
-                "hold": held["proceed"]["decision_id"] if held else None}
+                "hold": held["proceed"]["decision_id"] if held and "proceed" in held else None,
+                "draft_past": held["draft"]["decision_id"] if held and "draft" in held else None}
     return None
 
 
@@ -186,6 +202,22 @@ def _proceed_past(conn: sqlite3.Connection, hold_id: str, tid: str) -> None:
     dec = store.record_decision(conn, stmt[:200], f"workflow engine past internal hold {hold_id}; master default; "
                                 "Ben may override", tid, supersedes=hold_id)
     holds.register(conn, dec["decision_id"], hold_id, ben, [w["ref"] for w in h["work"]] + [tid], tid)
+
+
+def _draft_past(conn: sqlite3.Connection, hold_id: str, tid: str) -> None:
+    """A reply drafted while an internal hold stands (REPLY_RULING): the hold
+    is not superseded; Outlook drafting and the send wait on its Ben items."""
+    from .. import holds, store
+    old = conn.execute("SELECT * FROM decisions WHERE id=?", (hold_id,)).fetchone()
+    h = holds.classify(conn, old) if old is not None else None
+    ben = (h["open_ben_follow_ups"] or h["ben_follow_ups"]) if h else []
+    # Worded so it does not read as a new hold itself (holds.is_hold).
+    stmt = f"Engine drafted reply {tid} under ruling {REPLY_RULING}; decision {hold_id} still governs Outlook and the send"
+    if ben:
+        stmt += f" (Ben's {', '.join(ben)})"
+    dec = store.record_decision(conn, stmt[:200], f"Ben's ruling {REPLY_RULING}: a deferred or held reply is still "
+                                "drafted, since drafts never send; the earlier decision still governs the send", tid)
+    holds.register(conn, dec["decision_id"], hold_id, ben, ([w["ref"] for w in h["work"]] if h else []) + [tid], tid)
 
 
 def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -> list[dict[str, Any]]:
@@ -232,6 +264,8 @@ def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -
                 task_id=tid)
             if p.get("hold"):
                 _proceed_past(conn, p["hold"], tid)
+            if p.get("draft_past"):
+                _draft_past(conn, p["draft_past"], tid)
             if p["follow_up"]:
                 store.resolve_follow_up(conn, p["follow_up"], task_id=tid)
             event(conn, case["id"], "spawned", p["spawn"], tid, "agent",

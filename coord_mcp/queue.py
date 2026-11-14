@@ -205,8 +205,15 @@ def ben_queue(conn: sqlite3.Connection) -> dict[str, Any]:
            FROM follow_up_routes r JOIN follow_ups f ON f.id = r.follow_up_id
            WHERE lower(trim(r.from_who))='ben' AND r.created_at >= ? ORDER BY r.created_at DESC""",
         (t - 7 * 86400,))]
+    from . import defer as defer_mod
+    rets = defer_mod.returns_for(conn)
+    deferred = sorted(({**dict(r), "return_on": rets.get(r["id"])} for r in conn.execute(
+        """SELECT f.id, f.what, f.task_id, f.created_at, f.resolved_by, COALESCE(f.client, t.assigned_to) client
+           FROM follow_ups f LEFT JOIN tasks t ON t.id = f.task_id
+           WHERE f.state='deferred' AND lower(trim(f.who))='ben'""")),
+        key=lambda d: (d["return_on"] is None, d["return_on"] or 0, d["created_at"]))
     return {"groups": [{"client": c, "items": items} for c, items in groups],
-            "total": sum(len(i) for _, i in groups), "moved": moved, "as_of": t}
+            "total": sum(len(i) for _, i in groups), "moved": moved, "deferred": deferred, "as_of": t}
 
 
 BATCH_ACTIONS = ("agent", "defer", "drop", "answer")
@@ -215,12 +222,13 @@ ANSWERS_MAX = 6000
 
 
 def apply(conn: sqlite3.Connection, action: str, ids: list[str],
-          answers: dict[str, str] | None = None, note: str = "") -> dict[str, Any]:
+          answers: dict[str, str] | None = None, note: str = "", return_on: Any = None) -> dict[str, Any]:
     """Ben's batch from /queue.
 
     agent: hand each to its task's client (master tasks it on the minder's
     next pass). defer / drop: one decision in Ben's name, each resolved by
-    it. answer: Ben's typed answers go to master as one prompt; master
+    it; a defer comes back on return_on (defer.parse: a date, a preset, a
+    count of business days; default 5 business days). answer: Ben's typed answers go to master as one prompt; master
     records and resolves each, exactly as for a button answer.
     """
     from . import store
@@ -251,13 +259,20 @@ def apply(conn: sqlite3.Connection, action: str, ids: list[str],
             reroute(conn, i, rows[i]["client"], "ben")
         return {"ok": True, "action": action, "count": len(ids)}
     if action in ("defer", "drop"):
+        from . import defer as defer_mod
         verb = "deferred" if action == "defer" else "dropped"
+        ret = defer_mod.parse(return_on) if action == "defer" else None  # a bad date fails before any write
+        until = f" until {defer_mod.day(ret)}" if ret else ""
         dec = store.record_decision(
-            conn, f"Ben {verb} {len(ids)} loose end(s) from /queue: {', '.join(ids)}"[:200],
-            note or ("waits until Ben or later work raises it" if action == "defer" else "done or moot, per Ben"))
+            conn, f"Ben {verb} {len(ids)} loose end(s) from /queue{until}: {', '.join(ids)}"[:200],
+            note or (f"returns to his queue on {defer_mod.day(ret)}" if action == "defer" else "done or moot, per Ben"))
         for i in ids:
-            store.resolve_follow_up(conn, i, decision_id=dec["decision_id"], defer=action == "defer")
-        return {"ok": True, "action": action, "count": len(ids), "decision_id": dec["decision_id"]}
+            store.resolve_follow_up(conn, i, decision_id=dec["decision_id"], defer=action == "defer",
+                                    return_on=ret)
+        out = {"ok": True, "action": action, "count": len(ids), "decision_id": dec["decision_id"]}
+        if ret:
+            out["return_on"] = defer_mod.day(ret)
+        return out
     lines = []
     for i in ids:
         a = answers[i]
@@ -363,6 +378,9 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
 #                   that looks like a step of an open case but has none, or
 #                   skips a step not yet done (workflows/checks.py). Advice
 #                   only, never a refusal.                                (on)
+#   defer_return    the dashboard reopens a deferred loose end on its return
+#                   date (coord_mcp/defer.py); dates are still recorded
+#                   when it is off.                                       (on)
 
 REASONS = ("send", "approve", "scope", "access", "judgement")
 SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_wide": True,
@@ -370,7 +388,10 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # holds behind Ben (coord_mcp/holds.py): a new hold on internal work
             # with a default is refused; the apply on existing holds is Ben's.
             "hold_rule": True, "hold_apply": False,
-            "case_checks": True}
+            "case_checks": True,
+            # defer return dates (coord_mcp/defer.py): the dashboard reopens a
+            # deferred item on its return date.
+            "defer_return": True}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (
@@ -653,6 +674,7 @@ def landing_report(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 EXPIRE_DAYS = 14
+EXPIRE_RETURN_DAYS = 10  # business days an expired item stays off the queue before it returns
 EXPIRE_EVERY = 86400
 EXPIRE_META = "ben_expire_last"
 EXPIRED_DDL = """
@@ -700,23 +722,27 @@ def stale(conn: sqlite3.Connection, now_ts: int | None = None, days: int = EXPIR
 
 def expire(conn: sqlite3.Connection, apply: bool = False, now_ts: int | None = None,
            days: int = EXPIRE_DAYS) -> dict[str, Any]:
-    """Defer every stale Ben loose end behind one decision. Dry run unless `apply`."""
-    from . import store
+    """Defer every stale Ben loose end behind one decision, each returning
+    EXPIRE_RETURN_DAYS business days later. Dry run unless `apply`."""
+    from . import defer as defer_mod, store
     t = now() if now_ts is None else now_ts
     rows = stale(conn, t, days)
     by: dict[str, int] = {}
     for r in rows:
         by[r["client"]] = by.get(r["client"], 0) + 1
-    out: dict[str, Any] = {"ok": True, "applied": False, "count": len(rows), "by_client": by, "items": rows}
+    ret = defer_mod.business_days_out(EXPIRE_RETURN_DAYS, t)
+    out: dict[str, Any] = {"ok": True, "applied": False, "count": len(rows), "by_client": by, "items": rows,
+                           "return_on": defer_mod.day(ret)}
     if not apply or not rows:
         return out
     split = ", ".join(f"{c} {n}" for c, n in sorted(by.items(), key=lambda kv: -kv[1]))
     dec = store.record_decision(
         conn, f"Auto-deferred {len(rows)} Ben loose end(s) open over {days} days: {split}"[:200],
-        "queue expiry rule, Ben 2026-11-13: undated items leave the active queue, reopenable; "
+        f"queue expiry rule, Ben 2026-11-13: undated items leave the active queue and return on "
+        f"{defer_mod.day(ret)} (defer return dates, 2026-11-14); "
         "python -m coord_mcp.queue expire --undo <this id>")
     for r in rows:
-        store.resolve_follow_up(conn, r["id"], decision_id=dec["decision_id"], defer=True)
+        store.resolve_follow_up(conn, r["id"], decision_id=dec["decision_id"], defer=True, return_on=ret)
         conn.execute("INSERT OR REPLACE INTO follow_up_expiry VALUES (?,?,?)", (r["id"], dec["decision_id"], t))
     conn.commit()
     return {**out, "applied": True, "decision_id": dec["decision_id"]}
@@ -1023,7 +1049,8 @@ def main(argv: list[str] | None = None) -> int:
             for c, n in sorted(out["by_client"].items(), key=lambda kv: -kv[1]):
                 print(f"  {c}: {n}")
             print(f"{out['count']} " + (f"deferred, decision {out['decision_id']}" if out["applied"]
-                                        else "would be deferred (dry run; --apply to defer)"))
+                                        else "would be deferred (dry run; --apply to defer)")
+                  + f", returning {out['return_on']}")
             return 0
         rows = backfill(conn, apply=a.apply)
     finally:

@@ -166,7 +166,10 @@ def test_case_hold_stops_on_outward_and_proceeds_on_internal_under_the_rule(conn
     t, ben, work = _setup(conn)
     _hold(conn, t, ben, work)
     monkeypatch.setattr(queue, "SWITCHES", {**queue.SWITCHES, "hold_rule": False})
-    assert "stop" in holds.case_hold(conn, [t], "draft_reply")
+    # Ben 2026-11-14 (f294e33095c1): a reply is still drafted past an internal
+    # hold; any other kind stops without hold_rule.
+    assert "draft" in holds.case_hold(conn, [t], "draft_reply")
+    assert "stop" in holds.case_hold(conn, [t], "investigation")
     queue.set_switch(conn, "hold_rule", True)
     assert holds.case_hold(conn, [t], "draft_reply")["proceed"]["verdict"] == "proceed"
     t2, ben2, work2 = _setup(conn, held_what="Send the change list to John")

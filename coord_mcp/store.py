@@ -1057,6 +1057,8 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
     waiting.sort(key=lambda d: d["since"])
     loose_ends: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
+    from . import defer as defer_mod
+    returns = defer_mod.returns_for(conn)
     for r in conn.execute(
         """SELECT f.id fid, f.task_id, f.who, f.what, f.state, f.created_at, f.intent_id, f.due_at,
                   COALESCE(t.assigned_to, f.client) assigned_to, t.title
@@ -1071,6 +1073,8 @@ def operator_view(conn: sqlite3.Connection, recent_h: int = 48) -> dict[str, Any
         if r["due_at"] is not None:
             d["due"], d["due_basis"] = r["due_at"], "stated"
         if r["state"] == "deferred":
+            d["return_on"] = returns.get(r["fid"])
+            d["note"] += f" · returns {defer_mod.day(d['return_on'])}" if d["return_on"] else " · no return date"
             deferred.append(d)
         elif r["who"].strip().lower() == "ben":
             needs_you.append(d)
@@ -1894,11 +1898,15 @@ def resolve_follow_up(
     decision_id: str | None = None,
     defer: bool = False,
     reopen: bool = False,
+    return_on: Any = None,
 ) -> dict[str, Any]:
     """Close a loose end: 'tasked' by a child task, or 'dropped' by a decision.
 
     defer parks it as 'deferred' behind a decision naming its trigger: still
-    owed, but off the board's loose ends. reopen puts a deferred one back.
+    owed, but off the board's loose ends, until its return date (return_on:
+    a date, a preset or a count of business days; default
+    defer.DEFAULT_DAYS business days), when the dashboard reopens it.
+    reopen puts a deferred one back now.
     """
     row = conn.execute("SELECT state FROM follow_ups WHERE id=?", (follow_up_id,)).fetchone()
     if row is None:
@@ -1906,6 +1914,8 @@ def resolve_follow_up(
     if reopen:
         if task_id or decision_id or defer:
             raise ValueError("reopen takes no task_id, decision_id or defer")
+        if return_on not in (None, ""):
+            raise ValueError("reopen takes no return_on")
         if row["state"] != "deferred":
             raise ValueError(f"follow-up '{follow_up_id}' is {row['state']}; only a deferred one reopens")
         conn.execute("UPDATE follow_ups SET state='open', resolved_by=NULL, resolved_at=NULL WHERE id=?",
@@ -1915,6 +1925,10 @@ def resolve_follow_up(
                 "loose_ends_left": left}
     if defer and (task_id or not decision_id):
         raise ValueError("defer needs decision_id (the decision naming what it waits on) and no task_id")
+    if return_on not in (None, "") and not defer:
+        raise ValueError("return_on goes with defer=true")
+    from . import defer as defer_mod
+    ret = defer_mod.parse(return_on) if defer else None
     if bool(task_id) == bool(decision_id):
         raise ValueError("give exactly one of task_id (it became a task) or decision_id (recorded why not)")
     if row["state"] not in ("open", "deferred") or (defer and row["state"] == "deferred"):
@@ -1926,9 +1940,14 @@ def resolve_follow_up(
     state = "tasked" if task_id else "deferred" if defer else "dropped"
     conn.execute("UPDATE follow_ups SET state=?, resolved_by=?, resolved_at=? WHERE id=?",
                  (state, task_id or decision_id, now(), follow_up_id))
+    if ret is not None:
+        defer_mod.set_return(conn, follow_up_id, ret, decision_id)
     left = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='open'").fetchone()["n"]
-    return {"ok": True, "follow_up_id": follow_up_id, "state": state, "resolved_by": task_id or decision_id,
-            "loose_ends_left": left}
+    out = {"ok": True, "follow_up_id": follow_up_id, "state": state, "resolved_by": task_id or decision_id,
+           "loose_ends_left": left}
+    if ret is not None:
+        out["return_on"] = defer_mod.day(ret)
+    return out
 
 
 # ------------------------------------------------------------ operator prompts
