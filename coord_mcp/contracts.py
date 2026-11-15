@@ -93,6 +93,9 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
         },
         "branch": {"type": "str", "max": 100},
         "notes": {"type": "str", "max": 300},
+        # The build/dev-compile outcome, machine-readable (additive, 2026-11-15):
+        # check-in auto-approval (checkin_auto.py) needs "clean"; prose is never parsed.
+        "compile": {"type": "enum", "values": ["clean", "warnings", "errors", "not_run"]},
         "follow_ups": _FOLLOW_UPS,
     },
     "investigation": {

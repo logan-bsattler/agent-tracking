@@ -1566,7 +1566,7 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
           + ('<b class="st-done">Sent. Master picks it up when idle.</b>' if queued else
              '<span class="muted">queued for master; runs when master is idle</span>')
           + _next_link(d, queued) + '</div></form>')
-    head = _draft_card(d, queued) + _order_card(d)
+    head = _draft_card(d, queued) + _order_card(d) + _checkin_card(d)
     q = d.get("question")
     if q:
         head += (f'<div class="card go next"><h2>Master asks</h2><p>{esc(q["question"])}</p>'
@@ -1575,6 +1575,23 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
                  f'&quot;Answer on {esc(q["ref"])}: &lt;option&gt;&quot; when it is idle.</p></div>')
     return page("Board", f'{d["assigned_to"] or "Task"}: {d["title"][:60]}', h1, sub, head + "".join(cards),
                 actions=go, tail=FILE_JS)
+
+
+def _checkin_card(d: dict[str, Any]) -> str:
+    """A check-in auto-approval in its veto window: what it rests on and one
+    Veto button (checkin_auto.py). Nothing once the window has passed."""
+    a = d.get("checkin_auto")
+    if not a or a["state"] not in ("window", "released") or a.get("checked_in"):
+        return ""
+    btn = (f'<form method="post" action="/api/checkin-veto" class="act" style="display:inline">'
+           f'<input type="hidden" name="task" value="{esc(d["id"])}"><button>Veto</button></form>')
+    word = (f'veto by {when(a["veto_by"])}' if a["state"] == "window"
+            else "window passed; no check-in task yet")
+    return (f'<div class="card go next"><h2>Check-in auto-approved</h2>'
+            f'<p>Review <code>{esc(a["review_id"])}</code> approves it, files unchanged, compile clean '
+            f'(decision <code>{esc(a["decision_id"])}</code>); {esc(word)}.</p>'
+            f'<div class="btns">{btn}<span class="muted">cancels it; the check-in approval comes back to you</span>'
+            f'</div></div>')
 
 
 def _draft_card(d: dict[str, Any], queued: bool) -> str:
@@ -2502,6 +2519,14 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                             engine.run(conn)
                     except Exception:
                         loop_error(connect, "engine")
+                    # Check-in auto-approval (checkin_auto.py): inactive until
+                    # the review gate starts; behind switch auto_checkin. Only
+                    # the approval is automatic, never the check-in.
+                    try:
+                        from . import checkin_auto
+                        checkin_auto.run(conn)
+                    except Exception:
+                        loop_error(connect, "checkin_auto")
                     # The weekly workflow miner (workflows/propose.py): Monday
                     # 06:30 local, once a week, behind the workflow_propose switch.
                     try:
@@ -2741,6 +2766,19 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         back = "/clients"
                     self.send_response(303)
                     self.send_header("Location", back)
+                    self.end_headers()
+                    return
+                if path == "/api/checkin-veto":  # Veto on /board/task: Ben's click cancels a check-in auto-approval
+                    from . import checkin_auto
+                    tid = (form.get("task") or [""])[0].strip()
+                    try:
+                        checkin_auto.veto(conn, tid)
+                        conn.commit()
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    self.send_response(303)
+                    self.send_header("Location", "/board/task/" + re.sub(r"[^0-9a-f]", "", tid))
                     self.end_headers()
                     return
                 if path == "/api/promote":  # Promote on /deliverables: Ben's click, never an agent's

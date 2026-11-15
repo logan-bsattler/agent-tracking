@@ -217,8 +217,11 @@ def where(conn: sqlite3.Connection, case: sqlite3.Row, d: dict[str, Any] | None,
     if ben:
         # Waiting on Ben: at the next Ben step if the definition has one there (past
         # any code-run steps, such as a review), else at the step the loose end came from.
-        ahead = next((s for s in steps[reached + 1:] if s["who"] != "code"), None) if reached >= 0 else nxt
-        key = ahead["key"] if ahead and ahead["who"] == "ben" else last["case_step"]
+        # A code step with Ben as its fallback (check-in auto-approval) is his while he has an item open.
+        ben_at = lambda s: s["who"] == "ben" or s.get("fallback") == "ben"  # noqa: E731
+        ahead = (next((s for s in steps[reached + 1:] if s["who"] != "code" or ben_at(s)), None)
+                 if reached >= 0 else nxt)
+        key = ahead["key"] if ahead and ben_at(ahead) else last["case_step"]
         return {"state": "open", "step": key, "waits_on": "ben", "since": min(f["created_at"] for f in ben),
                 "task": ben[0]["task_id"]}
     client = [f for f in fus if _client_loose_end(f["who"], case["client"])]

@@ -1843,6 +1843,10 @@ def task_detail(conn: sqlite3.Connection, task_id: str, root: Path | None = None
     d["children"] = [dict(x) for x in conn.execute(
         "SELECT id, title, state, assigned_to FROM tasks WHERE parent_id=? ORDER BY created_at", (task_id,))]
     d["question"] = current_question(conn, task_id)
+    from . import checkin_auto
+    d["checkin_auto"] = checkin_auto.row(conn, task_id)
+    if d["checkin_auto"]:
+        d["checkin_auto"]["checked_in"] = checkin_auto._checked_in(conn, task_id)
     d["files"] = task_files(conn, task_id, root)
     d["next_for_client"] = next_for_client(conn, d)
     d["deps"] = task_deps(conn, task_id)

@@ -446,6 +446,10 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
 #                   inside the band closes its Ben approval item behind
 #                   "Estimate auto-accepted ..." (coord_mcp/estimate.py;
 #                   band in SETTINGS below).                            (on)
+#   auto_checkin    once the review gate has started, a CVC code_change
+#                   whose review approves it, files unchanged, compile
+#                   clean is check-in approved behind a veto window of
+#                   setting auto_checkin_hours (checkin_auto.py).        (on)
 #   workflow_propose the dashboard runs `python -m coord_mcp.workflows propose
 #                   --file` once a week, Monday 06:30 local: up to 3
 #                   workflow proposals in Ben's queue.                  (on)
@@ -465,10 +469,13 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # an approving dod_review promotes its deliverable (store.auto_promote)
             "auto_promote": True,
             # the estimate band (coord_mcp/estimate.py, Ben 2026-11-15)
-            "auto_estimate": True}
+            "auto_estimate": True,
+            # check-in auto-approval (coord_mcp/checkin_auto.py); inactive until the gate starts
+            "auto_checkin": True}
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).
-SETTINGS = {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0}
+SETTINGS = {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0,
+            "auto_checkin_hours": 4.0}  # the check-in veto window, business hours
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (

@@ -8,6 +8,10 @@ than an engine pass.
 A definition is ordered steps. Each step says:
   key, name   stable id and the label /workflows shows
   who         agent | code | ben: who does the step today
+  fallback    optional, on a code step only: "ben" when the step is Ben's
+              whenever the code rule is off or declines (check-in
+              auto-approval, checkin_auto.py). Such a step counts as Ben's
+              while he has a loose end open on the case.
   kinds       task kinds that carry the step on the board (empty for a step
               no task carries: Ben's, or one code does without a task)
   match       optional {"spec_has": field}: the task's spec must name it
@@ -140,6 +144,8 @@ def validate(d: dict[str, Any], kinds: tuple[str, ...] | list[str] | None = None
         for f in ("name", "gate", "next"):
             if not st.get(f):
                 errs.append(f"{where}: no {f}")
+        if "fallback" in st and (st.get("who") != "code" or st["fallback"] not in ("ben", "agent")):
+            errs.append(f"{where}: fallback goes on a code step and names ben or agent")
         if "optional" in st and not isinstance(st["optional"], bool):
             errs.append(f"{where}: optional must be true or false")
         if "auto" in st:

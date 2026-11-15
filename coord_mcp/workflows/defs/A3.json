@@ -52,6 +52,7 @@
           "read_first": "coord_get_task_result {prev} (the step before this one in case {case}: {root_title}).",
           "constraints": [
             "Build and dev-compile only; do not check in.",
+            "Return compile: \"clean\" only when the build and dev-compile ran with no errors or warnings.",
             "Say Devoir, never offshore."
           ],
           "created_by": "workflow engine ({workflow}, case {case})"
@@ -75,9 +76,10 @@
     {
       "key": "checkin_ok",
       "name": "Check-in approval",
-      "who": "ben",
+      "who": "code",
+      "fallback": "ben",
       "kinds": [],
-      "gate": "Ben approves the check-in",
+      "gate": "checkin_auto: review approves, files unchanged, compile clean, veto window passed; else Ben approves the check-in",
       "next": "master creates the check-in",
       "sla": {
         "business_days": 2

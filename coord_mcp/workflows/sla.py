@@ -184,7 +184,8 @@ def status(case: dict[str, Any], now: int, tz: Any = None, off: Any = None) -> d
 # acting on the case, so they never quiet it.
 AUTOMATED_PREFIXES = ("Workflow engine:", "Engine drafted reply", "Covered:", "Auto-deferred",
                       "Return dates", "Precedent:", "Master default: Ben loose end", "Restated deliverable",
-                      "Pipeline note")
+                      "Pipeline note", "Check-in auto-approved", "Check-in released",
+                      "Check-in auto-approval")
 
 
 def _quiet(conn: sqlite3.Connection, case_id: str, after: int, ben: bool) -> bool:
