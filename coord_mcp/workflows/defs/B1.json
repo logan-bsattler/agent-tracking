@@ -36,8 +36,12 @@
       "name": "Approve estimate",
       "who": "ben",
       "kinds": [],
-      "gate": "Ben approves the estimate; status and dates stay his",
-      "next": "Ben's ruling",
+      "gate": "inside the estimate band (high/low <= estimate_max_ratio, high <= estimate_max_high h; switch auto_estimate) code accepts it; else Ben approves. Status and dates stay his",
+      "next": "auto-accept decision or Ben's ruling",
+      "auto": {
+        "rule": "estimate_band",
+        "fallback": "ben"
+      },
       "sla": {
         "business_days": 3
       }

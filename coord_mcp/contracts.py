@@ -6,7 +6,8 @@ reach the lead's context. Adding a kind is a dict entry here; nothing else
 changes.
 
 Field spec keys:
-    type      "str" | "int" | "bool" | "enum" | "list" | "dict"
+    type      "str" | "int" | "num" | "bool" | "enum" | "list" | "dict"
+              ("num" is an int or a float)
     required  bool (default False)
     max       str: max characters; list: max items
     values    enum: allowed values
@@ -47,6 +48,17 @@ _FOLLOW_UPS = {
         # Optional and additive: results without it validate as before.
         "reason": {"type": "enum", "values": ["send", "approve", "scope", "access", "judgement"]},
     }},
+}
+
+# A sizing's headline range in hours, as numbers (Ben, 2026-11-15). Optional
+# and additive: with it, an estimate inside the auto band (coord_mcp/estimate.py)
+# is accepted without Ben; without it, his approval item stays his.
+_ESTIMATE = {
+    "type": "dict",
+    "fields": {
+        "low_hours": {"type": "num", "required": True},
+        "high_hours": {"type": "num", "required": True},
+    },
 }
 
 # One definition-of-done item, judged. `item` is the checklist line as the
@@ -92,6 +104,7 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
             "items": {"type": "str", "max": 200},
         },
         "pointers": {"type": "list", "max": 20, "items": {"type": "str", "max": 400}},
+        "estimate": _ESTIMATE,
         "follow_ups": _FOLLOW_UPS,
     },
     "review": {
@@ -107,6 +120,7 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
         "rows": {"type": "int", "required": True},
         "columns": {"type": "list", "max": 50, "items": {"type": "str", "max": 80}},
         "summary": {"type": "str", "max": 300},
+        "estimate": _ESTIMATE,
         "follow_ups": _FOLLOW_UPS,
     },
     # An email reply the agent wrote and nobody sent. The body lives in a
@@ -142,6 +156,7 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
         "dod_path": {"type": "str", "max": 400, "required": True},
         "self_check": {"type": "list", "max": 30, "required": True,
                        "items": {"type": "dict", "fields": _CRITERION}},
+        "estimate": _ESTIMATE,
         "follow_ups": _FOLLOW_UPS,
     },
     # An independent pass over a deliverable against its definition of done.
@@ -267,6 +282,10 @@ def _check(path: str, spec: dict[str, Any], val: Any, errors: list[str]) -> Any:
     if t == "int":
         if not isinstance(val, int) or isinstance(val, bool):
             errors.append(f"{path}: expected int, got {type(val).__name__}")
+        return val
+    if t == "num":
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            errors.append(f"{path}: expected number, got {type(val).__name__}")
         return val
     if t == "str":
         if not isinstance(val, str):

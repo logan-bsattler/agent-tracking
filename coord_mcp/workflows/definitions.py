@@ -28,6 +28,10 @@ A definition is ordered steps. Each step says:
                   resolved as tasked by the new task
               cvc: true marks CVC-bound code (dev-compile only, no check-in)
               spec_defaults: spec fields set when the template lacks them
+  auto        optional, on a Ben step only: {"rule": <AUTO_RULES>, "fallback":
+              "ben"}. Code settles the step when the rule holds; otherwise it
+              stays Ben's, as `who` says. estimate_band: a sizing inside the
+              band closes his approval item (coord_mcp/estimate.py).
   optional    optional true: cases often go past the step without it, so
               the case-step check (checks.py) does not warn when it is
               skipped. Set by an adopted drift proposal (propose.py).
@@ -50,6 +54,7 @@ from . import CATALOG
 DEFS_DIR = Path(__file__).with_name("defs")
 WHO = ("agent", "code", "ben")
 SPAWN_ON = ("result", "client_follow_up")
+AUTO_RULES = ("estimate_band",)
 # The only kinds the engine may create. A draft_reply is a draft (nothing
 # sends); a code_change it creates is CVC-bound and dev-compile only; a
 # check-in, a promotion or a tracker post is never in reach.
@@ -137,6 +142,14 @@ def validate(d: dict[str, Any], kinds: tuple[str, ...] | list[str] | None = None
                 errs.append(f"{where}: no {f}")
         if "optional" in st and not isinstance(st["optional"], bool):
             errs.append(f"{where}: optional must be true or false")
+        if "auto" in st:
+            au = st["auto"]
+            if st.get("who") != "ben":
+                errs.append(f"{where}: auto is for a Ben step (code settles it, Ben is the fallback)")
+            if not isinstance(au, dict) or au.get("rule") not in AUTO_RULES:
+                errs.append(f"{where}: auto.rule must be one of {AUTO_RULES}")
+            elif au.get("fallback") != "ben":
+                errs.append(f"{where}: auto.fallback must be \"ben\"")
         if "sla" in st:
             errs.extend(f"{where}: {e}" for e in sla_errors(st["sla"]))
         sp = st.get("spawn")

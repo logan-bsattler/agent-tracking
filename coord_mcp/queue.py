@@ -442,6 +442,10 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
 #                   <client>/deliverables (store.auto_promote), and Ben's
 #                   promote-only loose ends on it close; Promote's refusals
 #                   still apply, and a refusal leaves his item.       (on)
+#   auto_estimate   a sizing result whose `estimate` (low/high hours) is
+#                   inside the band closes its Ben approval item behind
+#                   "Estimate auto-accepted ..." (coord_mcp/estimate.py;
+#                   band in SETTINGS below).                            (on)
 #   workflow_propose the dashboard runs `python -m coord_mcp.workflows propose
 #                   --file` once a week, Monday 06:30 local: up to 3
 #                   workflow proposals in Ben's queue.                  (on)
@@ -459,7 +463,12 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # the weekly workflow miner (workflows/propose.py) files its proposals
             "workflow_propose": True,
             # an approving dod_review promotes its deliverable (store.auto_promote)
-            "auto_promote": True}
+            "auto_promote": True,
+            # the estimate band (coord_mcp/estimate.py, Ben 2026-11-15)
+            "auto_estimate": True}
+# Numbers behind the switches, as working defaults Ben may change (meta
+# `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).
+SETTINGS = {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (
@@ -480,6 +489,24 @@ def switch(conn: sqlite3.Connection, name: str) -> bool:
 def set_switch(conn: sqlite3.Connection, name: str, on: bool) -> None:
     switch(conn, name)  # validates the name
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (f"switch:{name}", "on" if on else "off"))
+    conn.commit()
+
+
+def setting(conn: sqlite3.Connection, name: str) -> float:
+    if name not in SETTINGS:
+        raise KeyError(f"unknown setting {name!r}; known: {', '.join(SETTINGS)}")
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (f"setting:{name}",)).fetchone()
+    try:
+        return float(r["value"]) if r is not None else SETTINGS[name]
+    except (TypeError, ValueError):
+        return SETTINGS[name]
+
+
+def set_setting(conn: sqlite3.Connection, name: str, value: float) -> None:
+    setting(conn, name)  # validates the name
+    if not value > 0:
+        raise ValueError(f"{name} must be above 0")
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (f"setting:{name}", repr(float(value))))
     conn.commit()
 
 
@@ -720,6 +747,10 @@ def settle_landing(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
             settled.append({"follow_up": r["id"], "ruling": hit["decision_id"], "decision": dec["decision_id"]})
         if settled:
             out["settled_by_ruling"] = settled
+    if switch(conn, "auto_estimate"):
+        from . import estimate
+        if accepted := estimate.settle(conn, task_id):
+            out["estimate_auto_accepted"] = accepted
     return out
 
 
@@ -1125,6 +1156,12 @@ def create_warnings(conn: sqlite3.Connection, kind: str, spec: dict[str, Any],
 
 # ------------------------------------------------------------------- CLI
 
+def _print_settings(conn: sqlite3.Connection) -> None:
+    for k, d in SETTINGS.items():
+        v = setting(conn, k)
+        print(f"{k:<19} {v:g}" + ("" if v == d else f"  (default {d:g})"))
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m coord_mcp.queue",
                                 description="Route agent work off Ben's queue.")
@@ -1138,6 +1175,9 @@ def main(argv: list[str] | None = None) -> int:
     w = sub.add_parser("switch", help="show the Ben-queue landing switches, or set one on/off")
     w.add_argument("name", nargs="?", choices=list(SWITCHES))
     w.add_argument("state", nargs="?", choices=["on", "off"])
+    g = sub.add_parser("setting", help="show the numbers behind the switches, or set one")
+    g.add_argument("name", nargs="?", choices=list(SETTINGS))
+    g.add_argument("value", nargs="?", type=float)
     sub.add_parser("landing", help="dry run: Ben items ben_cover and ben_precedent would close now")
     a = p.parse_args(argv)
     conn = connect()
@@ -1148,6 +1188,12 @@ def main(argv: list[str] | None = None) -> int:
             for k in SWITCHES:
                 print(f"{k:<15} {'on' if switch(conn, k) else 'off'}" + ("" if switch(conn, k) == SWITCHES[k]
                                                                        else "  (default " + ("on" if SWITCHES[k] else "off") + ")"))
+            _print_settings(conn)
+            return 0
+        if a.cmd == "setting":
+            if a.name and a.value is not None:
+                set_setting(conn, a.name, a.value)
+            _print_settings(conn)
             return 0
         if a.cmd == "landing":
             rep = landing_report(conn)
