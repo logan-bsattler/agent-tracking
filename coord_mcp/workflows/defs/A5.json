@@ -78,11 +78,11 @@
     },
     {
       "key": "ben",
-      "name": "Ben reviews",
-      "who": "ben",
+      "name": "Promote",
+      "who": "code",
       "kinds": [],
-      "gate": "Promote on /deliverables",
-      "next": "Ben promotes",
+      "gate": "auto-promoted when the dod_review approves (auto_promote switch); Promote on /deliverables if refused",
+      "next": "promoted",
       "sla": {
         "business_days": 2
       }

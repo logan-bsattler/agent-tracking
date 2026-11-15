@@ -438,6 +438,10 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
 #   defer_return    the dashboard reopens a deferred loose end on its return
 #                   date (coord_mcp/defer.py); dates are still recorded
 #                   when it is off.                                       (on)
+#   auto_promote    an approving dod_review promotes its deliverable to
+#                   <client>/deliverables (store.auto_promote), and Ben's
+#                   promote-only loose ends on it close; Promote's refusals
+#                   still apply, and a refusal leaves his item.       (on)
 #   workflow_propose the dashboard runs `python -m coord_mcp.workflows propose
 #                   --file` once a week, Monday 06:30 local: up to 3
 #                   workflow proposals in Ben's queue.                  (on)
@@ -453,7 +457,9 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # deferred item on its return date.
             "defer_return": True,
             # the weekly workflow miner (workflows/propose.py) files its proposals
-            "workflow_propose": True}
+            "workflow_propose": True,
+            # an approving dod_review promotes its deliverable (store.auto_promote)
+            "auto_promote": True}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (

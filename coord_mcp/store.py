@@ -204,6 +204,16 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
     ensure_promotions(conn)
     with savepoint(conn, "complete_task"):
         out = _complete(conn, task_id, row, validated)
+    # An approving dod_review promotes its deliverable (auto_promote; Ben,
+    # 2026-11-15). After the close, never part of it: a refusal or a disk
+    # error leaves the review landed and the item Ben's, as before.
+    if row["kind"] == "dod_review" and validated.get("verdict") == "approve" and _queue.switch(conn, "auto_promote"):
+        try:
+            with savepoint(conn, "auto_promote"):
+                if (ap := auto_promote(conn, task_id)) is not None:
+                    out["auto_promote"] = ap
+        except Exception as e:  # noqa: BLE001 - the review stands whatever the copy does
+            out["auto_promote"] = {"ok": False, "error": str(e)[:200]}
     # Case-step advice after the close lands (workflows/checks.py): never a refusal.
     from .workflows import checks
     if warnings := checks.complete_warnings(conn, task_id):
@@ -1421,11 +1431,12 @@ def _named_files(result: dict[str, Any], client: str | None, root: Path) -> list
 
 
 def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None,
-            path: str | None = None) -> dict[str, Any]:
+            path: str | None = None, by: str = "Ben promoted it from /deliverables") -> dict[str, Any]:
     """Copy an approved deliverable into <client>/deliverables as <name>-vN.
 
-    Ben's click on /deliverables, never an agent's: the client folder is what
-    the client sees. Refused unless the task is a finished deliverable whose
+    Ben's click on /deliverables, or the board itself when an approving
+    dod_review lands (auto_promote); never an agent's: the client folder is
+    what the client sees. Refused unless the task is a finished deliverable whose
     newest dod_review approves it and the file is unchanged since that review.
     Never overwrites: each promotion is a new version beside the last.
     `path` picks one file of a deliverable that names several (a batch of
@@ -1491,9 +1502,70 @@ def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None,
                  "VALUES (?,?,?,?,?,?,?,?,?)", (pid, task_id, rev["id"], client, str(src), str(dest), v, sha, now()))
     also = f" with {book_dest.name}" if book_dest else ""
     dec = record_decision(conn, f"Promoted {src.name} to {client}/deliverables as {dest.name}{also}"[:200],
-                          f"dod_review {rev['id']} approved it; Ben promoted it from /deliverables", task_id)
+                          f"dod_review {rev['id']} approved it; {by}"[:200], task_id)
     return {"ok": True, "duplicate": False, "promotion_id": pid, "dest": str(dest), "version": v,
             "decision_id": dec["decision_id"], **({"workbook": str(book_dest)} if book_dest else {})}
+
+
+# A Ben loose end that only asks for the file Promote: closed once the board
+# has promoted it. One that also asks for a send, a post or a QAD promotion
+# (TEST/PROD) stays his: the send step is still the gate.
+_PROMOTE_ASK = re.compile(r"\bpromot(e|es|ed|ing|ion)\b", re.I)
+_NOT_FILE_PROMOTE = re.compile(r"\b(send|sends|sent|mail|email|post|posts|reply|DEVL|TEST|PROD|QSM|CVC|MIGR)\b")
+AUTO_BY = "auto-promoted when it landed (auto_promote)"
+
+
+def auto_promote(conn: sqlite3.Connection, review_id: str, root: Path | None = None) -> dict[str, Any] | None:
+    """Promote the deliverable an approving dod_review judged, every file it
+    names (a workbook beside a page travels with the page), through promote()
+    and its refusals unchanged. All promoted: Ben's promote-only loose ends on
+    the review and the deliverable close behind a decision citing the review.
+    Any refused: a decision says why and his items stay. None when the review
+    is not an approving one of a finished deliverable."""
+    root = root or DOCS_ROOT
+    rv = conn.execute("SELECT parent_id, result FROM tasks WHERE id=? AND kind='dod_review' AND state='done'",
+                      (review_id,)).fetchone()
+    if rv is None or not rv["parent_id"] or json.loads(rv["result"] or "{}").get("verdict") != "approve":
+        return None
+    tid = rv["parent_id"]
+    d = conn.execute("SELECT kind, state, assigned_to, result FROM tasks WHERE id=?", (tid,)).fetchone()
+    if d is None or d["kind"] != "deliverable" or d["state"] != "done":
+        return None
+    named = _named_files(json.loads(d["result"] or "{}"), d["assigned_to"], root)
+    page = any(p.suffix.lower() in (".html", ".htm") for p in named)
+    targets, seen = [], set()
+    for p in named:
+        if (page and p.suffix.lower() in (".xlsx", ".xlsm")) or str(p).lower() in seen:
+            continue
+        seen.add(str(p).lower())
+        targets.append(p)
+    promoted, refused = [], []
+    for p in targets or [None]:
+        try:
+            r = promote(conn, tid, root=root, path=str(p) if p and len(targets) > 1 else None, by=AUTO_BY)
+            promoted.append({"dest": r["dest"], "version": r["version"], "duplicate": r["duplicate"]})
+        except ValueError as e:
+            refused.append(str(e))
+    if refused:
+        dec = record_decision(conn, f"Auto-promote refused for deliverable {tid}: {refused[0]}"[:200],
+                              f"dod_review {review_id} approved it; Promote on /deliverables stays Ben's", tid)
+        return {"ok": False, "task_id": tid, "promoted": promoted, "refused": refused,
+                "decision_id": dec["decision_id"]}
+    from . import queue
+    closed = []
+    for f in conn.execute("SELECT id, task_id, who, what FROM follow_ups WHERE state='open' AND task_id IN (?,?)",
+                          (review_id, tid)).fetchall():
+        if queue.is_ben(f["who"]) and _PROMOTE_ASK.search(f["what"]) and not _NOT_FILE_PROMOTE.search(f["what"]):
+            closed.append(f["id"])
+    dec = None
+    if closed:
+        dec = record_decision(conn, f"Auto-promoted: Ben loose end(s) {', '.join(closed)} closed, "
+                                    f"deliverable {tid} promoted"[:200],
+                              f"dod_review {review_id} approved it; auto_promote (Ben, 2026-11-15)", tid)
+        for fid in closed:
+            resolve_follow_up(conn, fid, decision_id=dec["decision_id"])
+    return {"ok": True, "task_id": tid, "promoted": promoted, "closed": closed,
+            **({"decision_id": dec["decision_id"]} if dec else {})}
 
 
 def restate_files(conn: sqlite3.Connection, task_id: str, paths: list[str],

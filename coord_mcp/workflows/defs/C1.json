@@ -37,9 +37,9 @@
     {
       "key": "promote",
       "name": "Promote",
-      "who": "ben",
+      "who": "code",
       "kinds": [],
-      "gate": "Ben's click on /deliverables",
+      "gate": "auto-promoted when the dod_review approves (auto_promote switch); Ben's click on /deliverables if refused",
       "next": "promoted",
       "sla": {
         "business_days": 2

@@ -19,3 +19,8 @@ def pytest_configure(config):
 def _ben_checks_off(request, monkeypatch):
     if request.node.get_closest_marker("ben_checks") is None:
         monkeypatch.setattr(queue, "SWITCHES", {k: False for k in queue.SWITCHES})
+    else:
+        # auto_promote is on at its real default here: keep its copies out of
+        # the real Documents folder.
+        from coord_mcp import store
+        monkeypatch.setattr(store, "DOCS_ROOT", request.getfixturevalue("tmp_path") / "docs")
