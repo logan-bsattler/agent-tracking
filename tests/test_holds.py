@@ -187,3 +187,41 @@ def test_case_hold_outward_hold_stops_even_after_an_internal_one(conn):
     out = _fu(conn, t, "Royal", "Send the change list to John")
     _hold(conn, t, ben, out)
     assert "stop" in holds.case_hold(conn, [t], "draft_reply")
+
+
+def test_a_hold_recording_bens_own_ruling_is_not_refused_or_listed(conn, monkeypatch):
+    # Review 2026-11-14: Ben says "hold it until I decide"; the rule must not
+    # override him with "Proceed on master default".
+    monkeypatch.setattr(queue, "SWITCHES", {**queue.SWITCHES, "hold_rule": True})
+    assert holds.minder_owed(conn) == []  # stamps the start
+    conn.execute("UPDATE meta SET value=? WHERE key=?", (str(now() - 5), holds.SINCE_KEY))
+    t, ben, work = _setup(conn)
+    for stmt in (f"Per Ben's answer: hold {work} until Ben rules {ben}.",
+                 f"Ben ruled: defer {work} until Ben rules {ben}.",
+                 f"Desk: per Ben, hold {work} until Ben rules {ben}.",
+                 f"Hold {work} until Ben rules {ben}, as Ben asked."):
+        holds.check_new_hold(conn, stmt, None, t)  # not refused
+    d = store.record_decision(conn, f"Per Ben's answer: hold {work} until Ben rules {ben}.", None, t)
+    store.resolve_follow_up(conn, work, decision_id=d["decision_id"], defer=True)
+    [h] = holds.find_holds(conn)
+    assert h["verdict"] == "keep" and "Ben's own ruling" in h["reason"]
+    assert holds.minder_owed(conn) == []
+    assert holds.apply(conn)["count"] == 0
+
+
+def test_a_ruling_named_only_in_the_trigger_is_still_an_ordinary_hold(conn, monkeypatch):
+    monkeypatch.setattr(queue, "SWITCHES", {**queue.SWITCHES, "hold_rule": True})
+    t, ben, work = _setup(conn)
+    assert not holds.records_ben_ruling(f"Defer {work} pending Ben's ruling on {ben}.")
+    with pytest.raises(ValueError, match="hold refused"):
+        holds.check_new_hold(conn, f"Defer {work} pending Ben's ruling on {ben}.", None, t)
+
+
+def test_the_prescribed_proceed_statement_is_never_a_hold(conn, monkeypatch):
+    monkeypatch.setattr(queue, "SWITCHES", {**queue.SWITCHES, "hold_rule": True})
+    t, ben, work = _setup(conn)
+    for stmt in (f"Proceed on master default for {work}: revise once more; Ben's {ben} stays open",
+                 f"Proceed on master default for {work}: revise; work waits for nothing; Ben's {ben} stays held",
+                 f"Revise {work} once more, waiting on nothing (master default; Ben may override); {ben} stays open"):
+        assert not holds.is_hold(stmt)
+        holds.check_new_hold(conn, stmt, "master default; Ben may override", t)

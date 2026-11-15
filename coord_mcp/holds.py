@@ -77,6 +77,20 @@ _ACTION = re.compile(r"\bBen(?:'s)?\s+(?:\w+\s+){0,2}?(sync|syncs|synced|add|add
                      r"credential|access|login|VPN|session|restart|restarts|post|posts|email|emails|reply|replies|"
                      r"talks?|asks?|hears?|pushes|checks? in)\b", re.I)
 _MD = re.compile(r"\bmaster default\b", re.I)
+# A decision proceeding on a default is the opposite of a hold, whatever verbs
+# its tail carries ("...; Ben's <id> stays open").
+_PROCEED_STMT = re.compile(r"^\s*proceed(s|ing)? on (the |a )?master default\b|"
+                           r"\bmaster default; Ben may overrid", re.I)
+# A decision recording Ben's own ruling, e.g. that the work should wait for
+# him: "Per Ben's answer: hold X until Ben rules q5". The hold is his call, so
+# no rule turns it into a default. The ruling markers of queue._RULING plus
+# "Ben:" and "Answer on <id>"; present-tense "Ben rules" is left out, since it
+# is the trigger of an ordinary hold ("until Ben rules").
+_BEN_RULING = re.compile(
+    r"\b(Ben (ruled|chose|approved|answered|said|decided|accepted|rejected|dropped|deferred|asked|directed|wants)\b"
+    r"|per Ben\b|as Ben (said|asked|directed)\b|Ben's (ruling|answer|call|direction|decision|instruction)\b"
+    r"|Ben:|Answer on\b)", re.I)
+_RULING_LEAD = re.compile(r"^\s*(?:(?:desk|master|worker)\s*:\s*)?(?:on\s+)?" + _BEN_RULING.pattern, re.I)
 
 # What makes work outward-facing: it leaves Logan, or the client can see it.
 _OUTWARD = re.compile(
@@ -166,7 +180,24 @@ def waits_on_ben(conn: sqlite3.Connection, statement: str) -> dict[str, Any] | N
 
 def is_hold(statement: str) -> bool:
     s = statement or ""
-    return bool(_HOLD_VERB.search(s)) and not _SNAPSHOT.search(s) and not _LIFT.search(s)
+    return (bool(_HOLD_VERB.search(s)) and not _SNAPSHOT.search(s) and not _LIFT.search(s)
+            and not _PROCEED_STMT.search(s))
+
+
+def records_ben_ruling(statement: str) -> bool:
+    """True when the decision writes down Ben's own ruling: a ruling marker at
+    the start, or anywhere outside the hold's trigger clauses ("pending Ben's
+    ruling" is a trigger, not a ruling)."""
+    s = statement or ""
+    if _RULING_LEAD.search(s):
+        return True
+    # A trigger clause ends at its comma: "until Ben rules q5, as Ben asked".
+    spans = []
+    for m in _TRIGGER.finditer(s):
+        a, b = m.span("rest")
+        comma = s.find(",", a, b)
+        spans.append((a, comma if comma >= 0 else b))
+    return any(not any(a <= m.start() < b for a, b in spans) for m in _BEN_RULING.finditer(s))
 
 
 def held_work(conn: sqlite3.Connection, d: sqlite3.Row, ben_ids: list[str]) -> list[dict[str, Any]]:
@@ -279,7 +310,9 @@ def classify(conn: sqlite3.Connection, d: sqlite3.Row) -> dict[str, Any] | None:
     client = next((w.get("client") for w in work if w.get("client")), None)
     if client is None and d["task_id"] and (t := _task(conn, d["task_id"])) is not None:
         client = t["assigned_to"]
-    if ben["type"] == "action":
+    if records_ben_ruling(d["statement"]):
+        verdict, reason = "keep", "records Ben's own ruling to hold; only he lifts it"
+    elif ben["type"] == "action":
         verdict, reason = "keep", "waits on something Ben must do; no answer stands in for it"
     elif face == "outward":
         verdict, reason = "keep", f"outward-facing ({why})"

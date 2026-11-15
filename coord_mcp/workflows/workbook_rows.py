@@ -45,8 +45,6 @@ FDD_COLS = re.compile(r"fdd|tracker", re.I)
 RULING_COL = re.compile(r"\b(ruling|ruled)\b|^(ben'?s? )?decision$|^settled", re.I)
 NOT_RULING_COL = re.compile(r"needs|awaiting|to rule|waiting|\btab\b|\?|client|source|\bmag\b|dependency", re.I)
 UNSETTLED = re.compile(r"\b(open|pending|tbd|needs|awaiting|not yet|to rule|unclear|unruled)\b|^(no|n|none|-+|\?+)$", re.I)
-NOT_BENS = re.compile(r"ben may override", re.I)
-HOUSEKEEPING = re.compile(r"^(auto-deferred|board cleanup|desk cleanup|cleanup|return dates|covered:)", re.I)
 XLSX = re.compile(r"(?:[\w.&-]+[/\\])*[\w.&-]+\.xlsx\b", re.I)
 ITEM = re.compile(r"\b(ADP-[A-Z0-9]+(?:-\d+)?|IF\d+)\b", re.I)
 PROG = re.compile(r"\b[a-z][\w-]*\.p\b", re.I)
@@ -69,7 +67,11 @@ def files_in(what: str, client: str | None, root: Path) -> list[tuple[str, Path 
         if client:
             base = root / client
             for cand in (base / raw, base / "work" / Path(raw).name):
-                if cand.is_file() and not skip_file(cand):
+                try:  # a OneDrive placeholder, an over-long or odd path: not found, not fatal
+                    ok = cand.is_file() and not skip_file(cand)
+                except (OSError, ValueError):
+                    ok = False
+                if ok:
                     found = cand
                     break
         out.append((raw, found))
@@ -172,12 +174,16 @@ def _ruling_cols(head: list[str]) -> list[int]:
 def workbook_rulings(folder: Path, exclude: set[Path]) -> dict[str, str]:
     """key -> 'file:sheet' where another workbook records a settled ruling for it."""
     out: dict[str, str] = {}
-    if not folder.is_dir():
+    try:
+        if not folder.is_dir():
+            return out
+        paths = sorted(folder.glob("*.xlsx"))
+    except (OSError, ValueError):
         return out
-    for p in sorted(folder.glob("*.xlsx")):
-        if skip_file(p) or p.resolve() in exclude:
-            continue
+    for p in paths:
         try:
+            if skip_file(p) or p.resolve() in exclude:
+                continue
             for title, head, k, data in _sheets(p, lambda _t, h: bool(_ruling_cols(h))):
                 cols = _ruling_cols(head)
                 fdd = bool(FDD_COLS.search(head[k]))
@@ -194,14 +200,17 @@ def workbook_rulings(folder: Path, exclude: set[Path]) -> dict[str, str]:
 def _key_rx(key: str) -> re.Pattern:
     if key.startswith("FDD "):
         n = key[4:]
-        return re.compile(rf"(?:\bFDD[- ]?(?:[A-Z0-9]{{2,4}}-){{0,2}}#?|#|\btracker(?: id)? #?)0*{n}\b", re.I)
+        return re.compile(rf"(?:\bFDD[- ]?(?:[A-Z0-9]{{2,4}}-){{0,2}}#?|\btracker(?: id)? #?)0*{n}\b", re.I)
     return re.compile(rf"(?<![\w-]){re.escape(key)}(?![\w-])", re.I)
 
 
 def ben_decisions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Decisions that can stand as Ben's ruling of a row: precedent's shared
+    exclusions (housekeeping, defaults, precedents, evidence closes, board
+    records such as pipeline notes and Promote)."""
+    from .precedent import is_ben_ruling
     return [dict(r) for r in conn.execute("SELECT id, statement, because FROM decisions")
-            if r["statement"] and not HOUSEKEEPING.match(r["statement"])
-            and not NOT_BENS.search(r["because"] or "")]
+            if is_ben_ruling(r["statement"], r["because"])]
 
 
 def scan(conn: sqlite3.Connection, loose_ends: list[dict[str, Any]], root: Path) -> dict[str, Any]:
@@ -234,7 +243,11 @@ def scan(conn: sqlite3.Connection, loose_ends: list[dict[str, Any]], root: Path)
                 decisions = ben_decisions(conn)
             folder = path.parent
             if folder not in by_folder:
-                by_folder[folder] = workbook_rulings(folder, {path.resolve()})
+                try:
+                    me = path.resolve()
+                except (OSError, ValueError):
+                    me = path
+                by_folder[folder] = workbook_rulings(folder, {me})
             wbr = by_folder[folder]
             for key in dict.fromkeys(keys):
                 rx = _key_rx(key)

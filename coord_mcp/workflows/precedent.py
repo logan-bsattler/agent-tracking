@@ -11,8 +11,10 @@ when they are for the same client and their shapes overlap by MATCH or more
 (Jaccard).
 
 A precedent is an earlier Ben loose end of the same client that was ruled:
-  dropped  by a decision that closed at most BULK loose ends (a cleanup
-           sweep or the 14-day expiry is housekeeping, not a ruling)
+  dropped  by a decision that closed at most BULK loose ends and records
+           Ben's answer (is_ben_ruling: a cleanup sweep, the 14-day expiry,
+           a "Covered:" re-raise, an evidence close, a master default or an
+           earlier "Precedent:" is not a ruling)
   tasked   it became a task (Ben said do it)
 An open loose end is settled when every precedent it matches has the same
 outcome; mixed outcomes are "conflicting" and stay Ben's.
@@ -43,7 +45,30 @@ from typing import Any
 
 MATCH = 0.75
 BULK = 3
-HOUSEKEEPING = re.compile(r"^(auto-deferred|board cleanup|desk cleanup|cleanup)", re.I)
+# Decisions that close or name a Ben item without recording his answer. Shared
+# with workbook_rows.ben_decisions. By statement prefix: housekeeping sweeps,
+# the expiry and return dates, ben_cover's "Covered:" (the item lives on as
+# its re-raise), ben_precedent's "Master default:", master's own defaults,
+# this module's "Precedent:", and the board's own records (pipeline notes,
+# Promote, the workflow engine, handoffs).
+HOUSEKEEPING = re.compile(
+    r"^\s*(auto-deferred|board cleanup|desk cleanup|cleanup|return dates|covered:|master default|"
+    r"proceed(s|ing)? on (the |a )?master default|precedent:|pipeline note|promoted\b|workflow engine|"
+    r"engine drafted|restated deliverable|adopted workflow|handoff|hand-off)", re.I)
+# Anywhere in the because: a default of master's or a precedent, not Ben's.
+NOT_BENS_BECAUSE = re.compile(r"\bBen may overrid|\bmaster default\b|\bben_cover\b|\bben_precedent\b", re.I)
+# Anywhere in statement or because: closed on outside evidence (email-closes,
+# teams-status: "done on evidence", citing the message), not a ruling.
+EVIDENCE = re.compile(r"\bon evidence\b|\bemail-closes\b|\bteams-status\b|\bmsg\b|teams:///", re.I)
+
+
+def is_ben_ruling(statement: str | None, because: str | None) -> bool:
+    """Whether a decision can stand as Ben's ruling (for precedent and for the
+    workbook-row scan): not housekeeping, a default, a precedent or an
+    evidence close."""
+    s, b = statement or "", because or ""
+    return bool(s.strip()) and not HOUSEKEEPING.match(s) and not NOT_BENS_BECAUSE.search(b) \
+        and not EVIDENCE.search(f"{s} {b}")
 STOP = set("a an the and or of to in on for is are be it this that with as at by from not no if then "
            "still also per its it's into than so do does".split())
 _ENT = [
@@ -88,13 +113,15 @@ def precedents(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         "SELECT resolved_by, COUNT(*) n FROM follow_ups WHERE state='dropped' GROUP BY resolved_by")}
     out = []
     for r in conn.execute(f"""SELECT f.id, f.what, f.state, f.resolved_by, f.resolved_at, {_client_expr()} AS client,
-                                     d.statement FROM follow_ups f LEFT JOIN tasks t ON t.id=f.task_id
+                                     d.statement, d.because FROM follow_ups f LEFT JOIN tasks t ON t.id=f.task_id
                               LEFT JOIN decisions d ON d.id=f.resolved_by
                               WHERE lower(trim(f.who))='ben' AND f.state IN ('dropped','tasked')"""):
         if r["state"] == "dropped":
-            if not r["statement"] or bulk.get(r["resolved_by"], 0) > BULK or HOUSEKEEPING.match(r["statement"]):
+            if bulk.get(r["resolved_by"], 0) > BULK or not is_ben_ruling(r["statement"], r["because"]):
                 continue
-        out.append({**dict(r), "shape": shape(r["what"], r["client"])})
+        row = dict(r)
+        row.pop("because", None)
+        out.append({**row, "shape": shape(r["what"], r["client"])})
     return out
 
 
