@@ -57,6 +57,7 @@ SYNC_KEY = "pipeline_synced_at"
 MAP_KEY = "pipeline_client_map"
 LEASE_KEY = "pipeline_create_lease"
 ERRORS_KEY = "pipeline_create_errors"
+HOLD_KEY = "pipeline_create_hold"  # answered ok with no item id: never retried, Ben links it
 BECAUSE_BEN = "Ben's click on /pipeline"
 
 DDL = """
@@ -462,9 +463,10 @@ def claim_create(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[st
             conn.execute("COMMIT")
             return None
         errors = _meta(conn, ERRORS_KEY) or {}
+        held = set(_meta(conn, HOLD_KEY) or [])
         out = None
         for r in conn.execute("SELECT * FROM pipeline_proposals WHERE state='approved' ORDER BY decided_at"):
-            if t - int(errors.get(r["id"]) or 0) < CREATE_RETRY:
+            if r["id"] in held or t - int(errors.get(r["id"]) or 0) < CREATE_RETRY:
                 continue
             p = dict(r)
             note = (f"Proposed on the coord board (proposal {p['id']}"
@@ -494,7 +496,7 @@ def _item_id_in(text: str) -> str | None:
                     return str(v[sub]["id"])
     except ValueError:
         pass
-    m = re.search(r'"id"\s*:\s*(\d+)', text) or re.search(r"\b(?:id|item|#)\s*:?\s*#?(\d{1,6})\b", text, re.I)
+    m = re.search(r'"id"\s*:\s*(\d+)', text) or re.search(r"(?:\b(?:id|item)\b|#)\s*:?\s*#?(\d{1,6})\b", text, re.I)
     return m.group(1) if m else None
 
 
@@ -508,6 +510,15 @@ def create_done(conn: sqlite3.Connection, proposal_id: str, status: str, detail:
         raise ValueError(f"proposal {proposal_id!r} has no open create claim")
     _set_meta(conn, LEASE_KEY, None)
     iid = (item_id or "").strip() or (_item_id_in(detail or "") if status == "ok" else None)
+    if status == "ok" and not iid:
+        # SharePoint may well have made the item: a retry could make a second
+        # one, so hold it until Ben points the proposal at it (Use existing).
+        held = [x for x in (_meta(conn, HOLD_KEY) or []) if x != proposal_id] + [proposal_id]
+        _set_meta(conn, HOLD_KEY, held[-200:])
+        msg = ("SharePoint answered ok but named no item id; not retried. Find the item and press Use existing. "
+               f"Answer: {detail or ''}")
+        conn.execute("UPDATE pipeline_proposals SET detail=? WHERE id=?", (msg[:300], proposal_id))
+        return {"ok": True, "proposal_id": proposal_id, "status": "error", "held": True, "detail": msg[:200]}
     if status == "error" or not iid:
         errors = {k: v for k, v in (_meta(conn, ERRORS_KEY) or {}).items() if t - int(v) < CREATE_RETRY}
         errors[proposal_id] = t

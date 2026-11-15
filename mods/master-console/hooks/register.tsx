@@ -151,6 +151,10 @@ function start($: EngineInterface): Promise<void> {
         if (wakeTo) await wake($)
         if (autoDispatch) await dispatch($)
         if (autoNotes) await pipelineNote($)
+        if (isMaster && !isDesk) {
+          await pipelineSync($)
+          await pipelineCreate($)
+        }
         // Diagnostic (2026-11-01): since 10-30 neither session takes prompts.
         // Shows whether this tick runs at all, and whether busy is what stops it.
         const hhmm = () => new Date().toTimeString().slice(0, 5)
@@ -287,6 +291,70 @@ async function pipelineNote($: EngineInterface): Promise<void> {
     })
   } catch { /* the lease lapses; the board offers it again */ }
   if (status === 'error') $.ui.toast(`Pipeline note for ${n.task_id} (item ${n.pipeline_id}) failed: ${said.slice(0, 160)}`)
+}
+
+// Pipeline lines (2026-11-15, coord_mcp/pipeline.py). Worker only. Every
+// 30 minutes the board's cache of the SharePoint pipeline is refreshed from
+// sharepoint-pipeline's get_pipeline (/api/pipeline/sync), so /pipeline can
+// rank lines and the creation rule can check item numbers. A failed read
+// keeps the old cache (the board refuses an empty payload).
+const SYNC_EVERY = 30 * 60_000
+let syncedAt = 0
+async function pipelineSync($: EngineInterface): Promise<void> {
+  if (Date.now() - syncedAt < SYNC_EVERY) return
+  syncedAt = Date.now()  // one try per window, failed or not
+  let payload = ''
+  try {
+    const res = await $.mcp.call('sharepoint-pipeline', 'get_pipeline', {})
+    if (res.isError) throw new Error(res.content.map(b => ('text' in b ? b.text : '') ?? '').join(' '))
+    payload = res.content.map(b => ('text' in b ? b.text : '') ?? '').join('')
+  } catch (err) {
+    $.ui.toast(`Pipeline sync: get_pipeline failed: ${String(err).slice(0, 160)}`)
+    return
+  }
+  try {
+    const r = await $.http.fetch(`${DASH}/api/pipeline/sync`, {
+      method: 'POST', headers: FORM, body: `payload=${encodeURIComponent(payload)}`,
+    })
+    if (!r.ok) $.ui.toast(`Pipeline sync refused: ${r.text.slice(0, 160)}`)
+  } catch { syncedAt = 0 /* dashboard down: try again next tick */ }
+}
+
+// Each tick, one proposal Ben approved on /pipeline is created in SharePoint.
+// The board leases it to this caller (/api/pipeline/create/claim), this
+// creates it with sharepoint-pipeline's create_task {title, client,
+// priority, note}, and the report back (/api/pipeline/create/done) reads the
+// new item number from the answer and relinks every task under the proposal.
+// An error is retried after 30 minutes and shows on /pipeline. Off with the
+// board's switch pipeline_create.
+async function pipelineCreate($: EngineInterface): Promise<void> {
+  type Create = { proposal_id: string; title: string; client: string; priority: string | null; note: string }
+  let c: Create | null = null
+  try {
+    const r = await $.http.fetch(`${DASH}/api/pipeline/create/claim`, { method: 'POST', headers: FORM, body: '' })
+    if (!r.ok) return
+    c = (JSON.parse(r.text) as { create: Create | null }).create
+  } catch { return }
+  if (!c) return
+  let status = 'error'
+  let said = ''
+  try {
+    const args: Record<string, string> = { title: c.title, client: c.client, note: c.note }
+    if (c.priority) args.priority = c.priority
+    const res = await $.mcp.call('sharepoint-pipeline', 'create_task', args)
+    said = res.content.map(b => ('text' in b ? b.text : '') ?? '').join(' ')
+    if (!res.isError) status = 'ok'
+  } catch (err) {
+    said = String(err)
+  }
+  try {
+    const r = await $.http.fetch(`${DASH}/api/pipeline/create/done`, {
+      method: 'POST', headers: FORM,
+      body: `proposal_id=${encodeURIComponent(c.proposal_id)}&status=${status}&detail=${encodeURIComponent(said.slice(0, 2000))}`,
+    })
+    if (r.ok && (JSON.parse(r.text) as { status?: string }).status === 'error') status = 'error'
+  } catch { /* the lease lapses; the board offers it again */ }
+  if (status === 'error') $.ui.toast(`Pipeline item '${c.title.slice(0, 60)}' (${c.client}) not created: ${said.slice(0, 160)}`)
 }
 
 export const register: Register = on => {

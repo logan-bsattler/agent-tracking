@@ -1160,6 +1160,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
     actions = (f'{_button("next", "Next question", primary=True)}{_button("board", "Board check")}'
                f'{_button("cleanup", "Board cleanup")}{queued_note}{minder_note}{SEEN_BOX}')
     body = f"""{health_banner(v.get("health"))}{_kpis(v, n, len(done_24h))}
+{v.get("pipeline_strip") or ""}
 {_fleet(fleet_rows, t, client)}
 {_idle(v.get("idle", []), t)}
 {_next_up(fresh, t, v.get("question"))}
@@ -1277,7 +1278,7 @@ button.kpi { font:inherit; text-align:left; cursor:pointer; width:100%; }
 """
 
 # Nav links in the order every page shows them; the current page is bold.
-NAV = (("/", "Usage"), ("/board", "Board"), ("/clients", "Clients"), ("/queue", "Queue"), ("/hours", "Hours"), ("/drafts", "Drafts"),
+NAV = (("/", "Usage"), ("/board", "Board"), ("/pipeline", "Pipeline"), ("/clients", "Clients"), ("/queue", "Queue"), ("/hours", "Hours"), ("/drafts", "Drafts"),
        ("/deliverables", "Deliverables"), ("/intents", "Intents"), ("/commitments", "Commitments"),
        ("/workflows", "Workflows"))
 
@@ -2734,6 +2735,59 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         return
                     self._json(200, r)
                     return
+                if path in ("/api/pipeline/proposal", "/api/pipeline/set"):  # Ben's clicks on /pipeline
+                    from . import pipeline
+                    one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+                    back = one("back")
+                    if not re.fullmatch(r"/pipeline(\?client=[\w%.+-]*)?", back):
+                        back = "/pipeline"
+                    try:
+                        if path == "/api/pipeline/proposal":
+                            r = pipeline.decide(conn, one("proposal"), one("action"), one("item") or None)
+                            done = f'proposal {r["proposal_id"]}: ' + (
+                                f'linked to item {r["pipeline_id"]}, {r["relinked"]} task(s) moved'
+                                if "pipeline_id" in r else r["state"])
+                        else:
+                            r = pipeline.set_task(conn, one("task"), one("item"))
+                            done = f'task {r["task_id"]}: line {r["pipeline_task_id"] or "none"}'
+                        key = "done"
+                    except (KeyError, ValueError) as e:
+                        if "json" in (self.headers.get("Accept") or ""):
+                            self._json(400, {"ok": False, "error": str(e)})
+                            return
+                        done, key = str(e).strip("'\""), "error"
+                    else:
+                        if "json" in (self.headers.get("Accept") or ""):
+                            self._json(200, r)
+                            return
+                    self.send_response(303)
+                    self.send_header("Location", back + ("&" if "?" in back else "?") + f"{key}={quote(done[:300])}")
+                    self.end_headers()
+                    return
+                if path == "/api/pipeline/sync":  # the worker's mod: get_pipeline's answer, every 30 minutes
+                    from . import pipeline
+                    try:
+                        r = pipeline.sync(conn, (form.get("payload") or [""])[0])
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    self._json(200, r)
+                    return
+                if path == "/api/pipeline/create/claim":  # the mod's tick: one approved proposal, under a lease
+                    from . import pipeline
+                    self._json(200, {"create": pipeline.claim_create(conn)})
+                    return
+                if path == "/api/pipeline/create/done":  # the mod's report on that create_task
+                    from . import pipeline
+                    one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+                    try:
+                        r = pipeline.create_done(conn, one("proposal_id"), one("status"), one("detail"),
+                                                 one("item_id") or None)
+                    except (KeyError, ValueError) as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    self._json(200, r)
+                    return
                 if path == "/api/worker/wake":  # the desk's tick: should it wake the worker?
                     self._json(200, {"wake": store.claim_worker_wake(conn)})
                     return
@@ -2777,8 +2831,20 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     v["briefs_card"] = briefs.board_card(briefs.today(conn, int(time.time())))
                 except Exception:
                     v["briefs_card"] = ""
+                from . import pipeline_page
+                v["pipeline_strip"] = pipeline_page.board_strip(conn)
                 client = (self._query.get("client") or [""])[0].strip() or None
                 return board_page(v, client=client).encode("utf-8")
+            if path == "/pipeline":
+                from . import pipeline, pipeline_page
+                client = (self._query.get("client") or [""])[0].strip() or None
+                keys = [k for k in client_keys(conn) if k not in pipeline.NOT_CLIENTS]
+                if client and client not in keys:
+                    return None
+                err = (self._query.get("error") or [""])[0]
+                flash = err or (self._query.get("done") or [""])[0] or None
+                return pipeline_page.pipeline_page(pipeline.lines(conn, client), client, keys, flash,
+                                                   bad=bool(err)).encode("utf-8")
             if m := re.fullmatch(r"/board/question/(\d+)/file", path):
                 # Only the path master stored with the question (store._question_doc
                 # held it to the agents and client folders), never one a request names.

@@ -115,6 +115,11 @@ class CreateTaskInput(Strict):
     from_intent: str | None = Field(default=None, description="Intent id this task came from, if any")
     pipeline_task_id: str | None = Field(default=None, description="SharePoint pipeline item this task bills to",
                                          max_length=40)
+    pipeline_proposal: dict[str, Any] | None = Field(
+        default=None,
+        description="When no pipeline item exists yet: {title, origin_id?, priority?, note?}, titled as the "
+                    "timesheet line. The task proceeds on the proposal; Ben approves the item on /pipeline. "
+                    "Not with pipeline_task_id.")
 
 
 @tool("coord_create_task", title="Create task")
@@ -125,12 +130,20 @@ async def coord_create_task(params: CreateTaskInput) -> str:
     Write the spec so a fresh session with no history can do the work. The
     response echoes the result shape the teammate will be held to.
 
-    Returns JSON: {task_id, kind, expected_result_shape}
+    Every root task for a client names the SharePoint pipeline item it bills
+    to (the timesheet line): pipeline_task_id, or pipeline_proposal when no
+    item exists yet. A child (parent_id) or check-in inherits its chain's
+    item. A root client task with neither is refused (switch
+    require_pipeline).
+
+    Returns JSON: {task_id, kind, expected_result_shape, pipeline_task_id?,
+    pipeline_proposal?, warnings?}
     """
     try:
         return _ok(store.create_task(
             db(), params.kind, params.title, params.spec,
             params.assigned_to, params.parent_id, params.from_intent, params.pipeline_task_id,
+            params.pipeline_proposal,
         ))
     except Exception as e:
         return _err(e)

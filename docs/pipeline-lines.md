@@ -33,23 +33,26 @@ Pipeline lines supersede the project layer as the roll-up.
   investigation fills `pipeline_id` or `proposal_title`/`origin_id` -> Ben
   reviews -> `pipeline backfill apply f.csv --yes`. MAG first.
 
+## Built (steps 1-4, 2026-11-15)
+
+1. `coord_create_task` takes `pipeline_proposal` (server.py, README).
+2. `/pipeline` (`coord_mcp/pipeline_page.py`): proposals (Create / Use
+   existing / Drop -> `POST /api/pipeline/proposal`), approved awaiting
+   creation with their errors, the ranked lines, a red No pipeline item list
+   with a set form (`POST /api/pipeline/set`), cache age, `?client=`. NAV
+   after Board; a strip on `/board`.
+3. `/api/pipeline/sync` (form `payload`), `/api/pipeline/create/claim`,
+   `/api/pipeline/create/done`. master-console (worker only) syncs
+   get_pipeline every 30 minutes and creates one approved proposal a tick.
+   An ok answer with no parsable item id is held, never retried (a retry
+   could make a duplicate item); Ben links it with Use existing.
+4. `tests/test_pipeline.py`; smoke passes `pipeline_task_id` and one
+   `pipeline_proposal`.
+
 ## Remaining
 
-1. `server.py`: `pipeline_proposal` on `CreateTaskInput`, passed to
-   `store.create_task`; docstring and README.
-2. Dashboard `/pipeline` (new `pipeline_page.py`, like `client_pages.py`):
-   proposals with Create / Use existing / Drop (`POST /api/pipeline/proposal`
-   -> `pipeline.decide`); approved awaiting creation with errors; the ranked
-   lines table; a red No pipeline item section with a set-item form
-   (`POST /api/pipeline/set` -> `pipeline.set_task`); cache age; `?client=`.
-   NAV entry after Board; a one-line strip on `/board` linking to it.
-3. Endpoints `/api/pipeline/sync` (form `payload`), `/api/pipeline/create/claim`,
-   `/api/pipeline/create/done`; master-console mod (worker only): get_pipeline
-   every 30 min -> sync; each tick claim one create -> sharepoint-pipeline
-   `create_task {title, client, priority, note}` -> done. Copy `pipelineNote()`.
-4. `tests/test_pipeline.py` (mapping, sync, rule, proposals, create lease,
-   ranking, unfiled, backfill, page render); `smoke_stdio.py` lead root task
-   passes `pipeline_task_id` and one `pipeline_proposal`.
-5. Proposed master `CLAUDE.md` paragraph for Ben to approve: every root task
-   names `pipeline_task_id` or `pipeline_proposal`, titled as the timesheet line.
-6. pytest + smoke, commit. Ben then restarts sessions and runs the backfill.
+5. Ben approves the master `CLAUDE.md` paragraph (every root task names
+   `pipeline_task_id` or `pipeline_proposal`, titled as the timesheet line).
+6. Ben restarts the coord servers and master sessions (breaking: root
+   client tasks with no line are refused), reloads master-console, and runs
+   the MAG backfill.
