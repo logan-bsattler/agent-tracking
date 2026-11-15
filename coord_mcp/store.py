@@ -1928,7 +1928,7 @@ def resolve_follow_up(
     if return_on not in (None, "") and not defer:
         raise ValueError("return_on goes with defer=true")
     from . import defer as defer_mod
-    ret = defer_mod.parse(return_on) if defer else None
+    ret = defer_mod.parse(return_on, conn=conn) if defer else None
     if bool(task_id) == bool(decision_id):
         raise ValueError("give exactly one of task_id (it became a task) or decision_id (recorded why not)")
     if row["state"] not in ("open", "deferred") or (defer and row["state"] == "deferred"):

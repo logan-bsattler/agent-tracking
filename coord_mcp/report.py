@@ -837,7 +837,8 @@ def return_chip(d: dict[str, Any]) -> str:
     """When a deferred item comes back on its own (coord_mcp/defer.py)."""
     if "return_on" not in d:
         return ""
-    label = ("returns " + datetime.fromtimestamp(d["return_on"]).strftime("%a %m-%d")) if d["return_on"]         else "no return date"
+    from . import defer  # the date in Ben's zone, the same one defer.day and the return date use
+    label = ("returns " + datetime.fromtimestamp(d["return_on"], defer._tz()).strftime("%a %m-%d"))         if d["return_on"] else "no return date"
     return (f' <span class="return-chip" data-return="{int(d["return_on"] or 0)}" style="font-size:12px;'
             f'color:var(--muted,#777);border:1px solid currentColor;border-radius:8px;padding:0 5px">'
             f'{esc(label)}</span>')
