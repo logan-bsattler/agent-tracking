@@ -22,7 +22,7 @@ from typing import Any
 from . import CATALOG, GROUPS, name
 from . import definitions as defs
 from . import sla
-from .cases import ensure_workflows
+from .cases import have_workflows
 
 WAITS = ("ben", "master", "agent")
 
@@ -33,16 +33,17 @@ def _median_h(xs: list[int]) -> float | None:
 
 def overview(conn: sqlite3.Connection, t: int | None = None) -> dict[str, Any]:
     """{as_of, open: [case...], workflows: [row...], totals} for the page."""
-    ensure_workflows(conn)
     t = t or int(time.time())
-    cases = [dict(r) for r in conn.execute("SELECT * FROM workflow_cases ORDER BY created_at")]
+    have = have_workflows(conn)  # read-only: no tables yet means no cases, not a migration
+    cases = [dict(r) for r in conn.execute("SELECT * FROM workflow_cases ORDER BY created_at")] if have else []
     by_wf: dict[str | None, list[dict[str, Any]]] = defaultdict(list)
     for c in cases:
         by_wf[c["workflow"]].append(c)
 
     ben = defaultdict(int)
     for r in conn.execute("""SELECT t.case_id, COUNT(*) n FROM follow_ups f JOIN tasks t ON t.id=f.task_id
-                             WHERE lower(trim(f.who))='ben' AND t.case_id IS NOT NULL GROUP BY t.case_id"""):
+                             WHERE lower(trim(f.who))='ben' AND t.case_id IS NOT NULL GROUP BY t.case_id"""
+                          if have else "SELECT NULL case_id, 0 n WHERE 0"):
         ben[r["case_id"]] = r["n"]
 
     # Dwell: each event opens a stretch at its step that the case's next event ends.
@@ -50,7 +51,8 @@ def overview(conn: sqlite3.Connection, t: int | None = None) -> dict[str, Any]:
     wf_of = {c["id"]: c["workflow"] for c in cases}
     state_of = {c["id"]: c["state"] for c in cases}
     prev: dict[str, sqlite3.Row] = {}
-    for e in conn.execute("SELECT case_id, step, event, ts FROM workflow_case_events ORDER BY case_id, ts, rowid"):
+    for e in (conn.execute("SELECT case_id, step, event, ts FROM workflow_case_events ORDER BY case_id, ts, rowid")
+              if have else []):
         p = prev.get(e["case_id"])
         if p is not None and p["step"] and p["event"] != "closed":
             dwell[(wf_of.get(e["case_id"]) or "", p["step"])].append(max(e["ts"] - p["ts"], 0))

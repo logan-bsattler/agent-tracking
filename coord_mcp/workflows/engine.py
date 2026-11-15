@@ -53,11 +53,22 @@ from typing import Any
 
 from ..db import now
 from . import definitions as defs
-from .cases import _step_tasks, ensure_workflows, event, recompute
+from .cases import _step_tasks, ensure_workflows, event, have_workflows, recompute
 
 SINCE_KEY = "workflow_engine_since"
 REPLY_RULING = "f294e33095c1"
 LOOKBACK = 72 * 3600
+# A loose end that asks for a reply, not for the work a non-reply step does.
+_REPLYISH = re.compile(r"\b(repl(y|ies|ied)|respond|response|e-?mail|draft (a |the )?(note|message|answer))\b", re.I)
+# What a loose end for each kind's step reads like, when the step names no
+# takes_follow_up of its own.
+KIND_WORDS = {
+    "code_change": re.compile(r"\b(fix|build|code|compile|patch|implement|change|program|cvc)", re.I),
+    "deliverable": re.compile(r"\b(finding|write|document|report|deliverable|workbook|evidence)", re.I),
+    "investigation": re.compile(r"\b(investigat|verif|check|confirm|re-?run|retest|test)", re.I),
+    "data_pull": re.compile(r"\b(pull|extract|export|query|data)", re.I),
+    "draft_reply": _REPLYISH,
+}
 _PH = re.compile(r"\{(client|root_title|prev|intent|reply_from|reply_date|case|workflow|follow_up)\}")
 
 
@@ -112,12 +123,34 @@ def _context(conn: sqlite3.Connection, case: sqlite3.Row, prev: sqlite3.Row, fol
             "follow_up": follow_up}
 
 
-def plan(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int) -> dict[str, Any] | None:
-    """What the engine would do for one case: {'spawn': ...}, {'stop': ...} or None."""
+def _pick(fus: list[Any], sp: dict[str, Any]) -> Any:
+    """The client loose end a spawn takes, in the order the result listed
+    them, or None. With takes_follow_up, the first it matches. Without one,
+    a loose end that reads like the step's kind (and, for any step but a
+    reply, not like a reply); failing that, for a client_follow_up spawn,
+    the only non-reply loose end when there is exactly one. Anything less
+    clear is left for master rather than guessed."""
+    if sp.get("takes_follow_up"):
+        rx = re.compile(sp["takes_follow_up"], re.I)
+        return next((f for f in fus if rx.search(f["what"] or "")), None)
+    pool = fus if sp["kind"] == "draft_reply" else [f for f in fus if not _REPLYISH.search(f["what"] or "")]
+    words = KIND_WORDS.get(sp["kind"])
+    hit = next((f for f in pool if words and words.search(f["what"] or "")), None)
+    if hit is not None:
+        return hit
+    if sp["on"] == "client_follow_up" and len(pool) == 1:
+        return pool[0]
+    return None
+
+
+def plan(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int,
+         write: bool = True) -> dict[str, Any] | None:
+    """What the engine would do for one case: {'spawn': ...}, {'stop': ...} or
+    None. With write=False it stores nothing (steps it would assign stay in memory)."""
     d = defs.get(case["workflow"])
     if not d or not d.get("engine"):
         return None
-    tasks = _step_tasks(conn, case, d)
+    tasks = _step_tasks(conn, case, d, write=write)
     if not tasks or any(x["state"] == "open" for x in tasks):
         return None
     steps = d["steps"]
@@ -131,8 +164,10 @@ def plan(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int) -> dic
         return None
     ids = [x["id"] for x in tasks]
     marks = ",".join("?" * len(ids))
+    # In the order the result listed them: one result's loose ends share
+    # created_at and have random ids, so idx (then rowid) is the order.
     fus = conn.execute(f"SELECT id, task_id, who, what FROM follow_ups WHERE state='open' AND task_id IN ({marks}) "
-                       "ORDER BY created_at, id", ids).fetchall()
+                       "ORDER BY created_at, idx, rowid", ids).fetchall()
     if any((f["who"] or "").strip().lower() == "ben" for f in fus):
         return None  # Ben's turn: the engine never moves a case past him
     a_key = steps[reached]["key"]
@@ -150,15 +185,13 @@ def plan(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int) -> dic
         if conn.execute("SELECT 1 FROM workflow_case_events WHERE case_id=? AND event='spawned' AND step=? "
                         "AND detail LIKE ?", (case["id"], st["key"], f"%from {prev['id']}%")).fetchone():
             return None
-        rx = re.compile(sp["takes_follow_up"], re.I) if sp.get("takes_follow_up") else None
         mine = [f for f in fus if f["task_id"] == prev["id"] and _is_client(f["who"])]
-        take = next((f for f in mine if not rx or rx.search(f["what"] or "")), None)
+        take = _pick(mine, sp)
         if take is None and sp["kind"] == "draft_reply":
             # A deferred reply loose end still gets its draft (REPLY_RULING).
             parked = conn.execute("SELECT id, task_id, who, what FROM follow_ups WHERE state='deferred' "
-                                  "AND task_id=? ORDER BY created_at, id", (prev["id"],)).fetchall()
-            take = next((f for f in parked if _is_client(f["who"]) and (not rx or rx.search(f["what"] or ""))),
-                        None)
+                                  "AND task_id=? ORDER BY created_at, idx, rowid", (prev["id"],)).fetchall()
+            take = _pick([f for f in parked if _is_client(f["who"])], sp)
         if sp["on"] == "client_follow_up" and take is None:
             return None
         ctx = _context(conn, case, prev, take["what"] if take else "")
@@ -180,10 +213,13 @@ def plan(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int) -> dic
             return {"stop": st["key"], "prev": prev["id"], "why": held["stop"]}
         title = _fill(sp["title"], ctx)
         title = title if len(title) <= 80 else title[:77] + "..."
+        # Every hold passed is gated, not only the first of each sort.
+        proceeds = [h["decision_id"] for h in (held or {}).get("proceeds", [])]
+        drafts = [h["decision_id"] for h in (held or {}).get("drafts", [])]
         return {"spawn": st["key"], "kind": sp["kind"], "title": title, "spec": spec, "prev": prev["id"],
                 "client": case["client"], "follow_up": take["id"] if take else None,
-                "hold": held["proceed"]["decision_id"] if held and "proceed" in held else None,
-                "draft_past": held["draft"]["decision_id"] if held and "draft" in held else None}
+                "hold": proceeds[0] if proceeds else None, "holds_past": proceeds,
+                "draft_past": drafts[0] if drafts else None, "drafts_past": drafts}
     return None
 
 
@@ -211,22 +247,31 @@ def _draft_past(conn: sqlite3.Connection, hold_id: str, tid: str) -> None:
     old = conn.execute("SELECT * FROM decisions WHERE id=?", (hold_id,)).fetchone()
     h = holds.classify(conn, old) if old is not None else None
     ben = (h["open_ben_follow_ups"] or h["ben_follow_ups"]) if h else []
+    # A hold with no Ben item of its own still gates Outlook and the send
+    # until it is lifted (holds.hold_live), so the gate never registers empty.
+    gate = ben or [holds.HOLD_REF + hold_id]
     # Worded so it does not read as a new hold itself (holds.is_hold).
     stmt = f"Engine drafted reply {tid} under ruling {REPLY_RULING}; decision {hold_id} still governs Outlook and the send"
     if ben:
         stmt += f" (Ben's {', '.join(ben)})"
     dec = store.record_decision(conn, stmt[:200], f"Ben's ruling {REPLY_RULING}: a deferred or held reply is still "
                                 "drafted, since drafts never send; the earlier decision still governs the send", tid)
-    holds.register(conn, dec["decision_id"], hold_id, ben, ([w["ref"] for w in h["work"]] if h else []) + [tid], tid)
+    holds.register(conn, dec["decision_id"], hold_id, gate, ([w["ref"] for w in h["work"]] if h else []) + [tid], tid)
 
 
 def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -> list[dict[str, Any]]:
     """One pass over open and recently closed engine cases. Returns what it did
     (or would do). Each case in its own transaction, so one failure costs one case."""
     from .. import store
-    ensure_workflows(conn)
+    if dry_run:
+        if not have_workflows(conn):
+            return []  # a dry run writes nothing, schema included
+    else:
+        ensure_workflows(conn)
     t = t or now()
-    since = _since(conn, write=not dry_run) if not dry_run else 0
+    # The stored switch-on time in both modes (a dry run with none stored
+    # gets now(), which is what the first real pass would use).
+    since = _since(conn, write=not dry_run)
     engine_wfs = [c for c, d in defs.load().items() if d.get("engine")]
     if not engine_wfs:
         return []
@@ -237,13 +282,21 @@ def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -
     out = []
     failed: list[tuple[str, Exception]] = []
     for case in rows:
-        conn.execute("BEGIN IMMEDIATE")
+        if dry_run:
+            try:
+                p = plan(conn, case, t, since, write=False)
+            except Exception as exc:
+                failed.append((case["id"], exc))
+                continue
+            if p:
+                out.append({"case": case["id"], "workflow": case["workflow"], **p})
+            continue
         try:
+            # Inside the try: a lock timeout here costs this case, not the pass.
+            conn.execute("BEGIN IMMEDIATE")
             p = plan(conn, case, t, since)
-            if p is None or dry_run:
+            if p is None:
                 conn.execute("ROLLBACK")
-                if p:
-                    out.append({"case": case["id"], "workflow": case["workflow"], **p})
                 continue
             if "stop" in p:
                 seen = conn.execute("SELECT 1 FROM workflow_case_events WHERE case_id=? AND event='stopped' "
@@ -263,10 +316,10 @@ def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -
                       f"{p['kind']} {tid} from task {p['prev']}",
                 because="the step before landed; COORD_WORKFLOW_ENGINE on (workflow engine; Ben may override)",
                 task_id=tid)
-            if p.get("hold"):
-                _proceed_past(conn, p["hold"], tid)
-            if p.get("draft_past"):
-                _draft_past(conn, p["draft_past"], tid)
+            for hid in p.get("holds_past") or []:
+                _proceed_past(conn, hid, tid)
+            for hid in p.get("drafts_past") or []:
+                _draft_past(conn, hid, tid)
             if p["follow_up"]:
                 store.resolve_follow_up(conn, p["follow_up"], task_id=tid)
             event(conn, case["id"], "spawned", p["spawn"], tid, "agent",
@@ -275,7 +328,11 @@ def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -
             conn.execute("COMMIT")
             out.append({"case": case["id"], "workflow": case["workflow"], "task_id": tid, **p})
         except Exception as exc:  # one bad case must not skip the cases after it
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:  # BEGIN may have failed, or something committed already
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             failed.append((case["id"], exc))
     if failed:
         # The spawned cases are committed; raise so the caller's loop_error records the rest.

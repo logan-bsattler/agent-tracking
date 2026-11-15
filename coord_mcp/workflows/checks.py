@@ -229,10 +229,12 @@ def complete_warnings(conn: sqlite3.Connection, task_id: str) -> list[str]:
             return []
         spec = _spec(t["spec"])
         case = case_of(conn, task_id)
-        if not t["parent_id"] and not spec.get("case_id"):
-            own = case["id"] if case is not None and case["root_task_id"] == task_id else None
+        # A parentless task is "no case" only while it roots its own case (or has
+        # none): one attached into another case (attach) is a step of that case.
+        attached = case is not None and case["root_task_id"] != task_id
+        if not t["parent_id"] and not spec.get("case_id") and not attached:
             m = matching_cases(conn, t["kind"], t["title"], spec, t["assigned_to"], t["from_intent"],
-                               t["pipeline_task_id"], exclude=own)
+                               t["pipeline_task_id"], exclude=case["id"] if case is not None else None)
             if m:
                 return [_no_case_text(m, task_id)]
             return []

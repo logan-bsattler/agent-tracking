@@ -2248,6 +2248,14 @@ MINDER_SOON = _env_minutes("SOON", 15)                # owed list changed: this 
 MINDER_IDS = 5                                        # ids listed per condition; the rest is a count
 
 
+# Decisions that are bookkeeping, not a hold, even on an undelivered task: the
+# workflow engine recording the task it created (and the reply it drafted past
+# a hold), and a hold turned into a working default ("Holds become working
+# defaults": the work goes out now; only its outward steps wait, and
+# holds.pending_gate enforces that, not dispatch). LIKE is case-insensitive.
+NOT_HOLD_PREFIXES = ("Workflow engine:", "Engine drafted reply", "Proceed on master default")
+
+
 def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any]]:
     """Undelivered open tasks master is keeping back on purpose: task id -> its
     newest decision.
@@ -2263,6 +2271,9 @@ def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any
     cleared", and the client that finishes X cannot wake master by itself
     (a self-clear has no turn left to announce in). Restating a hold that
     still stands quiets it until the client next goes free.
+
+    Bookkeeping decisions (NOT_HOLD_PREFIXES) never count: an engine-created
+    task is dispatched like master's own.
     """
     busy = {r[0] for r in conn.execute(
         """SELECT DISTINCT t.assigned_to FROM tasks t WHERE t.state='open' AND t.assigned_to IS NOT NULL
@@ -2274,10 +2285,11 @@ def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any
                           "GROUP BY client", (now_ts - MINDER_HOLD * 60,)):
         seen[r[0].casefold()] = max(seen.get(r[0].casefold(), 0), r[1])
     out = {}
+    not_holds = " ".join(f"AND d.statement NOT LIKE '{p}%'" for p in NOT_HOLD_PREFIXES)
     for r in conn.execute(
-        """SELECT t.id task_id, t.assigned_to, d.id, d.statement, MAX(d.created_at) created_at
+        f"""SELECT t.id task_id, t.assigned_to, d.id, d.statement, MAX(d.created_at) created_at
            FROM tasks t JOIN decisions d ON d.task_id = t.id
-           WHERE t.state='open' AND t.picked_up_at IS NULL AND d.created_at > ?
+           WHERE t.state='open' AND t.picked_up_at IS NULL AND d.created_at > ? {not_holds}
            GROUP BY t.id""", (now_ts - MINDER_HOLD * 60,)):
         last = seen.get((r["assigned_to"] or "").casefold())
         free = (r["assigned_to"] not in busy and last is not None

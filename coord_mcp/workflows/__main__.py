@@ -163,10 +163,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "engine":
         from ..db import connect
-        from . import cases as cs, engine
+        from . import engine
         conn = connect(a.db) if a.db else connect()
         try:
-            cs.sync(conn)
+            # A dry run writes nothing: no case sync first (the dashboard loop
+            # runs it), so tasks created since its last pass are not yet seen.
             print(json.dumps(engine.run(conn, dry_run=True), indent=1))
         finally:
             conn.close()
