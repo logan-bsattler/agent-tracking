@@ -244,3 +244,12 @@ def test_an_elided_directory_is_not_a_bare_extension():
     out = store._split_paths(raw)  # used to raise ValueError and 400 the whole /deliverables page
     assert out[-1] == ".../KDD-O2S-117 Bottle Deposit Line-Level Charges Framework.md"
     assert store._split_paths("work/a.csv / .md") == ["work/a.csv", str(store.Path("work/a.md"))]
+
+
+@pytest.mark.parametrize("raw", [". ; .md", "C:\\ / .md", "C:\\ ; .csv, .md", "work\x00x.md", "x" * 5000, "/ .md"])
+def test_split_paths_never_raises(raw):
+    # A previous token with no name ('.', a drive root) used to raise ValueError
+    # from with_suffix and 400 the whole /deliverables page.
+    out = store._split_paths(raw)
+    assert isinstance(out, list) and all(isinstance(x, str) for x in out)
+    assert store._split_paths(". ; .md") == [".", ".md"]

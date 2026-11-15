@@ -357,3 +357,16 @@ def test_wake_endpoint_answers_the_desks_tick(tmp_path, monkeypatch):
     assert post()["id"] == pid
     assert post() is None
     c.close()
+
+
+def test_a_busy_workers_heartbeat_keeps_the_wake_away(conn):
+    # The mod's poll takes nothing mid-turn but still says it is alive, so a
+    # long worker turn is not sent a wake each run.
+    store.take_operator_prompt(conn, "desk")
+    pid = store.queue_operator_prompt(conn, "board")["id"]
+    _age(conn, pid, store.WAKE_AFTER)
+    store.mark_seen(conn, "master")
+    assert store.claim_worker_wake(conn) is None
+    assert conn.execute("SELECT taken_at FROM operator_prompts WHERE id=?", (pid,)).fetchone()[0] is None
+    store.mark_seen(conn, "master", store.now() - store.WORKER_STALE - 1)
+    assert store.claim_worker_wake(conn)["id"] == pid

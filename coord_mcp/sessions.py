@@ -296,24 +296,90 @@ def idle_sessions(conn: sqlite3.Connection, now_ts: int | None = None,
     return sorted(out, key=lambda o: o["idle_since"])
 
 
+MANUAL = "manual"        # claimer of a hand-send's pending claim
+MANUAL_LEASE = 180       # a pending hand-send not confirmed within this is free again
+MANUAL_PHASES = ("pending", "sent", "failed")
+
+
+def _live_auto_claim(conn: sqlite3.Connection, t: int, task_id: str, session_id: str) -> sqlite3.Row | None:
+    """A live auto-dispatch claim on this task or on this session, if any."""
+    return conn.execute(
+        "SELECT task_id, session_id FROM dispatch_attempts WHERE status='claimed' AND lease_until > ? "
+        "AND COALESCE(claimer, '') <> ? AND (task_id = ? OR (session_id = ? AND session_id <> '')) "
+        "ORDER BY created_at DESC LIMIT 1", (t, MANUAL, task_id, session_id)).fetchone()
+
+
 def mark_manual(conn: sqlite3.Connection, task_id: str, session_id: str | None = None,
-                now_ts: int | None = None) -> dict[str, Any]:
-    """Master sent 'Do task <id>' by hand (coord-rules saw the send_message):
-    stamp the task as dispatched to that session, so code counts the session
-    busy before the client picks it up and never sends it a second task."""
+                now_ts: int | None = None, phase: str = "sent", detail: str | None = None) -> dict[str, Any]:
+    """Master sends 'Do task <id>' by hand (coord-rules sees the send_message).
+
+    phase "pending", before the send: under the same write lock auto-dispatch
+    claims with, refuse ({"ok": False, "conflict": ...}) when auto-dispatch
+    holds a live claim on this task or this session (it is sending right now),
+    else take a MANUAL_LEASE claim on the session, so no auto tick gives it a
+    second task while the send runs. phase "sent", after a delivered or queued
+    result: close that claim and stamp the task as dispatched to the session,
+    so code counts it busy until the client picks it up; a task code itself
+    sent within RESEND_AFTER keeps code's stamp. phase "failed": close the
+    claim as an error and stamp nothing."""
+    if phase not in MANUAL_PHASES:
+        raise ValueError(f"phase must be one of {', '.join(MANUAL_PHASES)}, not {phase!r}")
     t = now() if now_ts is None else now_ts
     ensure_dispatch(conn)
-    r = conn.execute("SELECT id, kind, assigned_to, state, picked_up_at FROM tasks WHERE id=?",
-                     (task_id,)).fetchone()
+    r = conn.execute("SELECT id, kind, assigned_to, state, picked_up_at, dispatched_at, dispatch_status "
+                     "FROM tasks WHERE id=?", (task_id,)).fetchone()
     if r is None:
         raise ValueError(f"no task {task_id!r}")
-    if r["state"] != "open" or r["picked_up_at"]:
-        return {"ok": True, "task_id": task_id, "stamped": False}
+    reg = registry(conn)
     sid = (session_id or "").strip()
+    tg = target(reg, r["assigned_to"], r["kind"])
     if not sid:
-        reg = registry(conn)
-        tg = target(reg, r["assigned_to"], r["kind"])
         sid = tg[1] if tg else ((reg.get((r["assigned_to"] or "").casefold()) or {}).get("primary") or "")
+    pend = ("SELECT id FROM dispatch_attempts WHERE task_id=? AND status='claimed' AND claimer=? "
+            "ORDER BY created_at DESC LIMIT 1")
+    if phase == "failed":
+        a = conn.execute(pend, (task_id, MANUAL)).fetchone()
+        if a is not None:
+            conn.execute("UPDATE dispatch_attempts SET status='error', detail=?, sent_at=? WHERE id=?",
+                         ((detail or "hand-send not delivered")[:500], t, a["id"]))
+        return {"ok": True, "task_id": task_id, "stamped": False}
+    if r["state"] != "open" or r["picked_up_at"]:
+        if phase == "sent":  # close any pending claim; nothing to stamp
+            conn.execute("UPDATE dispatch_attempts SET status='delivered', sent_at=? WHERE task_id=? "
+                         "AND status='claimed' AND claimer=?", (t, task_id, MANUAL))
+        return {"ok": True, "task_id": task_id, "stamped": False}
+    if phase == "pending":
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            c = _live_auto_claim(conn, t, task_id, sid)
+            if c is None:
+                from .store import _id
+                conn.execute("INSERT INTO dispatch_attempts(id, task_id, client, role, session_id, status, claimer, "
+                             "created_at, lease_until) VALUES (?,?,?,?,?,'claimed',?,?,?)",
+                             (_id(), task_id, r["assigned_to"] or "", tg[0] if tg else "primary", sid, MANUAL,
+                              t, t + MANUAL_LEASE))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        if c is not None:
+            what = ("is sending this task now" if c["task_id"] == task_id
+                    else f"is sending task {c['task_id']} to this session now")
+            return {"ok": False, "conflict": True, "task_id": task_id, "session_id": sid or None,
+                    "claimed_task": c["task_id"],
+                    "error": f"auto-dispatch {what}; one task in flight per session. Check coord_board "
+                             "before sending by hand."}
+        return {"ok": True, "task_id": task_id, "pending": True, "session_id": sid or None}
+    # phase == "sent"
+    a = conn.execute(pend, (task_id, MANUAL)).fetchone()
+    if a is not None:
+        conn.execute("UPDATE dispatch_attempts SET status='delivered', detail=?, sent_at=? WHERE id=?",
+                     ((detail or "")[:500] or None, t, a["id"]))
+    code_sent = (r["dispatch_status"] in ("delivered", "queued") and r["dispatched_at"]
+                 and r["dispatched_at"] > t - RESEND_AFTER)
+    if code_sent or _live_auto_claim(conn, t, task_id, "") is not None:
+        # Auto-dispatch already has this task in flight: keep its stamp, add no second one.
+        return {"ok": True, "task_id": task_id, "stamped": False, "auto": True}
     conn.execute("UPDATE tasks SET dispatched_at=?, dispatch_status='manual', dispatch_session=? WHERE id=?",
                  (t, sid or None, task_id))
     return {"ok": True, "task_id": task_id, "stamped": True, "session_id": sid or None}
@@ -360,7 +426,7 @@ def dispatch_sent(conn: sqlite3.Connection, task_id: str, status: str, detail: s
         raise ValueError(f"status must be one of {', '.join(SENT_STATUSES)}, not {status!r}")
     ensure_dispatch(conn)
     a = conn.execute("SELECT id, session_id FROM dispatch_attempts WHERE task_id=? AND status='claimed' "
-                     "ORDER BY created_at DESC LIMIT 1", (task_id,)).fetchone()
+                     "AND COALESCE(claimer, '') <> ? ORDER BY created_at DESC LIMIT 1", (task_id, MANUAL)).fetchone()
     if a is None:
         raise ValueError(f"task {task_id!r} has no open dispatch claim")
     detail = (detail or "")[:500] or None

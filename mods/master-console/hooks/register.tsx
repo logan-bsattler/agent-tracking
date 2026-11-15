@@ -117,7 +117,18 @@ function start($: EngineInterface): Promise<void> {
       } catch { /* dashboard down: keep the last list; the band still has Next and Board */ }
     }
     take = async () => {
-      if (busy || (!isMaster && !isDesk)) return
+      if (!isMaster && !isDesk) return
+      if (busy) {
+        // Mid-turn: take nothing, but tell the board this process is alive,
+        // so the desk does not wake a worker that is busy, not gone (a wake
+        // each run of any long turn), and the desk stays live.
+        try {
+          await $.http.fetch(`${DASH}/api/session/seen`, {
+            method: 'POST', headers: FORM, body: `taker=${isDesk ? 'desk' : 'master'}`,
+          })
+        } catch { /* dashboard down: the wake check cannot run either */ }
+        return
+      }
       try {
         const r = await $.http.fetch(`${DASH}/api/prompts/take`, {
           method: 'POST', headers: FORM, body: `taker=${isDesk ? 'desk' : 'master'}`,

@@ -1170,18 +1170,28 @@ def _split_paths(raw: str) -> list[str]:
     """One pointer can name several files: 'a.csv / .md', 'dir/a.md, b.csv',
     'a.html ; b.xlsx'. A bare extension reuses the previous stem; a bare name
     its directory. A string that is itself a file on disk stands whole: real
-    names carry ' (' and ', ' too ('FDD-1416 ... (35.16.13.2 xxoosold2.p).docx')."""
-    if Path(raw.strip()).is_absolute() and Path(raw.strip()).is_file():
-        return [raw.strip()]
+    names carry ' (' and ', ' too ('FDD-1416 ... (35.16.13.2 xxoosold2.p).docx').
+    Total: never raises (a raise here 400'd the whole /deliverables page); a
+    token it cannot expand stands as written."""
+    try:
+        if Path(raw.strip()).is_absolute() and Path(raw.strip()).is_file():
+            return [raw.strip()]
+    except (OSError, ValueError):  # NUL bytes, over-long names
+        pass
     out: list[str] = []
     for tok in re.split(r"\s*[,;]\s+|\s+[\/|]\s+", _clean_path(raw)):
         tok = tok.strip()
         if not tok or "*" in tok:
             continue
-        if out and re.fullmatch(r"\.[A-Za-z0-9]{1,8}", tok):  # '.md', not '.../x.md'
-            tok = str(Path(out[-1]).with_suffix(tok))
-        elif out and len(Path(tok).parts) == 1 and len(Path(out[-1]).parts) > 1:
-            tok = str(Path(out[-1]).parent / tok)
+        try:
+            if out and re.fullmatch(r"\.[A-Za-z0-9]{1,8}", tok):  # '.md', not '.../x.md'
+                prev = Path(out[-1])
+                if prev.name:  # '.' and a drive root 'C:\' have no name to give a suffix
+                    tok = str(prev.with_suffix(tok))
+            elif out and len(Path(tok).parts) == 1 and len(Path(out[-1]).parts) > 1:
+                tok = str(Path(out[-1]).parent / tok)
+        except ValueError:
+            pass
         out.append(tok)
     return out
 
@@ -2182,6 +2192,13 @@ def take_operator_prompt(conn: sqlite3.Connection, taker: str = "master") -> dic
                     (t, DESK if taker == DESK else "master", r["id"])).rowcount != 1:
         return None  # another taker won it
     return dict(r)
+
+
+def mark_seen(conn: sqlite3.Connection, taker: str = "master", t: int | None = None) -> None:
+    """The mod's heartbeat while its session is mid-turn and takes no prompt:
+    the process is alive, so the desk stays live and no wake is sent to a
+    worker that is busy, not gone."""
+    _mark(conn, "desk_seen" if taker == DESK else "worker_seen", now() if t is None else t)
 
 
 def claim_worker_wake(conn: sqlite3.Connection, t: int | None = None) -> dict[str, Any] | None:

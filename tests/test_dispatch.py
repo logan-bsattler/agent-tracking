@@ -232,6 +232,16 @@ def test_dispatch_endpoints(tmp_path, monkeypatch):
     assert code == 200 and body == {"ok": True, "task_id": hand, "stamped": True, "session_id": "local_mag"}
     row = c.execute("SELECT dispatch_status, dispatch_session FROM tasks WHERE id=?", (hand,)).fetchone()
     assert (row["dispatch_status"], row["dispatch_session"]) == ("manual", "local_mag")
+    assert post("/api/dispatch/manual", f"task_id={hand}&phase=bogus".encode())[0] == 400
+    sessions.set_session(c, "LNK", "primary", "local_lnk")
+    c.execute("UPDATE tasks SET created_at=? WHERE id=?", (now() - OLD, _task(c, client="LNK")))
+    lnk = post("/api/dispatch/claim", b"claimer=desk")[1]["dispatch"]
+    assert lnk["session_id"] == "local_lnk"
+    other = _task(c, client="LNK")
+    code, body = post("/api/dispatch/manual", f"task_id={other}&session_id=local_lnk&phase=pending".encode())
+    assert code == 409 and body["claimed_task"] == lnk["task_id"]  # auto is sending to that session now
+    assert post("/api/session/seen", b"taker=master") == (200, {"ok": True})
+    assert store.worker_live(c)
     c.close()
 
 
@@ -317,3 +327,45 @@ def test_cli_dry_run_and_idle(tmp_path, monkeypatch, capsys):
     assert sessions.main(["idle"]) == 0
     out = capsys.readouterr().out
     assert "would send (0" in out and "0 idle" in out
+
+
+def test_a_pending_hand_send_holds_its_session_against_auto_dispatch(conn):
+    # coord-rules claims before send_message runs, so an auto tick during the
+    # send cannot give the session a second task.
+    a = _task(conn, age=OLD + 60)
+    b = _task(conn)
+    r = sessions.mark_manual(conn, b, "local_mag", phase="pending")
+    assert r["ok"] and r["pending"]
+    assert sessions.claim(conn, "desk") is None  # local_mag is under the hand-send's claim
+    assert sessions.mark_manual(conn, b, "local_mag", phase="sent")["stamped"]
+    assert sessions.claim(conn, "desk") is None  # b now in flight there
+    assert conn.execute("SELECT COUNT(*) FROM dispatch_attempts WHERE status='claimed'").fetchone()[0] == 0
+    assert a  # still owed, for when b is picked up and done
+
+
+def test_a_hand_send_during_an_auto_claim_is_refused(conn):
+    a = _task(conn, age=OLD + 60)
+    b = _task(conn)
+    d = sessions.claim(conn, "desk")
+    assert d["task_id"] == a
+    r = sessions.mark_manual(conn, b, "local_mag", phase="pending")  # another task, same session
+    assert r["ok"] is False and r["conflict"] and r["claimed_task"] == a
+    r = sessions.mark_manual(conn, a, "local_mag", phase="pending")  # the same task
+    assert r["ok"] is False and r["claimed_task"] == a
+    sessions.dispatch_sent(conn, a, "delivered")
+    # mark_manual on a task code already sent keeps code's stamp: no second in-flight
+    r = sessions.mark_manual(conn, a, "local_mag", phase="sent")
+    assert r["stamped"] is False and r["auto"]
+    row = conn.execute("SELECT dispatch_status FROM tasks WHERE id=?", (a,)).fetchone()
+    assert row["dispatch_status"] == "delivered"
+
+
+def test_a_failed_hand_send_frees_the_session(conn):
+    b = _task(conn)
+    sessions.mark_manual(conn, b, "local_mag", phase="pending")
+    assert sessions.mark_manual(conn, b, "local_mag", phase="failed", detail="session not found")["stamped"] is False
+    row = conn.execute("SELECT status, detail FROM dispatch_attempts WHERE task_id=?", (b,)).fetchone()
+    assert (row["status"], row["detail"]) == ("error", "session not found")
+    assert conn.execute("SELECT dispatched_at FROM tasks WHERE id=?", (b,)).fetchone()[0] is None
+    with pytest.raises(ValueError):
+        sessions.mark_manual(conn, b, phase="bogus")

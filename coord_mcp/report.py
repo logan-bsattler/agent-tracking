@@ -2657,6 +2657,10 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     self.send_header("Location", promote_back((form.get("back") or [""])[0], r["version"]))
                     self.end_headers()
                     return
+                if path == "/api/session/seen":  # the mod's heartbeat while its session is mid-turn
+                    store.mark_seen(conn, (form.get("taker") or ["master"])[0])
+                    self._json(200, {"ok": True})
+                    return
                 if path == "/api/prompts/take":  # taker=desk from Master - Desk, else the worker
                     taker = (form.get("taker") or ["master"])[0]
                     self._json(200, {"prompt": store.take_operator_prompt(conn, taker)})
@@ -2679,11 +2683,12 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     from . import sessions
                     one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
                     try:
-                        r = sessions.mark_manual(conn, one("task_id"), one("session_id") or None)
+                        r = sessions.mark_manual(conn, one("task_id"), one("session_id") or None,
+                                                 phase=one("phase") or "sent", detail=one("detail") or None)
                     except ValueError as e:
                         self._json(400, {"ok": False, "error": str(e)})
                         return
-                    self._json(200, r)
+                    self._json(409 if r.get("conflict") else 200, r)  # 409: auto-dispatch is sending now
                     return
                 if path == "/api/pipeline-note/claim":  # the mod's tick: one SharePoint note, under a lease
                     from . import queue
