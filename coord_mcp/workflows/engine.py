@@ -11,9 +11,11 @@ What it does, for a workflow whose definition says "engine": true:
   step before S). When A's latest task finished done, nothing in the case is
   open, nothing later than A exists, and no Ben loose end is open on the case:
     on "result":           create S's task
-    on "client_follow_up": take the first open loose end on A's task whose
-                           `who` is the client (and matches takes_follow_up),
-                           create S's task from it, resolve it as tasked
+    on "client_follow_up": take the client loose end on A's task that fits
+                           the step (_pick: first in the result's order to
+                           match takes_follow_up, else the step's kind;
+                           ambiguous ones are left for master), create S's
+                           task from it, resolve it as tasked
   The new task's parent is A's task (so it inherits the pipeline link), it
   carries case_id and case_step, and a decision records it ("workflow engine;
   Ben may override"). A matching client loose end is resolved as tasked by
