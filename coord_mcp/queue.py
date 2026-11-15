@@ -51,7 +51,7 @@ _AGENT = re.compile(rf"^\s*({_DOES}\b|{_CHECKS}\b.*{_ON})", re.I)
 # with Ari" sat on his queue). "Ask Ben" is not one.
 _ASK_PERSON = re.compile(
     r"^\s*((ask|chase|ping|nudge|remind)\s+(?!ben\b)\S|(follow up|check|confirm|clarify|agree|align)\s+with\s+(?!ben\b)\S"
-    r"|get\b.{1,80}\bfrom\s+(?!ben\b)[A-Z])", re.I)
+    r"|get\b.{1,80}\bfrom\s+(?!ben\b)(?-i:[A-Z][a-z]+\b))", re.I)  # a Name, not "the PROD table"
 # Work the agent does itself: edits and drafts, besides reads and runs.
 _EDITS = r"(draft|write|edit|update|fix|correct|revise|re-?point|rename|re-?generate|rebuild|re-?cut|reconcile" \
          r"|add|fill( in)?|test|compare|capture|export|re-?word|amend)"
@@ -66,6 +66,13 @@ _PERSON = re.compile(
     r"|pric(e|ing)|budget|contract|invoice|bill(ed|ing)?|staffing|timesheets?|commit to|credentials?|password"
     r"|access|licen[cs]e|VPN|sign[- ]?in|log ?in|MFA|SharePoint|pipeline|meeting|on (a|the) call|phone"
     r"|review|VM|Kiro|AUX|manual(ly)?|by hand|WebUI|in the (UI|browser))\b", re.I)
+# Ben-only acts with no keyword above: a call or meeting with a named person,
+# trusting a workspace or host, signing in. Anchored or person-scoped, so
+# "Check the totals meet the spec" or "Call the API" stay agent work.
+_BEN_ACTS = re.compile(
+    r"^\s*(call|phone|ring|meet(\s+with)?|visit|walk)\s+(?-i:[A-Z][a-z]+)\b"
+    r"|^\s*(trust|approve)\b.{0,40}\b(workspace|folder|repo(sitory)?|host|server|session|machine)s?\b"
+    r"|^\s*(sign|log)\s*(in|on)(to)?\b", re.I)
 _WITH_SOMEONE = re.compile(r"\bwith [A-Z][a-z]+\b")  # "Run it on the VM with Darren": a person is in the loop
 _EDIT = re.compile(rf"^\s*{_EDITS}\b", re.I)
 # Clients whose agent has no server leg: anything on a server is a person's.
@@ -275,28 +282,47 @@ def apply(conn: sqlite3.Connection, action: str, ids: list[str],
         return out
     # A workflow proposal's approve / reject / defer is applied here, in
     # code (workflows/propose.answer); anything else goes to master.
+    # The whole batch is validated before anything is applied: a proposal
+    # adopted ahead of a later refusal could not be answered again.
     from .workflows import propose
-    handled = []
-    for i in list(ids):
-        if len(answers[i]) <= ANSWER_MAX and propose.answer(conn, i, answers[i]) is not None:
-            handled.append(i)
-            ids.remove(i)
-    if not ids:
-        return {"ok": True, "action": action, "count": len(handled), "proposals": handled}
-    lines = []
-    for i in ids:
-        a = answers[i]
-        if len(a) > ANSWER_MAX:
-            raise ValueError(f"answer on {i} is over {ANSWER_MAX} characters")
+    long = [i for i in ids if len(answers[i]) > ANSWER_MAX]
+    if long:
+        raise ValueError(f"answer on {long[0]} is over {ANSWER_MAX} characters")
+    acts = {i: hit for i in ids if (hit := propose.answer_action(conn, i, answers[i]))}
+
+    def line(i: str, extra: str = "") -> str:
         r = rows[i]
         src = f"task {r['task_id']}" if r["task_id"] else f"intent {r['intent_id']}"
-        lines.append(f"- {i} ({r['client'] or 'unassigned'}, {src}; \"{r['what'][:120]}\"): {a}")
-    text = store.OPERATOR_ACTIONS["batch"].format(n=len(ids), answers="\n".join(lines))
-    if note:
-        text += "\n\nBen's direction: " + note
-    if len(text) > ANSWERS_MAX:
+        return f"- {i} ({r['client'] or 'unassigned'}, {src}; \"{r['what'][:120]}\"): {answers[i]}{extra}"
+
+    def prompt(lines: list[str]) -> str:
+        text = store.OPERATOR_ACTIONS["batch"].format(n=len(lines), answers="\n".join(lines))
+        return text + ("\n\nBen's direction: " + note if note else "")
+
+    # Worst case, every proposal answer fails and goes to master too: size
+    # the prompt for that (with room for the failure notes) before applying.
+    if len(prompt([line(i, " " * 200 if i in acts else "") for i in ids])) > ANSWERS_MAX:
         raise ValueError("too many answers in one batch; send fewer at a time")
-    return {**store._enqueue(conn, "batch", None, text), "action": action, "count": len(ids)}
+    handled, failed, rest = [], [], [i for i in ids if i not in acts]
+    for i, (pid, act) in acts.items():
+        try:
+            propose.apply_action(conn, pid, act)
+            handled.append(i)
+        except (ValueError, KeyError, OSError) as e:
+            # One proposal that cannot be applied (its base moved, its file is
+            # gone) does not drop the rest of the batch: master gets the
+            # answer with the reason, and the item stays open.
+            failed.append({"id": i, "error": str(e)[:200]})
+            rest.append(i)
+    out: dict[str, Any] = {"ok": True, "action": action, "count": len(handled) + len(rest)}
+    if handled:
+        out["proposals"] = handled
+    if failed:
+        out["proposal_errors"] = failed
+    if not rest:
+        return out
+    why = {f["id"]: f" [proposal not applied: {f['error']}]" for f in failed}
+    return {**out, **store._enqueue(conn, "batch", None, prompt([line(i, why.get(i, "")) for i in ids if i in rest]))}
 
 
 # ------------------------------------------------- shrinking it at the source
@@ -322,16 +348,37 @@ def _shape(what: str) -> str:
     return " ".join(_VARIES.sub("#", what.lower()).split())
 
 
+# "Review and draft to <name>" (server.py's example) and its variants: Ben
+# reviewing one email thread's draft. Each is about its own thread, so two
+# of them are never duplicates, rows of one shape, or covers of each other
+# by wording alone; only the same task (or a revision of it) repeats one.
+_REVIEW_DRAFT = re.compile(r"^\s*review\b[\w\s,&/+-]{0,30}?\b(draft(ed|s)?|repl(y|ies)|e-?mails?|responses?)\b",
+                           re.I)
+
+
+def review_draft(what: str) -> bool:
+    return bool(_REVIEW_DRAFT.search(what or ""))
+
+
+SHAPE_MATCH = 0.85
+
+
 def same_shape(a: str, b: str) -> bool:
+    """One ruling per row: the same template with only the row's numbers,
+    ids, quoted names or programs changed. Review-and-draft items never
+    count: each is its own thread."""
     from difflib import SequenceMatcher
+    if review_draft(a) or review_draft(b):
+        return False
     x, y = _shape(a), _shape(b)
-    if x == y:
-        return True
     # Short distinct asks ("Approve the plan" / "Approve the checklist") look
     # alike as text; a per-row ruling also names its row, id or program.
     if "#" not in x or "#" not in y:
         return False
-    return x.split()[:3] == y.split()[:3] or SequenceMatcher(None, x, y).ratio() >= 0.7
+    # The template left after stripping must match nearly whole, not only
+    # its opening words ("Decide whether ticket # is billable" is not the
+    # same ruling as "Decide whether ticket # needs a CVC").
+    return x == y or SequenceMatcher(None, x, y).ratio() >= SHAPE_MATCH
 
 
 def ungrouped(follow_ups: list[dict[str, Any]], client: str | None) -> list[str]:
@@ -454,7 +501,7 @@ def is_ben(who: Any) -> bool:
 def bens_own(what: str) -> bool:
     """The text itself names something only Ben does (send, approve, scope,
     cost, access, judgement)."""
-    return bool(_PERSON.search(what))
+    return bool(_PERSON.search(what) or _BEN_ACTS.search(what))
 
 
 BEN_TEST = ("A follow-up for Ben must be something only he can do: send or publish (send), approve or sign "
@@ -493,21 +540,63 @@ def anchors(what: str) -> set[str]:
         lw = w.lower().lstrip("#")
         if _BOARD_ID.fullmatch(lw) or _DATEISH.match(lw):
             continue
+        if _YEAR.match(lw) and not w.startswith("#"):
+            continue  # "2026" dates an ask, it is not what the ask is about ("#2026" is a ticket)
         if re.search(r"\d", lw) or _FILE_NAMED.search(lw) or re.search(r"\.(p|i|w|cls)$", lw):
             out.add(lw)
     return out
 
 
-DUP_MATCH = 0.25  # tuned on the audit's duplicates: catches the lexical ones, no false matches seen
+_YEAR = re.compile(r"^(19|20)\d{2}$")
+# Jaccard over the words left once anchors are stripped (_words). Raised from
+# 0.25 on precedent.shape (review 2026-11-14): at 0.25 one shared anchor and
+# "decide whether ticket" made "is billable" and "needs a CVC" one ask.
+DUP_MATCH = 0.6
+# Closing an older item as covered by a newer one needs the same question,
+# not a related one on the same ticket.
+COVER_MATCH = 0.75
 
 
-def duplicate(a: str, b: str) -> bool:
+def _words(what: str) -> frozenset[str]:
+    """The wording of an ask with its anchors (numbers, files, quotes, ids)
+    removed: lowercased words of 3+ letters, stop words out. Unlike
+    precedent.shape it keeps capitalised words (CVC, PROD, a person), which
+    are often what tells two asks apart."""
+    from .workflows.precedent import STOP, _ENT
+    s = what or ""
+    for rx, sub in _ENT:
+        s = rx.sub(sub, s)
+    return frozenset(w for w in (x.lower() for x in re.findall(r"[A-Za-z][A-Za-z'-]*", s))
+                     if len(w) >= 3 and w not in STOP)
+
+
+def _sim_words(a: str, b: str) -> float:
+    x, y = _words(a), _words(b)
+    return len(x & y) / len(x | y) if x and y else 0.0
+
+
+def duplicate(a: str, b: str, same_task: bool = False) -> bool:
     """The same ask twice: they share an anchor (ticket, item, file) and
-    their wording overlaps. Per-row rulings on different rows share no anchor."""
-    from .workflows.precedent import shape, _sim
+    their wording overlaps. Per-row rulings on different rows share no anchor.
+    Two review-and-draft items are each their own thread: a repeat only
+    within one task (same_task)."""
+    if review_draft(a) and review_draft(b) and not same_task:
+        return False
     if not anchors(a) & anchors(b):
         return _shape(a) == _shape(b) and "#" not in _shape(a)
-    return _sim(shape(a), shape(b)) >= DUP_MATCH
+    return _sim_words(a, b) >= DUP_MATCH
+
+
+def same_ask(a: str, b: str) -> bool:
+    """The newer item re-asks the older one (ben_cover on a lineage): the
+    same anchors, or none on either side, and nearly the same wording. A
+    shared ticket with a different question ("is billable" / "needs a CVC")
+    is not a cover."""
+    xa, xb = anchors(a), anchors(b)
+    if (xa or xb) and not xa & xb:
+        # A revision may bump a version ("v5" -> "v6") but keeps the ticket.
+        return False
+    return _sim_words(a, b) >= COVER_MATCH
 
 
 def lineage(conn: sqlite3.Connection, task_id: str | None) -> list[str]:
@@ -546,7 +635,7 @@ def check_landing(conn: sqlite3.Connection, follow_ups: list[dict[str, Any]], cl
     if switch(conn, "ben_dedupe"):
         for i, w in enumerate(mine):
             for o in mine[i + 1:]:
-                if duplicate(w, o):
+                if duplicate(w, o, same_task=True):
                     raise ValueError(f'follow_ups hands Ben the same ask twice ("{w[:60]}", "{o[:60]}"). '
                                      "Merge them into one item.")
         ours = set(lineage_ids)
@@ -598,8 +687,7 @@ def settle_landing(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
                 named = set(_BOARD_ID.findall(r["what"]))
                 if old["id"] in named and _COVERS.search(r["what"]):
                     by = r
-                elif old["task_id"] in line[1:] and (duplicate(r["what"], old["what"])
-                                                      or same_shape(r["what"], old["what"])):
+                elif old["task_id"] in line[1:] and same_ask(r["what"], old["what"]):
                     by = r
                 if by:
                     break
@@ -678,7 +766,7 @@ def landing_report(conn: sqlite3.Connection) -> dict[str, Any]:
             if r["id"] == old["id"] or r["created_at"] < old["created_at"] or not r["task_id"]:
                 continue
             if old["task_id"] and old["task_id"] in lineage(conn, r["task_id"])[1:] and \
-                    (duplicate(r["what"], old["what"]) or same_shape(r["what"], old["what"])):
+                    same_ask(r["what"], old["what"]):
                 covered.append({"id": old["id"], "client": old["client"], "by": r["id"], "what": old["what"]})
                 break
     for r in rows:

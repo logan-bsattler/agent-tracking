@@ -520,6 +520,11 @@ def adopt(conn: sqlite3.Connection, ref: str, folder: Path | None = None,
     from .. import store
     from . import cases as cs
     pid = find_id(conn, ref)
+    r = record(conn, pid)
+    if r is not None and r["state"] not in ("drafted", "filed"):
+        # A rejected or deferred proposal's file may still be on disk; its
+        # recorded answer stands until it is drafted and filed again.
+        raise ValueError(f"proposal {pid} is {r['state']}, not open: re-run propose to raise it again")
     p = load_proposal(pid, folder)
     if p is None:
         raise KeyError(f"no proposal {ref!r} under {folder or PROPOSED_DIR}")
@@ -603,17 +608,37 @@ ANSWERS = {"approve": "adopt", "approved": "adopt", "yes": "adopt", "adopt": "ad
            "reject": "reject", "drop": "reject", "no": "reject", "defer": "defer", "later": "defer"}
 
 
-def answer(conn: sqlite3.Connection, follow_up_id: str, text: str) -> dict[str, Any] | None:
-    """Ben's typed answer on a proposal's item: approve, reject or defer, as
-    the first word. None when the item is not a proposal or the answer is
-    something else (it then goes to master like any answer)."""
+# Politeness that may ride along with a bare answer ("Approve, thanks").
+FILLER = frozenset("thanks thank you please ok okay sure ty".split())
+
+
+def answer_action(conn: sqlite3.Connection, follow_up_id: str, text: str) -> tuple[str, str] | None:
+    """(proposal id, 'adopt' | 'reject' | 'defer') when `text` is a bare
+    answer on a proposal's item, else None. Nothing is applied. Bare: every
+    word is an answer word for the same action, or politeness. "Approve, but
+    rename step X" or "Approve once X is fixed" carries a condition: it goes
+    to master as a typed answer instead of adopting the proposal unchanged."""
     ensure(conn)
     r = conn.execute("SELECT id FROM workflow_proposals WHERE follow_up_id=?", (follow_up_id,)).fetchone()
-    word = (re.findall(r"[a-z]+", (text or "").lower()) or [""])[0]
-    if r is None or word not in ANSWERS:
+    if r is None:
         return None
-    act = ANSWERS[word]
-    return adopt(conn, r["id"]) if act == "adopt" else reject(conn, r["id"], defer=act == "defer")
+    words = [w for w in re.findall(r"[a-z']+", (text or "").lower()) if w not in FILLER]
+    acts = {ANSWERS.get(w) for w in words}
+    if not words or None in acts or len(acts) != 1:
+        return None
+    return r["id"], acts.pop()
+
+
+def apply_action(conn: sqlite3.Connection, pid: str, act: str) -> dict[str, Any]:
+    return adopt(conn, pid) if act == "adopt" else reject(conn, pid, defer=act == "defer")
+
+
+def answer(conn: sqlite3.Connection, follow_up_id: str, text: str) -> dict[str, Any] | None:
+    """Ben's typed answer on a proposal's item: a bare approve, reject or
+    defer is applied. None when the item is not a proposal or the answer is
+    anything else (it then goes to master like any answer)."""
+    hit = answer_action(conn, follow_up_id, text)
+    return apply_action(conn, *hit) if hit else None
 
 
 # ------------------------------------------------------------------ weekly
