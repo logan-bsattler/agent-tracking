@@ -471,7 +471,10 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # the estimate band (coord_mcp/estimate.py, Ben 2026-11-15)
             "auto_estimate": True,
             # check-in auto-approval (coord_mcp/checkin_auto.py); inactive until the gate starts
-            "auto_checkin": True}
+            "auto_checkin": True,
+            # passive Ben steps close themselves (workflows/passive.py). Off: the first
+            # dry run (2026-11-15) found real actions parked at those steps
+            "passive_close": False}
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).
 SETTINGS = {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0,

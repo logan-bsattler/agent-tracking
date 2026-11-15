@@ -42,7 +42,8 @@
       "gate": "Ben rules on what the work raised before any reply",
       "next": "Ben's ruling",
       "sla": {
-        "business_days": 2
+        "business_days": 5,
+        "why": "refit to p75 of 16 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     },
     {

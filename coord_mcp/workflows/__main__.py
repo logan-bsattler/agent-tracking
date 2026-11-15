@@ -11,6 +11,8 @@
                                            Ben's queue
   adopt <id> [--db PATH]                   move an approved proposal into defs/, record it, backfill
   reject <id> [--defer] [--db PATH]        close (or defer) a proposal's item in Ben's queue
+  refit [--db PATH] [--apply]              refit step limits to the p75 of observed time (dry run by default)
+  passive [--db PATH] [--apply] [--undo D] close Ben items at passive steps open 5+ business days
   precedent [--db PATH] [--out FILE] [--json] [--apply]
                                            open Ben loose ends a past ruling would settle (read-only;
                                            --apply needs COORD_WORKFLOW_PRECEDENT=1)
@@ -68,7 +70,48 @@ def main(argv: list[str] | None = None) -> int:
     rj.add_argument("id")
     rj.add_argument("--defer", action="store_true")
     rj.add_argument("--db")
+    rf = sub.add_parser("refit", help="step limits from the p75 of observed time (dry run unless --apply)")
+    rf.add_argument("--db")
+    rf.add_argument("--apply", action="store_true")
+    pv = sub.add_parser("passive", help="close Ben items at passive steps (dry run unless --apply)")
+    pv.add_argument("--db")
+    pv.add_argument("--apply", action="store_true")
+    pv.add_argument("--undo", metavar="DECISION_ID")
     a = ap.parse_args(argv)
+
+    if a.cmd == "refit":
+        from . import refit as rfm
+        from . import mine as mn
+        conn = mn.connect_ro(a.db)
+        try:
+            rows = rfm.plan(conn)
+        finally:
+            conn.close()
+        for r in rows:
+            print(f"{r['workflow']:4} {r['step']:16} {r['who']:5} n={r['n']:<4} p75={r['p75_h']:>7}h  "
+                  f"{rfm.fmt(r['old']):>5} -> {rfm.fmt(r['new'])}")
+        if not rows:
+            print("no limits to change")
+        elif a.apply:
+            print("wrote " + ", ".join(rfm.apply(rows)))
+        return 0
+
+    if a.cmd == "passive":
+        from ..db import connect
+        from . import passive as pvm
+        conn = connect(a.db) if a.db else connect()
+        try:
+            if a.undo:
+                print(json.dumps(pvm.undo(conn, a.undo)))
+                return 0
+            out = pvm.close(conn, apply=a.apply)
+        finally:
+            conn.close()
+        for r in out["items"]:
+            print(f"{r['id']}  {r['workflow']} {r['step']:6} {r['client']:10} {r['age_days']:>3}d  {r['what'][:90]}")
+        verb = "closed" if out["applied"] else "would close"
+        print(f"{verb} {out['count']}: {out['by_step']}" + (f"  decision {out['decision_id']}" if out.get("decision_id") else ""))
+        return 0
 
     if a.cmd == "propose":
         from . import propose as pp

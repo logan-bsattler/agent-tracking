@@ -2493,6 +2493,13 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         queue.expire_due(conn)
                     except Exception:
                         loop_error(connect, "expire")
+                    # Once a day: Ben's loose ends at passive workflow steps
+                    # (read it / use the result) close themselves (workflows/passive.py).
+                    try:
+                        from .workflows import passive
+                        passive.due(conn)
+                    except Exception:
+                        loop_error(connect, "passive")
                     # Deferred loose ends whose return date has come go
                     # back on the board, one decision per batch (defer.py).
                     try:

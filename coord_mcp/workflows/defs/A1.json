@@ -27,7 +27,8 @@
       "gate": "result validates",
       "next": "result lands done",
       "sla": {
-        "business_days": 1
+        "business_days": 3,
+        "why": "refit to p75 of 11 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     },
     {
@@ -94,7 +95,8 @@
       "gate": "Ben reads and sends",
       "next": "case done",
       "sla": {
-        "business_days": 1
+        "business_days": 5,
+        "why": "refit to p75 of 13 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     }
   ]

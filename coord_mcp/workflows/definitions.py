@@ -18,6 +18,8 @@ A definition is ordered steps. Each step says:
               (a CVC check-in is a code_change whose spec has checkin_of)
   gate        what must hold before the step counts
   next        what starts the next step
+  passive     optional, true on a Ben step where he only reads or uses the
+              result: its loose ends close themselves (passive.py)
   sla         optional time limit at the step: {"business_hours": n} or
               {"business_days": n} (exactly one, n > 0), plus an optional
               "why". Business time skips Saturdays and Sundays (sla.py).
@@ -148,6 +150,8 @@ def validate(d: dict[str, Any], kinds: tuple[str, ...] | list[str] | None = None
             errs.append(f"{where}: fallback goes on a code step and names ben or agent")
         if "optional" in st and not isinstance(st["optional"], bool):
             errs.append(f"{where}: optional must be true or false")
+        if "passive" in st and (st["passive"] is not True or st.get("who") != "ben"):
+            errs.append(f"{where}: passive is true or absent, and only on a Ben step")
         if "auto" in st:
             au = st["auto"]
             if st.get("who") != "ben":

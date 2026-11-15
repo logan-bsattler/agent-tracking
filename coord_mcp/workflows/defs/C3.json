@@ -28,7 +28,8 @@
       "gate": "Ben rules on what the input read raised; precedent may settle covered items",
       "next": "Ben's ruling",
       "sla": {
-        "business_days": 3
+        "business_days": 8,
+        "why": "refit to p75 of 40 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     },
     {
@@ -67,7 +68,8 @@
       "gate": "per-row rulings; precedent may settle covered rows (build step 6)",
       "next": "rulings recorded",
       "sla": {
-        "business_days": 3
+        "business_days": 9,
+        "why": "refit to p75 of 20 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     },
     {
@@ -89,12 +91,14 @@
       "key": "use",
       "name": "Ben uses the result",
       "who": "ben",
+      "passive": true,
       "kinds": [],
       "optional": true,
       "gate": "Ben sends, presents or rules on what the applied result raised",
       "next": "case done",
       "sla": {
-        "business_days": 2
+        "business_days": 10,
+        "why": "refit to p75 of 49 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     }
   ]

@@ -40,7 +40,8 @@
       "gate": "what counts as client-ready is Ben's",
       "next": "case done",
       "sla": {
-        "business_days": 3
+        "business_days": 10,
+        "why": "refit to p75 of 22 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     }
   ]

@@ -15,7 +15,8 @@
       "gate": "board cleanup procedure",
       "next": "closes recorded",
       "sla": {
-        "business_days": 2
+        "business_days": 9,
+        "why": "refit to p75 of 15 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     },
     {

@@ -27,7 +27,8 @@
       "gate": "result validates",
       "next": "result names the findings document",
       "sla": {
-        "business_days": 2
+        "business_days": 10,
+        "why": "refit to p75 of 5 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     },
     {
@@ -109,7 +110,8 @@
       "gate": "Ben sends or pastes",
       "next": "case done",
       "sla": {
-        "business_days": 1
+        "business_days": 10,
+        "why": "refit to p75 of 8 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     }
   ]

@@ -40,7 +40,8 @@
       "gate": "Ben rules on what the answer raised, or takes it as is",
       "next": "Ben's ruling",
       "sla": {
-        "business_days": 2
+        "business_days": 9,
+        "why": "refit to p75 of 26 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     },
     {
@@ -66,7 +67,8 @@
       "gate": "Ben",
       "next": "case done",
       "sla": {
-        "business_days": 2
+        "business_days": 8,
+        "why": "refit to p75 of 8 observed stays (2026-11-15; Ben 2026-11-15)"
       }
     }
   ]
