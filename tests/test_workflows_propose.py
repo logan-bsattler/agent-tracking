@@ -219,3 +219,70 @@ def test_uncommitted_defs_lists_untracked_and_changed_definitions(tmp_path):
     assert pp.uncommitted_defs(d) == ["A1.json", "C5.json"]
     assert "C5.json" in pp.commit_note(pp.uncommitted_defs(d))
     assert pp.uncommitted_defs(tmp_path / "nope") == []
+
+
+# ------------------------------------------- review fixes (2026-11-14 review)
+
+def _filed(c):
+    _status_cases(c)
+    props = pp.draft(c, pp.find(c))
+    pp.write(props)
+    return props, pp.file(c, props)["filed"][0]["follow_up_id"]
+
+
+@pytest.mark.parametrize("text", ["Approve, but rename step status_read to read",
+                                  "Approve once the SLA is fixed", "yes and no"])
+def test_an_answer_with_conditions_is_not_applied(c, text):
+    props, fid = _filed(c)
+    assert pp.answer(c, fid, text) is None
+    assert pp.record(c, props[0]["id"])["state"] == "filed"
+    assert c.execute("SELECT state FROM follow_ups WHERE id=?", (fid,)).fetchone()[0] == "open"
+
+
+def test_a_rejected_or_deferred_proposal_cannot_be_adopted_from_its_file(c):
+    props, fid = _filed(c)
+    pid = props[0]["id"]
+    pp.reject(c, pid, defer=True)
+    assert (pp.PROPOSED_DIR / f"{pid}.json").exists()  # the file is left behind
+    with pytest.raises(ValueError, match="deferred"):
+        pp.adopt(c, pid)
+    pp.reject(c, pid)
+    with pytest.raises(ValueError, match="rejected"):
+        pp.adopt(c, pid)
+
+
+def _other_ben_item(c):
+    tid = store.create_task(c, "investigation", "t", {"q": "x"}, assigned_to="LNK")["task_id"]
+    store.get_task(c, tid, reader="LNK")
+    store.complete_task(c, tid, {"done": True, "verdict": "v", "confidence": "high", "evidence": ["e"],
+                                 "follow_ups": [{"who": "Ben", "what": "Approve the cutover plan"}]})
+    return [f["id"] for f in store.list_follow_ups(c, who="Ben")["follow_ups"]
+            if f["what"] == "Approve the cutover plan"][0]
+
+
+def test_a_batch_refused_late_applies_no_proposal(c):
+    props, fid = _filed(c)
+    other = _other_ben_item(c)
+    with pytest.raises(ValueError, match="over"):
+        queue.apply(c, "answer", [], {fid: "approve", other: "x" * (queue.ANSWER_MAX + 1)})
+    assert pp.record(c, props[0]["id"])["state"] == "filed"  # nothing adopted
+    with pytest.raises(ValueError, match="not open loose ends"):
+        queue.apply(c, "answer", [], {fid: "approve", "nope": "yes"})
+    assert pp.record(c, props[0]["id"])["state"] == "filed"
+    r = queue.apply(c, "answer", [], {fid: "approve", other: "yes"})  # resubmitting works
+    assert r["proposals"] == [fid] and pp.record(c, props[0]["id"])["state"] == "adopted"
+    assert other in store.take_operator_prompt(c)["text"]
+
+
+def test_a_failing_adopt_is_reported_and_the_rest_still_goes_to_master(c):
+    props, fid = _filed(c)
+    other = _other_ben_item(c)
+    f = defs.DEFS_DIR / "A1.json"
+    d = json.loads(f.read_text(encoding="utf-8"))
+    d["notes"] = "edited by hand"
+    f.write_text(json.dumps(d), encoding="utf-8")  # the proposal's base moved: adopt raises
+    r = queue.apply(c, "answer", [], {fid: "approve", other: "yes"})
+    assert r["proposal_errors"][0]["id"] == fid and "changed since" in r["proposal_errors"][0]["error"]
+    text = store.take_operator_prompt(c)["text"]
+    assert f"- {other} " in text and f"- {fid} " in text and "proposal not applied" in text
+    assert c.execute("SELECT state FROM follow_ups WHERE id=?", (fid,)).fetchone()[0] == "open"

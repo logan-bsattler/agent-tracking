@@ -219,3 +219,59 @@ def test_landing_report_is_read_only(conn):
     rep = queue.landing_report(conn)
     assert [r["id"] for r in rep["settled"]] == list(before.values())
     assert _open(conn) == before
+
+
+# ------------------------------------------- review fixes (2026-11-14 review)
+
+def test_two_review_and_draft_items_to_one_contact_are_not_repeats(conn):
+    # server.py's guidance: "Review and draft to <name>". A second thread to
+    # the same person is a different draft, not a repeat of the open one.
+    assert not queue.duplicate("Review and draft to John", "Review and draft to John")
+    assert queue.duplicate("Review and draft to John", "Review and draft to John", same_task=True)
+    _done(conn, [_ben("Review and draft to John")])
+    _done(conn, [_ben("Review and draft to John")])
+    assert len(store.list_follow_ups(conn, who="Ben")["follow_ups"]) == 2
+
+
+def test_review_and_draft_items_are_never_rows_of_one_shape(conn):
+    a = "Review and draft reply to Darren (RAID 695)"
+    b = "Review and draft reply to John on ticket 4512"
+    assert not queue.same_shape(a, b)
+    for w in (a, b, "Review and draft reply to Ari on ticket 4513"):
+        _done(conn, [_ben(w)])  # a client's third draft in a week lands
+    assert len(_open(conn)) == 3
+
+
+def test_same_shape_needs_the_whole_template_not_three_words():
+    assert not queue.same_shape("Decide whether ticket 4512 is billable", "Decide whether ticket 4513 needs a CVC")
+    assert queue.same_shape("Decide #968 keep or cancel in the tracker", "Decide #444 keep or cancel in the tracker")
+
+
+def test_a_childs_different_question_on_the_same_ticket_does_not_cover(conn):
+    p, _ = _done(conn, [_ben("Decide whether ticket 4512 is billable")])
+    _, out = _done(conn, [_ben("Decide whether ticket 4512 needs a CVC")], parent_id=p)
+    assert "covered" not in out and len(_open(conn)) == 2
+    assert not queue.same_ask("Decide whether ticket 4512 needs a CVC", "Decide whether ticket 4512 is billable")
+
+
+def test_a_year_is_not_an_anchor():
+    assert queue.anchors("Approve the 2026 holiday calendar") == set()
+    assert queue.anchors("Decide #2026 keep or cancel") == {"2026"}
+    assert not queue.duplicate("Approve the 2026 holiday calendar", "Decide the 2026 rate card for support")
+
+
+def test_get_from_needs_a_named_person():
+    assert queue.route_for("Get the item list from the PROD table", "MAG") != "reply"
+    assert queue.route_for("Get the app version from Mayuri", "MAG") == "reply"
+
+
+@pytest.mark.parametrize("what", ["Call John about the go-live date", "Trust the MIGR workspace",
+                                  "Meet with Darren on the cutover", "Sign in to the client VPN portal"])
+def test_ben_only_acts_without_a_keyword_land_untagged(conn, what):
+    _done(conn, [_ben(what)])
+    assert list(_open(conn)) == [what]
+
+
+@pytest.mark.parametrize("what", ["Call the API again with the fixed key", "Check the totals meet the spec"])
+def test_the_new_acts_do_not_reopen_the_agent_work_hole(what):
+    assert not queue.bens_own(what)
