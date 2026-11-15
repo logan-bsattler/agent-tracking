@@ -275,7 +275,7 @@ def test_drafts_page_empty_and_all_done(conn, tmp_path):
 def test_drafts_is_its_own_nav_page(conn, tmp_path):
     _draft_task(conn, tmp_path)
     page = report.drafts_page(store.draft_replies(conn))
-    assert '<b>Drafts</b>' in page and 'href="/deliverables"' in page
+    assert 'href="/drafts" aria-current=page>Drafts</a>' in page and 'href="/deliverables"' in page
     assert "Open compose in my browser" in page and "Neither sends." in page
 
 

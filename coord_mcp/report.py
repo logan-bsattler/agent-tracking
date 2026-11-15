@@ -1276,7 +1276,74 @@ button.kpi { font:inherit; text-align:left; cursor:pointer; width:100%; }
 .count.owed { color:var(--critical); font-weight:600; }
 """
 
-# Nav links in the order every page shows them; the current page is bold.
+# The finishing layer, last in the cascade so it can restyle what the page
+# CSS above lays out: the sticky nav bar, depth and hover on cards and tiles,
+# one look for every bare button and input (`:where` keeps specificity at
+# zero, so any page's own rule still wins), and the theme toggle.
+POLISH_CSS = """
+:root { --page:#f4f4f1; --surface:#fff; --shadow:0 1px 2px rgba(11,11,11,.05), 0 1px 1px rgba(11,11,11,.03);
+  --lift:0 6px 18px rgba(11,11,11,.09); --ring:color-mix(in srgb, var(--s1) 35%, transparent); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --page:#0d0d0d; --surface:#1a1a19;
+  --shadow:0 1px 2px rgba(0,0,0,.5); --lift:0 6px 18px rgba(0,0,0,.6); } }
+:root[data-theme="dark"] { --page:#0d0d0d; --surface:#1a1a19; --shadow:0 1px 2px rgba(0,0,0,.5); --lift:0 6px 18px rgba(0,0,0,.6); }
+html { scrollbar-width:thin; scrollbar-color:var(--axis) transparent; }
+body, body.wide { padding:0; -webkit-font-smoothing:antialiased; }
+main { padding:20px 20px 40px; }
+h1 { font-size:24px; letter-spacing:-.015em; }
+a { color:var(--s1); text-decoration:none; } a:hover { text-decoration:underline; }
+a.kpi:hover, a.fleet-tile:hover, a.drill:hover, a.file:hover, a.btn:hover, nav a:hover { text-decoration:none; }
+code { font:12px ui-monospace,"Cascadia Code",Consolas,monospace; }
+[id], .card { scroll-margin-top:64px; }
+nav { position:sticky; top:0; z-index:8; margin:0; font-size:13px; border-bottom:1px solid var(--border);
+  background:color-mix(in srgb, var(--page) 82%, transparent); backdrop-filter:saturate(1.4) blur(10px); }
+nav .inner { max-width:1500px; margin:0 auto; padding:8px 20px; display:flex; flex-wrap:wrap; align-items:center; gap:2px; }
+nav .brand { font-weight:700; letter-spacing:-.01em; margin-right:14px; color:var(--ink); display:flex; align-items:center; gap:7px; }
+nav .brand i { width:10px; height:10px; border-radius:3px; background:linear-gradient(135deg, var(--s1), var(--s3)); }
+nav a.tab { color:var(--ink2); padding:5px 11px; border-radius:999px; font-weight:500; transition:background .12s, color .12s; }
+nav a.tab:hover { background:color-mix(in srgb, var(--ink) 7%, transparent); color:var(--ink); }
+nav a.tab[aria-current] { background:var(--ink); color:var(--page); font-weight:600; }
+nav #theme { margin-left:auto; border-radius:999px; padding:4px 10px; font-size:13px; line-height:1; }
+.tile, .card, .kpi, .fleet-tile { box-shadow:var(--shadow); border-radius:12px; }
+.kpi, .fleet-tile { transition:transform .12s ease, box-shadow .12s ease, border-color .12s ease; }
+a.kpi:hover, button.kpi:hover, a.fleet-tile:hover { transform:translateY(-2px); box-shadow:var(--lift); }
+.kpi .n { letter-spacing:-.02em; }
+.kpi .bar, .tile .bar { border-radius:999px; }
+.card > h2:hover::before { color:var(--s1); }
+.lane .item { border-radius:0 6px 6px 0; transition:background .1s; }
+.lane .item:hover { background:color-mix(in srgb, var(--s1) 5%, transparent); }
+.item.new { background:color-mix(in srgb, var(--s2) 6%, transparent); }
+.state, .proj .chip { border-radius:999px; }
+tbody tr { transition:background .1s; } tbody tr:hover { background:color-mix(in srgb, var(--s1) 5%, transparent); }
+th { text-transform:uppercase; letter-spacing:.04em; font-size:11px; }
+.timeline, .draft-body { scrollbar-width:thin; }
+.draft-body { background:var(--page); border-color:var(--border); }
+:where(button, a.btn) { font:inherit; font-size:13px; padding:5px 12px; border-radius:6px; cursor:pointer;
+  border:1px solid var(--axis); background:var(--surface); color:var(--ink); }
+:where(button.primary) { background:var(--s1); border-color:var(--s1); color:#fff; font-weight:600; }
+:where(input, select, textarea) { font:inherit; font-size:13px; padding:4px 8px; border-radius:6px;
+  border:1px solid var(--axis); background:var(--surface); color:var(--ink); }
+:where(input[type=checkbox], input[type=radio]) { padding:0; accent-color:var(--s1); }
+button:not(.kpi):hover, a.btn:hover { border-color:var(--s1); }
+button:not(.kpi):active { transform:translateY(1px); }
+button.primary:hover, form.go button:hover { filter:brightness(1.08); }
+:is(button, input, select, textarea, a):focus-visible { outline:2px solid var(--s1); outline-offset:2px; box-shadow:0 0 0 4px var(--ring); }
+@media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
+@media (max-width: 640px) { main { padding:14px 12px 32px; } nav .inner { padding:6px 12px; } nav .brand { display:none; } }
+"""
+
+# In <head>, before first paint, so a saved theme never flashes the other one.
+THEME_HEAD = ('<script>try{var t=localStorage.getItem("coord-theme");'
+              'if(t)document.documentElement.dataset.theme=t}catch(e){}</script>')
+THEME_JS = """<script>
+(() => { const b = document.getElementById("theme"), r = document.documentElement; if (!b) return;
+  const dark = () => r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const paint = () => { b.textContent = dark() ? "\\u2600" : "\\u263E"; b.title = dark() ? "Switch to light" : "Switch to dark"; };
+  b.addEventListener("click", () => { r.dataset.theme = dark() ? "light" : "dark";
+    try { localStorage.setItem("coord-theme", r.dataset.theme); } catch (e) {} paint(); });
+  paint(); })();
+</script>"""
+
+# Nav links in the order every page shows them; the current page is the filled tab.
 NAV = (("/", "Usage"), ("/board", "Board"), ("/clients", "Clients"), ("/queue", "Queue"), ("/hours", "Hours"), ("/drafts", "Drafts"),
        ("/deliverables", "Deliverables"), ("/intents", "Intents"), ("/commitments", "Commitments"),
        ("/workflows", "Workflows"))
@@ -1298,20 +1365,23 @@ def client_keys(conn: sqlite3.Connection) -> list[str]:
 def page(current: str, title: str, h1: str, sub: str, body: str, actions: str = "",
          refresh: int | None = None, tail: str = "") -> str:
     """Every dashboard page, so none can drift from the others: the one nav
-    (`current` bold), the topbar (h1 and sub on the left, the page's actions
+    (`current` the filled tab), the topbar (h1 and sub on the left, the page's actions
     on the right), the wide command-center layout, folding cards, and the
     Mark-seen tagging of anything carrying data-since. `title` is text;
     `h1`, `sub`, `body`, `actions` and `tail` are HTML. `refresh` adds the
     meta refresh; `tail` goes after the body for a page's own scripts."""
-    nav = "<nav>" + " · ".join(f"<b>{esc(label)}</b>" if label == current else f'<a href="{href}">{esc(label)}</a>'
-                               for href, label in NAV) + "</nav>"
+    tabs = "".join(f'<a class="tab" href="{href}"{" aria-current=page" if label == current else ""}>{esc(label)}</a>'
+                   for href, label in NAV)
+    nav = (f'<nav><div class="inner"><span class="brand"><i></i>coord</span>{tabs}'
+           '<button id="theme" type="button" aria-label="Toggle theme"></button></div></nav>')
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     btns = f'<div class="btns">{actions}</div>' if actions else ""
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">{meta}'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title>'
-            f'<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}{CENTER_CSS}{DRAFT_CSS}</style></head><body class="wide"><main>'
-            f'{nav}<div class="topbar"><div><h1>{h1}</h1><p class="sub">{sub}</p></div>{btns}</div>\n'
-            f'{body}\n{COLLAPSE_JS}{SEEN_JS}{tail}</main></body></html>')
+            f'{THEME_HEAD}<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}{CENTER_CSS}{DRAFT_CSS}{POLISH_CSS}</style></head>'
+            f'<body class="wide">{nav}<main>'
+            f'<div class="topbar"><div><h1>{h1}</h1><p class="sub">{sub}</p></div>{btns}</div>\n'
+            f'{body}\n{COLLAPSE_JS}{SEEN_JS}{THEME_JS}{tail}</main></body></html>')
 
 
 def _val(v: Any, text=esc) -> str:
