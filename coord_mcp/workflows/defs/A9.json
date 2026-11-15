@@ -34,6 +34,18 @@
       }
     },
     {
+      "key": "work_ruling",
+      "name": "Ben rules on the work",
+      "who": "ben",
+      "kinds": [],
+      "optional": true,
+      "gate": "Ben rules on what the work raised before any reply",
+      "next": "Ben's ruling",
+      "sla": {
+        "business_days": 2
+      }
+    },
+    {
       "key": "reply",
       "name": "Reply or deliverable",
       "who": "agent",

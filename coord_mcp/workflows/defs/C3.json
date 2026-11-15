@@ -20,6 +20,18 @@
       }
     },
     {
+      "key": "input_rulings",
+      "name": "Ben rules on the input",
+      "who": "ben",
+      "kinds": [],
+      "optional": true,
+      "gate": "Ben rules on what the input read raised; precedent may settle covered items",
+      "next": "Ben's ruling",
+      "sla": {
+        "business_days": 3
+      }
+    },
+    {
       "key": "regen",
       "name": "Regenerate workbook",
       "who": "agent",
@@ -69,6 +81,18 @@
       ],
       "gate": "rulings cited",
       "next": "regenerate",
+      "sla": {
+        "business_days": 2
+      }
+    },
+    {
+      "key": "use",
+      "name": "Ben uses the result",
+      "who": "ben",
+      "kinds": [],
+      "optional": true,
+      "gate": "Ben sends, presents or rules on what the applied result raised",
+      "next": "case done",
       "sla": {
         "business_days": 2
       }

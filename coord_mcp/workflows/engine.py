@@ -178,10 +178,12 @@ def plan(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int,
         sp = st.get("spawn")
         if not sp or (sp.get("after") or steps[j - 1]["key"]) != a_key:
             continue
-        between = steps[reached + 1:j + 1]
-        if any(s["who"] == "ben" for s in between):
+        # An optional Ben step (a mid-case ruling) applies only when Ben has a loose
+        # end open, and that already returned above; so only required ones stop here.
+        between = [s for s in steps[reached + 1:j + 1] if s["who"] == "ben" and not s.get("optional")]
+        if between:
             return {"stop": st["key"], "prev": prev["id"],
-                    "why": f"a Ben step ({next(s['name'] for s in between if s['who'] == 'ben')}) comes first"}
+                    "why": f"a Ben step ({between[0]['name']}) comes first"}
         if sp["kind"] not in defs.ENGINE_KINDS or (st.get("match") or {}).get("spec_has") == "checkin_of":
             return None
         if conn.execute("SELECT 1 FROM workflow_case_events WHERE case_id=? AND event='spawned' AND step=? "

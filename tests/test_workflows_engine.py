@@ -111,6 +111,20 @@ def test_a_ben_step_between_stops_the_engine(c, monkeypatch):
     assert c.execute("SELECT COUNT(*) FROM workflow_case_events WHERE event='stopped'").fetchone()[0] == 1
 
 
+def test_an_optional_ben_step_between_does_not_stop_the_engine(c, monkeypatch):
+    d = json.loads(json.dumps(defs.get("A1")))
+    d["steps"].insert(2, {"key": "ok", "name": "Ben rules", "who": "ben", "kinds": [], "optional": True,
+                          "gate": "g", "next": "n"})
+    d["steps"][3]["spawn"]["after"] = "status_read"
+    assert defs.validate(d) == []
+    real = defs.get
+    monkeypatch.setattr(defs, "get", lambda code: d if code == "A1" else real(code))
+    t = _status_case(c)
+    store.complete_task(c, t, {**INV, "follow_ups": [{"who": "LNK", "what": "draft the reply to John"}]})
+    cs.sync(c)
+    assert [x.get("kind") for x in engine.run(c)] == ["draft_reply"]
+
+
 def test_one_failing_case_does_not_skip_the_next(c, monkeypatch):
     first, second = _status_case(c), _status_case(c, reply_from="mary@client.example")
     for t in (first, second):

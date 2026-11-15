@@ -57,6 +57,18 @@
       }
     },
     {
+      "key": "design_ruling",
+      "name": "Ben rules on the design",
+      "who": "ben",
+      "kinds": [],
+      "optional": true,
+      "gate": "Ben rules on the handoff's open questions before the build",
+      "next": "Ben's ruling",
+      "sla": {
+        "business_days": 2
+      }
+    },
+    {
       "key": "build",
       "name": "Build and dev compile",
       "who": "agent",

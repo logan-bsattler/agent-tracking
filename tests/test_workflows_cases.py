@@ -95,6 +95,23 @@ def test_sync_walks_a_case_through_agent_ben_master_and_done(db):
     assert evs[0] == "opened" and "closed" in evs and "reopened" in evs
 
 
+def test_a_ben_loose_end_lands_on_the_next_ben_step_past_code_steps(db, monkeypatch):
+    _, c = db
+    d = json.loads(json.dumps(defs.get("A3")))
+    at = defs.step_index(d, "investigate") + 1
+    d["steps"][at:at] = [{"key": "gate", "name": "Gate", "who": "code", "kinds": [], "gate": "g", "next": "n"},
+                         {"key": "rule", "name": "Ben rules", "who": "ben", "kinds": [], "optional": True,
+                          "gate": "g", "next": "n"}]
+    assert defs.validate(d) == []
+    real = defs.get
+    monkeypatch.setattr(defs, "get", lambda code: d if code == "A3" else real(code))
+    root = store.create_task(c, "investigation", "LNK: why the AMEX report fails", {}, assigned_to="LNK")["task_id"]
+    store.complete_task(c, root, {**INV, "follow_ups": [{"who": "Ben", "what": "rule on the fix"}]})
+    cs.sync(c)
+    case = c.execute("SELECT * FROM workflow_cases").fetchone()
+    assert (case["state"], case["step"], case["waits_on"]) == ("open", "rule", "ben")
+
+
 def test_client_loose_end_waits_on_master(db):
     _, c = db
     root = store.create_task(c, "investigation", "LNK: why the AMEX report fails", {}, assigned_to="LNK")["task_id"]

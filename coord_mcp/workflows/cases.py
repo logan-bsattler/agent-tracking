@@ -215,9 +215,10 @@ def where(conn: sqlite3.Connection, case: sqlite3.Row, d: dict[str, Any] | None,
     nxt = steps[reached + 1] if 0 <= reached + 1 < len(steps) else None
     ben = [f for f in fus if (f["who"] or "").strip().lower() == "ben"]
     if ben:
-        # Waiting on Ben: at the next Ben step if the definition has one there, else
-        # at the step the loose end came from.
-        key = nxt["key"] if nxt and nxt["who"] == "ben" else last["case_step"]
+        # Waiting on Ben: at the next Ben step if the definition has one there (past
+        # any code-run steps, such as a review), else at the step the loose end came from.
+        ahead = next((s for s in steps[reached + 1:] if s["who"] != "code"), None) if reached >= 0 else nxt
+        key = ahead["key"] if ahead and ahead["who"] == "ben" else last["case_step"]
         return {"state": "open", "step": key, "waits_on": "ben", "since": min(f["created_at"] for f in ben),
                 "task": ben[0]["task_id"]}
     client = [f for f in fus if _client_loose_end(f["who"], case["client"])]
