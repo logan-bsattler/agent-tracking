@@ -52,31 +52,48 @@ PRESETS = {"tomorrow": 1, "3d": 3, "1w": 5, "2w": 10, "1m": 21}
 # holidays`); COORD_HOLIDAYS overrides it; DEFAULT_HOLIDAYS when neither is set.
 HOLIDAYS_KEY = "defer_holidays"
 DEFAULT_HOLIDAYS = ("2026-11-26", "2026-11-27", "2026-12-24", "2026-12-25", "2026-12-31", "2027-01-01",
-                    "2027-05-31", "2027-07-05", "2027-09-06", "2027-11-25", "2027-11-26", "2027-12-24")
+                    "2027-05-31", "2027-07-05", "2027-09-06", "2027-11-25", "2027-11-26", "2027-12-24",
+                    "2027-12-31")  # each New Year's observed day: 2026-12-31 for 2027, 2027-12-31 for 2028
+# The set last read from meta, for callers with no connection (each read with a
+# connection re-reads meta, so a CLI --set reaches a long-running process on
+# its next read, never a stale copy).
 _holidays: set[date] | None = None
 
 
+def _parse_days(raw: str, source: str) -> set[date]:
+    """ISO dates from a comma-separated list; a bad entry is skipped with a
+    warning on stderr, so one typo never breaks expiry or the reopen pass."""
+    out: set[date] = set()
+    for x in raw.split(","):
+        x = x.strip()
+        if not x:
+            continue
+        try:
+            out.add(date.fromisoformat(x))
+        except ValueError:
+            print(f"coord defer: ignoring bad holiday {x!r} in {source}", file=sys.stderr)
+    return out
+
+
 def holidays(conn: sqlite3.Connection | None = None) -> set[date]:
-    """The holiday set; reads meta when a connection is given, else the last one read."""
+    """The holiday set: COORD_HOLIDAYS, else meta (read fresh when a
+    connection is given), else the last set read from meta, else the default."""
     import os
     global _holidays
     env = os.environ.get("COORD_HOLIDAYS")
     if env is not None:
-        raw = env
-    elif conn is not None:
-        r = conn.execute("SELECT value FROM meta WHERE key=?", (HOLIDAYS_KEY,)).fetchone()
-        raw = r[0] if r else ",".join(DEFAULT_HOLIDAYS)
-    elif _holidays is not None:
-        return _holidays
-    else:
-        raw = ",".join(DEFAULT_HOLIDAYS)
-    out = set()
-    for x in raw.split(","):
-        if x.strip():
-            out.add(date.fromisoformat(x.strip()))
-    if env is None and conn is not None:
+        return _parse_days(env, "COORD_HOLIDAYS")
+    if conn is not None:
+        try:
+            r = conn.execute("SELECT value FROM meta WHERE key=?", (HOLIDAYS_KEY,)).fetchone()
+        except sqlite3.Error:
+            r = None
+        out = _parse_days(r[0], f"meta {HOLIDAYS_KEY}") if r else _parse_days(",".join(DEFAULT_HOLIDAYS), "default")
         _holidays = out
-    return out
+        return out
+    if _holidays is not None:
+        return _holidays
+    return _parse_days(",".join(DEFAULT_HOLIDAYS), "default")
 
 
 def set_holidays(conn: sqlite3.Connection, days: list[str]) -> set[date]:
@@ -101,8 +118,8 @@ def _start_of(d: date) -> int:
     return int(datetime.combine(d, datetime.min.time(), tzinfo=_tz()).timestamp())
 
 
-def _add_business(d: date, n: int) -> date:
-    off = holidays()
+def _add_business(d: date, n: int, conn: sqlite3.Connection | None = None) -> date:
+    off = holidays(conn)
     while n > 0:
         d += timedelta(days=1)
         if d.weekday() < 5 and d not in off:
@@ -110,31 +127,33 @@ def _add_business(d: date, n: int) -> date:
     return d
 
 
-def business_days_out(n: int, now_ts: int | None = None) -> int:
-    """Start of the local day `n` business days after today."""
+def business_days_out(n: int, now_ts: int | None = None, conn: sqlite3.Connection | None = None) -> int:
+    """Start of the local day `n` business days after today (holidays from
+    meta when `conn` is given)."""
     today = datetime.fromtimestamp(now() if now_ts is None else now_ts, _tz()).date()
-    return _start_of(_add_business(today, max(1, int(n))))
+    return _start_of(_add_business(today, max(1, int(n)), conn))
 
 
-def parse(value: Any, now_ts: int | None = None) -> int:
+def parse(value: Any, now_ts: int | None = None, conn: sqlite3.Connection | None = None) -> int:
     """A return date as the start of its local day.
 
     Accepts an ISO date (2026-11-21), a preset (tomorrow, 3d, 1w, 2w, 1m),
     a count of business days ('5', '5bd'), an epoch, or None/'' for the
-    default (DEFAULT_DAYS business days)."""
+    default (DEFAULT_DAYS business days). Pass `conn` so Ben's holiday list
+    in meta counts even in a process that has not run ensure()."""
     t = now() if now_ts is None else now_ts
     if value is None or (isinstance(value, str) and not value.strip()):
-        return business_days_out(DEFAULT_DAYS, t)
+        return business_days_out(DEFAULT_DAYS, t, conn)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if value > 10_000_000:  # an epoch
             d = datetime.fromtimestamp(int(value), _tz()).date()
             return _check(_start_of(d), t)
-        return business_days_out(int(value), t)
+        return business_days_out(int(value), t, conn)
     s = str(value).strip().lower()
     if s in PRESETS:
-        return business_days_out(PRESETS[s], t)
+        return business_days_out(PRESETS[s], t, conn)
     if m := re.fullmatch(r"(\d{1,3})\s*(bd|d|days?|business days?)?", s):
-        return business_days_out(int(m.group(1)), t)
+        return business_days_out(int(m.group(1)), t, conn)
     try:
         d = date.fromisoformat(s[:10])
     except ValueError:
@@ -240,7 +259,7 @@ def plan_backfill(conn: sqlite3.Connection, now_ts: int | None = None,
     n = len(rows)
     for i, r in enumerate(rows):
         k = 1 + (i * days) // n if n else 1
-        r["return_on"] = business_days_out(k, t)
+        r["return_on"] = business_days_out(k, t, conn)
     return rows
 
 

@@ -268,7 +268,7 @@ def apply(conn: sqlite3.Connection, action: str, ids: list[str],
     if action in ("defer", "drop"):
         from . import defer as defer_mod
         verb = "deferred" if action == "defer" else "dropped"
-        ret = defer_mod.parse(return_on) if action == "defer" else None  # a bad date fails before any write
+        ret = defer_mod.parse(return_on, conn=conn) if action == "defer" else None  # a bad date fails before any write
         until = f" until {defer_mod.day(ret)}" if ret else ""
         dec = store.record_decision(
             conn, f"Ben {verb} {len(ids)} loose end(s) from /queue{until}: {', '.join(ids)}"[:200],

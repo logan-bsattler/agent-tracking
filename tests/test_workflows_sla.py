@@ -67,10 +67,51 @@ def test_sla_is_optional():
 def test_business_time_skips_weekends():
     fri = ts(2026, 11, 13, 12)  # a Friday
     mon = ts(2026, 11, 16, 12)
-    assert sla.business_seconds(fri, mon, UTC) == 24 * H
-    assert sla.deadline(fri, 24 * H, UTC) == mon
-    assert sla.deadline(fri, 4 * H, UTC) == ts(2026, 11, 13, 16)
-    assert sla.business_seconds(ts(2026, 11, 14), ts(2026, 11, 15, 23), UTC) == 0
+    assert sla.business_seconds(fri, mon, UTC, off=set()) == 9 * H  # Fri 12-17, Mon 8-12
+    assert sla.deadline(fri, 9 * H, UTC, off=set()) == mon
+    assert sla.deadline(fri, 4 * H, UTC, off=set()) == ts(2026, 11, 13, 16)
+    assert sla.business_seconds(ts(2026, 11, 14), ts(2026, 11, 15, 23), UTC, off=set()) == 0
+
+
+def test_business_time_counts_only_business_hours(monkeypatch):
+    monkeypatch.delenv("COORD_BUSINESS_HOURS", raising=False)
+    thu6pm = ts(2026, 11, 12, 18)
+    # A 4-hour step reached at 6pm is due at noon the next business day, not 10pm.
+    assert sla.deadline(thu6pm, 4 * H, UTC, off=set()) == ts(2026, 11, 13, 12)
+    assert sla.business_seconds(thu6pm, ts(2026, 11, 12, 23), UTC, off=set()) == 0
+    assert sla.business_seconds(ts(2026, 11, 12, 6), ts(2026, 11, 12, 20), UTC, off=set()) == 9 * H
+    assert sla.limit_seconds({"business_days": 1}) == 9 * H
+    monkeypatch.setenv("COORD_BUSINESS_HOURS", "9-17")
+    assert sla.limit_seconds({"business_days": 2}) == 16 * H
+    assert sla.business_seconds(ts(2026, 11, 12, 6), ts(2026, 11, 12, 20), UTC, off=set()) == 8 * H
+    monkeypatch.setenv("COORD_BUSINESS_HOURS", "nonsense")
+    assert sla.business_hours() == sla.DEFAULT_HOURS
+
+
+def test_business_time_skips_holidays(monkeypatch):
+    from datetime import date
+    wed = ts(2026, 11, 25, 12)
+    mon = ts(2026, 11, 30, 12)
+    off = {date(2026, 11, 26), date(2026, 11, 27)}  # Thanksgiving Thu + Fri
+    assert sla.business_seconds(wed, mon, UTC, off=off) == 9 * H
+    assert sla.deadline(wed, 6 * H, UTC, off=off) == ts(2026, 11, 30, 9)
+    monkeypatch.setenv("COORD_HOLIDAYS", "2026-11-26,2026-11-27")
+    assert sla.business_seconds(wed, mon, UTC) == 9 * H  # defer.holidays by default
+
+
+def test_board_decisions_do_not_quiet_a_case(db):
+    c = db
+    root, case = _overdue_case(c)
+    sla.since(c, case["step_at"] - 1)
+    later = case["step_at"] + 30 * 24 * H
+    for stmt in ("Workflow engine: A3 case moved", "Covered: Ben loose end x closed", "Auto-deferred 3 Ben loose end(s)",
+                 "Return dates: reopened 2 loose end(s)", "Precedent: Ben loose end y settled"):
+        store.record_decision(c, stmt, "board", task_id=root)
+    c.execute("UPDATE decisions SET created_at=?", (later - 60,))
+    assert len(sla.minder_owed(c, later)["master"]) == 1
+    store.record_decision(c, "Chased LNK on the AMEX read", "it waits on their VPN", task_id=root)
+    c.execute("UPDATE decisions SET created_at=?", (later - 60,))
+    assert sla.minder_owed(c, later)["master"] == []
 
 
 def _overdue_case(c, who_follow_up=None):
@@ -88,7 +129,8 @@ def test_overdue_lists_case_step_time_over_and_who(db):
     assert (case["workflow"], case["step"], case["waits_on"]) == ("A3", "investigate", "agent")
     start = case["step_at"]
     assert sla.overdue(c, start + H) == []
-    later = sla.deadline(start, 2 * 24 * H) + 5 * H
+    lim = sla.status(dict(case), start)["limit"]
+    later = sla.deadline(start, lim + 5 * H)
     o = sla.overdue(c, later)
     assert [(x["case"], x["step"], x["waits_on"]) for x in o] == [(case["id"], "investigate", "agent")]
     assert o[0]["over"] == 5 * H

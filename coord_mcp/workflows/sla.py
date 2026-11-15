@@ -1,9 +1,11 @@
 """Step time limits: which open cases have sat at their step past its sla.
 
 Each step of a definition may carry an sla (definitions.py):
-{"business_hours": n} or {"business_days": n}. Business time skips Saturdays
-and Sundays in Ben's zone (COORD_TZ, else this machine's), the same rule
-commitments.working_days_after uses; a business day is 24 such hours.
+{"business_hours": n} or {"business_days": n}. Business time counts only
+business hours (COORD_BUSINESS_HOURS, default "8-17", in Ben's zone: COORD_TZ,
+else this machine's) on weekdays that are not defer holidays (defer.holidays,
+Ben's list in meta); a business day is one such span (9 hours by default). A
+4-hour step reached at 6pm is due at noon the next business day.
 
 A case is over when the business time since it reached its step
 (workflow_cases.step_at, kept by cases.sync) passes that step's limit.
@@ -15,7 +17,8 @@ Who it waits on decides where it goes:
 The minder lists only cases whose limit passed after it first ran
 (meta workflow_sla_since, set on that first pass): the backlog from before
 is on /workflows, and listing it every pass would bury the rest of the
-minder. A decision on any of the case's tasks after the limit passed, or for a Ben
+minder. A decision on any of the case's tasks after the limit passed (not one the
+board writes itself: AUTOMATED_PREFIXES), or for a Ben
 case a question presented on it after then, quiets the case: master has
 acted, or said why not. It returns when the case moves to another step and
 passes that step's limit.
@@ -33,7 +36,33 @@ from typing import Any
 from . import definitions as defs
 
 HOUR = 3600
-DAY = 24 * HOUR
+DEFAULT_HOURS = (8.0, 17.0)
+
+
+def business_hours() -> tuple[float, float]:
+    """(start, end) local hours of the business day: COORD_BUSINESS_HOURS
+    ("8-17", "8:30-17"), else 8-17. A bad value falls back to the default."""
+    raw = os.environ.get("COORD_BUSINESS_HOURS", "").strip()
+    if not raw:
+        return DEFAULT_HOURS
+
+    def h(x: str) -> float:
+        hh, _, mm = x.strip().partition(":")
+        return float(hh) + (float(mm) / 60 if mm else 0.0)
+    try:
+        a, b = (h(x) for x in raw.split("-", 1))
+    except ValueError:
+        return DEFAULT_HOURS
+    return (a, b) if 0 <= a < b <= 24 else DEFAULT_HOURS
+
+
+def day_seconds() -> int:
+    """Seconds in one business day (9 hours by default)."""
+    a, b = business_hours()
+    return int((b - a) * HOUR)
+
+
+DAY = day_seconds()  # one business day, at import; limit_seconds reads the env each call
 
 
 SINCE_KEY = "workflow_sla_since"
@@ -62,7 +91,7 @@ def limit_seconds(sla: dict[str, Any] | None) -> int | None:
     if "business_hours" in sla:
         return int(float(sla["business_hours"]) * HOUR)
     if "business_days" in sla:
-        return int(float(sla["business_days"]) * DAY)
+        return int(float(sla["business_days"]) * day_seconds())
     return None
 
 
@@ -71,36 +100,56 @@ def _tz(tz: Any = None):
     return ctz(tz)
 
 
-def business_seconds(start: int, end: int, tz: Any = None) -> int:
-    """Seconds between start and end that fall on a weekday, local time."""
+def _off(off: Any = None) -> set:
+    if off is not None:
+        return off
+    from .. import defer
+    return defer.holidays()
+
+
+def _windows(cur: datetime, z: Any, off: set):
+    """(open, close) business windows from cur's day on, as aware datetimes."""
+    a, b = business_hours()
+    d = cur.date()
+    while True:
+        if d.weekday() < 5 and d not in off:
+            base = datetime.combine(d, dtime(0), tzinfo=z)
+            yield base + timedelta(hours=a), base + timedelta(hours=b)
+        d += timedelta(days=1)
+
+
+def business_seconds(start: int, end: int, tz: Any = None, off: Any = None) -> int:
+    """Seconds between start and end inside business hours, local time,
+    on weekdays that are not holidays (`off`, else defer.holidays())."""
     if end <= start:
         return 0
     z = _tz(tz)
     cur = datetime.fromtimestamp(start, z)
     stop = datetime.fromtimestamp(end, z)
     total = 0.0
-    while cur < stop:
-        nxt = datetime.combine(cur.date() + timedelta(days=1), dtime(0), tzinfo=z)
-        seg_end = min(nxt, stop)
-        if cur.weekday() < 5:
-            total += seg_end.timestamp() - cur.timestamp()
-        cur = seg_end
+    for o, c in _windows(cur, z, _off(off)):
+        if o >= stop:
+            break
+        lo, hi = max(o, cur), min(c, stop)
+        if hi > lo:
+            total += hi.timestamp() - lo.timestamp()
     return int(total)
 
 
-def deadline(start: int, limit: int, tz: Any = None) -> int:
+def deadline(start: int, limit: int, tz: Any = None, off: Any = None) -> int:
     """The moment `limit` business seconds after `start` have passed."""
     z = _tz(tz)
     cur = datetime.fromtimestamp(start, z)
     left = float(limit)
-    while True:
-        nxt = datetime.combine(cur.date() + timedelta(days=1), dtime(0), tzinfo=z)
-        if cur.weekday() < 5:
-            span = nxt.timestamp() - cur.timestamp()
-            if left <= span:
-                return int(cur.timestamp() + left)
-            left -= span
-        cur = nxt
+    for o, c in _windows(cur, z, _off(off)):
+        lo = max(o, cur)
+        if c <= lo:
+            continue
+        span = c.timestamp() - lo.timestamp()
+        if left <= span:
+            return int(lo.timestamp() + left)
+        left -= span
+    raise AssertionError("unreachable")
 
 
 def _has_cases(conn: sqlite3.Connection) -> bool:
@@ -112,7 +161,7 @@ def _fmt(sec: int) -> str:
     return f"{h:.0f}h" if h < 48 else f"{h / 24:.0f}bd"
 
 
-def status(case: dict[str, Any], now: int, tz: Any = None) -> dict[str, Any] | None:
+def status(case: dict[str, Any], now: int, tz: Any = None, off: Any = None) -> dict[str, Any] | None:
     """{limit, due_at, over, step_name, who} for an open case whose step has
     an sla; None otherwise. `over` is business seconds past the limit (<= 0
     while still inside it)."""
@@ -124,14 +173,25 @@ def status(case: dict[str, Any], now: int, tz: Any = None) -> dict[str, Any] | N
     if lim is None:
         return None
     since = case.get("step_at") or case.get("created_at")
-    used = business_seconds(since, now, tz)
-    return {"limit": lim, "due_at": deadline(since, lim, tz), "over": used - lim,
+    off = _off(off)
+    used = business_seconds(since, now, tz, off)
+    return {"limit": lim, "due_at": deadline(since, lim, tz, off), "over": used - lim,
             "step_name": st["name"], "who": st["who"], "sla": st["sla"]}
 
 
+# Decisions the board writes by itself (engine steps, landing rules, expiry,
+# return dates, bookkeeping). They land on case tasks but are not master
+# acting on the case, so they never quiet it.
+AUTOMATED_PREFIXES = ("Workflow engine:", "Engine drafted reply", "Covered:", "Auto-deferred",
+                      "Return dates", "Precedent:", "Master default: Ben loose end", "Restated deliverable",
+                      "Pipeline note")
+
+
 def _quiet(conn: sqlite3.Connection, case_id: str, after: int, ben: bool) -> bool:
+    skip = " ".join(f"AND substr(d.statement, 1, {len(p)}) <> ?" for p in AUTOMATED_PREFIXES)
+    pats = list(AUTOMATED_PREFIXES)
     if conn.execute("SELECT 1 FROM decisions d JOIN tasks t ON t.id=d.task_id "
-                    "WHERE t.case_id=? AND d.created_at > ? LIMIT 1", (case_id, after)).fetchone():
+                    f"WHERE t.case_id=? AND d.created_at > ? {skip} LIMIT 1", (case_id, after, *pats)).fetchone():
         return True
     if ben and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='questions'").fetchone():
         return conn.execute(
@@ -149,10 +209,12 @@ def overdue(conn: sqlite3.Connection, now: int, tz: Any = None, quiet: bool = Tr
     cases master has acted on since the limit passed are left out."""
     if not _has_cases(conn):
         return []
+    from .. import defer
+    off = defer.holidays(conn)
     out = []
     for r in conn.execute("SELECT * FROM workflow_cases WHERE state='open' AND step IS NOT NULL"):
         c = dict(r)
-        s = status(c, now, tz)
+        s = status(c, now, tz, off)
         if not s or s["over"] <= 0:
             continue
         if quiet and _quiet(conn, c["id"], s["due_at"], c["waits_on"] == "ben"):

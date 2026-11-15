@@ -31,7 +31,7 @@ const saysClear = (text: string) =>
 
 const TASK_ID = /"task_id"\s*:\s*\\?"([0-9a-f]{12})\\?"/
 
-const DO_TASK = /Do task ([0-9a-f]{12})/
+const DO_TASK = /bDo task ([0-9a-f]{12})b/
 const DASH = 'http://127.0.0.1:8765'
 
 const bare = (tool: string) => String(tool).split('__').pop() ?? ''
@@ -87,22 +87,51 @@ export const register: Register = on => {
     if (name === 'send_message' || name === 'SendMessage') {
       const sent = JSON.stringify(e)
       for (const id of [...pending.keys()]) if (sent.includes(id)) pending.delete(id)
-      const ran = await next(e)
-      if (ran.deny !== undefined || ran.isError) return ran
-      // A hand-sent dispatch: stamp it on the board, so auto-dispatch counts
-      // that session busy before the client picks the task up (2026-11-14).
+      // A hand-sent dispatch is stamped on the board in two steps (2026-11-14),
+      // so auto-dispatch counts that session busy from before the send until
+      // the client picks the task up: a pending claim now, taken under the
+      // same lock auto-dispatch claims with, then sent or failed from the
+      // result. A 409 means auto-dispatch is sending to that session (or that
+      // task) this moment: the hand-send is refused, one task in flight.
       const params = ((e as Record<string, unknown>).params ?? {}) as Record<string, unknown>
       const id = DO_TASK.exec(String(params.message ?? ''))?.[1]
-      if (id) {
-        const session = String(params.session_id ?? params.to ?? '')
+      if (!id) return next(e)
+      const session = String(params.session_id ?? params.to ?? '')
+      const notes: string[] = []
+      const stamp = async (phase: string, detail = '') => {
         try {
-          await $.http.fetch(`${DASH}/api/dispatch/manual`, {
+          const r = await $.http.fetch(`${DASH}/api/dispatch/manual`, {
             method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: `task_id=${encodeURIComponent(id)}&session_id=${encodeURIComponent(session)}`,
+            body: `task_id=${encodeURIComponent(id)}&session_id=${encodeURIComponent(session)}` +
+              `&phase=${phase}&detail=${encodeURIComponent(detail.slice(0, 400))}`,
           })
-        } catch { /* the stamp is a hint; a down dashboard must not fail the send */ }
+          if (r.ok) return null
+          let body: { conflict?: boolean; error?: string } = {}
+          try { body = JSON.parse(r.text) } catch { /* not JSON */ }
+          if (body.conflict) return body
+          notes.push(`coord-rules: the board refused the ${phase} dispatch stamp for ${id}: ` +
+            `${(body.error ?? r.text ?? '').slice(0, 200)}`)
+        } catch (err) {
+          // The stamp is a hint; a down dashboard must not fail the send.
+          notes.push(`coord-rules: could not stamp ${id} (${phase}) on the board: ${String(err).slice(0, 160)}`)
+        }
+        return null
       }
-      return ran
+      const conflict = await stamp('pending')
+      if (conflict) {
+        return { deny: `coord-rules: not sending task ${id} by hand: ${conflict.error ?? 'auto-dispatch is sending now'}` }
+      }
+      const ran = await next(e)
+      const said = String(ran.text ?? '')
+      // Only a result that says delivered or queued put the task in flight;
+      // anything else did not land, and stamping it would hide it from
+      // auto-dispatch and the minder for 15-30 minutes.
+      const landed = ran.deny === undefined && !ran.isError &&
+        /\b(delivered|queued)\b/i.test(said) && !/\b(not|never|un)\s*(be(en)?\s+)?(delivered|queued)\b/i.test(said)
+      await stamp(landed ? 'sent' : 'failed', landed ? '' : (ran.deny ?? said))
+      if (!notes.length) return ran
+      $.ui.toast(notes.join(' ').slice(0, 300), { timeoutMs: 12000 })
+      return { ...ran, context: [...(ran.context ?? []), ...notes] }
     }
 
     if (name === 'coord_record_decision') {

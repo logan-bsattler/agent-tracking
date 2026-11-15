@@ -147,7 +147,42 @@ def test_holidays_are_not_business_days(c, monkeypatch):
     assert defer._add_business(date(2026, 11, 25), 1) == date(2026, 11, 30)  # Thanksgiving Thu+Fri, weekend
     defer.set_holidays(c, ["2026-11-25"])
     assert defer.holidays(c) == {date(2026, 11, 25)}
-    assert defer._add_business(date(2026, 11, 24), 1) == date(2026, 11, 26)
+    assert defer._add_business(date(2026, 11, 24), 1, c) == date(2026, 11, 26)
+
+
+def test_parse_reads_bens_holidays_without_ensure(c, tmp_path, monkeypatch):
+    # A fresh MCP process: nothing has run ensure(), so no cache. The first defer
+    # must still honour Ben's list in meta, and a later --set from another
+    # process (a second connection) must reach a long-running one.
+    from datetime import date
+    monkeypatch.delenv("COORD_HOLIDAYS")
+    defer.set_holidays(c, ["2026-11-25"])
+    monkeypatch.setattr(defer, "_holidays", None)
+    t = int(datetime(2026, 11, 24, 12).timestamp())  # a Tuesday
+    assert defer.day(defer.parse("1", t, conn=c)) == "2026-11-26"
+    other = connect(tmp_path / "t.db")
+    try:
+        defer.set_holidays(other, ["2026-11-26"])
+    finally:
+        other.close()
+    assert defer.day(defer.parse("1", t, conn=c)) == "2026-11-25"  # re-read, not the stale set
+    assert defer.holidays(c) == {date(2026, 11, 26)}
+
+
+def test_bad_holiday_entries_are_skipped(c, monkeypatch, capsys):
+    from datetime import date
+    monkeypatch.setenv("COORD_HOLIDAYS", "2026-11-26, 2026-13-01,nope")
+    assert defer.holidays(c) == {date(2026, 11, 26)}
+    defer.ensure(c)  # never raises on a typo
+    assert "2026-13-01" in capsys.readouterr().err
+    monkeypatch.delenv("COORD_HOLIDAYS")
+    c.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (defer.HOLIDAYS_KEY, "2026-11-27,2026-11-3x"))
+    assert defer.holidays(c) == {date(2026, 11, 27)}
+    queue.stale(c)  # daily expiry still runs
+
+
+def test_default_holidays_observe_each_new_year():
+    assert "2026-12-31" in defer.DEFAULT_HOLIDAYS and "2027-12-31" in defer.DEFAULT_HOLIDAYS
 
 
 def test_an_item_back_on_its_date_may_expire_again(c):
@@ -230,3 +265,13 @@ def test_engine_still_stops_at_an_outward_hold(e):
     did = engine.run(e)
     assert did and "stop" in did[0] and "spawn" not in did[0]
     assert e.execute("SELECT COUNT(*) FROM tasks WHERE kind='draft_reply'").fetchone()[0] == 0
+
+
+def test_return_chip_uses_bens_zone(monkeypatch):
+    # Midnight at UTC+14 is the previous day on every machine, so a chip in
+    # the machine's zone would show 11-19.
+    from zoneinfo import ZoneInfo
+    monkeypatch.setenv("COORD_TZ", "Pacific/Kiritimati")
+    ts = int(datetime(2026, 11, 20, 0, 0, tzinfo=ZoneInfo("Pacific/Kiritimati")).timestamp())
+    chip = report.return_chip({"return_on": ts})
+    assert "returns Fri 11-20" in chip and defer.day(ts) == "2026-11-20"
