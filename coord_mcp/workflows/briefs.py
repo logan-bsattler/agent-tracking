@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
-from .cases import ensure_workflows
+from .cases import have_workflows
 
 NO_CLIENT = ("Internal", "", None)
 DEFAULT_SINCE = 7 * 86400
@@ -59,16 +59,27 @@ def today(conn: sqlite3.Connection, t: int) -> dict[str, Any]:
 
 
 def _previous(conn: sqlite3.Connection, m: sqlite3.Row) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT * FROM meetings WHERE start_ts < ? AND cancelled=0 AND id != ? AND status != 'skipped' "
-        "AND ((client IS NOT NULL AND client = ? AND client NOT IN ('Internal')) OR organizer = ?) "
-        "ORDER BY start_ts DESC LIMIT 1", (m["start_ts"], m["id"], m["client"], m["organizer"])).fetchone()
+    """The last earlier meeting with the same client (not all-day, not
+    cancelled or skipped). An unmapped meeting matches on organizer, but only
+    among meetings equally unmapped, so the window never anchors on a meeting
+    with some other client."""
+    base = ("SELECT * FROM meetings WHERE start_ts < ? AND cancelled=0 AND all_day=0 AND id != ? "
+            "AND status != 'skipped' AND ")
+    if m["client"] not in NO_CLIENT:
+        return conn.execute(base + "client = ? ORDER BY start_ts DESC LIMIT 1",
+                            (m["start_ts"], m["id"], m["client"])).fetchone()
+    if not m["organizer"]:
+        return None
+    return conn.execute(base + "organizer = ? AND COALESCE(client, '') = COALESCE(?, '') "
+                        "ORDER BY start_ts DESC LIMIT 1", (m["start_ts"], m["id"], m["organizer"],
+                                                           m["client"])).fetchone()
 
 
 def brief(conn: sqlite3.Connection, meeting_id: str, t: int) -> dict[str, Any] | None:
     from .. import commitments, store
     from . import definitions as defs, name
-    ensure_workflows(conn)
+    # Read-only: a board without the case or commitment tables shows none,
+    # it is not migrated by opening a brief.
     m = conn.execute("SELECT * FROM meetings WHERE id=?", (meeting_id,)).fetchone()
     if m is None:
         return None
@@ -83,13 +94,16 @@ def brief(conn: sqlite3.Connection, meeting_id: str, t: int) -> dict[str, Any] |
         return out
 
     cases = []
-    for c in conn.execute("SELECT * FROM workflow_cases WHERE state='open' AND client=? ORDER BY step_at", (client,)):
+    rows = conn.execute("SELECT * FROM workflow_cases WHERE state='open' AND client=? ORDER BY step_at",
+                        (client,)).fetchall() if have_workflows(conn) else []
+    for c in rows:
         d = defs.get(c["workflow"])
         st = next((s for s in (d or {}).get("steps") or [] if s["key"] == c["step"]), None)
         cases.append({**dict(c), "workflow_name": name(c["workflow"]),
                       "step_name": st["name"] if st else (c["step"] or "—")})
     out["cases"] = cases
-    out["commitments"] = commitments.list_commitments(conn, client, "live")
+    have_com = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='commitments'").fetchone()
+    out["commitments"] = commitments.list_commitments(conn, client, "live") if have_com else []
     out["drafts"] = [d for d in store.draft_replies(conn, days=30, client=client)["drafts"]
                      if d.get("state") != "drafted"]
     out["questions"] = [dict(r) for r in conn.execute(
@@ -139,7 +153,8 @@ def render(b: dict[str, Any]) -> str:
     from ..report import _age, _task_link, esc, page
     m, t = b["meeting"], b["as_of"]
     who = esc(b["client"] or "no client mapped")
-    prev = (f'since the last meeting with them, {esc(b["previous"]["subject"])} ({_day(b["previous"]["start_ts"])})'
+    # Plain text: card() escapes its title (escaping here too showed "R&amp;D").
+    prev = (f'since the last meeting with them, {b["previous"]["subject"]} ({_day(b["previous"]["start_ts"])})'
             if b["previous"] else "in the last 7 days (no earlier meeting with them on the calendar)")
     sub = (f'{_day(m["start_ts"])}–{_clock(m["end_ts"])} · {who} · organizer {esc(m["organizer"] or "—")} · '
            f'{m["attendees"] or 0} attendees. Built from the board when opened; read-only.')

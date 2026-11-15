@@ -408,8 +408,26 @@ def pending_gate(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | Non
     return None
 
 
+HOLD_REF = "hold:"
+
+
+def hold_live(conn: sqlite3.Connection, hold_id: str) -> bool:
+    """A hold decision not yet lifted: not superseded, and no later decision
+    that cites it says it is lifted or released."""
+    d = conn.execute("SELECT created_at FROM decisions WHERE id=?", (hold_id,)).fetchone()
+    if d is None or conn.execute("SELECT 1 FROM decisions WHERE supersedes=?", (hold_id,)).fetchone():
+        return False
+    return not any(_LIFT.search(r["statement"] or "") for r in conn.execute(
+        "SELECT statement FROM decisions WHERE created_at >= ? AND id != ? AND statement LIKE ?",
+        (d["created_at"], hold_id, f"%{hold_id}%")))
+
+
 def ben_open(conn: sqlite3.Connection, ref: str) -> bool:
-    """A Ben loose end still open or deferred, or a question (q<id>) not closed."""
+    """A Ben loose end still open or deferred, a question (q<id>) not closed,
+    or `hold:<decision id>`, a gate on a hold with no Ben item of its own
+    (open until the hold is lifted, hold_live)."""
+    if ref.startswith(HOLD_REF):
+        return hold_live(conn, ref[len(HOLD_REF):])
     if m := re.fullmatch(r"q(\d+)", ref):
         q = conn.execute("SELECT closed_at FROM questions WHERE id=?", (int(m.group(1)),)).fetchone()
         return q is not None and q["closed_at"] is None
@@ -563,7 +581,7 @@ def case_hold(conn: sqlite3.Connection, task_ids: list[str], spawn_kind: str) ->
         f"SELECT id FROM follow_ups WHERE task_id IN ({','.join('?' * len(task_ids))})", task_ids)}
     # Every hold on the case is weighed, and a stop wins: an outward hold
     # recorded after an internal one must still stop the spawn.
-    passed: dict[str, dict[str, Any]] = {}
+    passed: dict[str, list[dict[str, Any]]] = {}
     for h in find_holds(conn):
         refs = {w["ref"] for w in h["work"]} | {w.get("task_id") for w in h["work"] if w.get("task_id")}
         if h["task_id"]:
@@ -572,18 +590,19 @@ def case_hold(conn: sqlite3.Connection, task_ids: list[str], spawn_kind: str) ->
         if not refs & ids:
             continue
         if h["verdict"] == "proceed" and spawn_kind != "checkin" and queue.switch(conn, "hold_rule"):
-            passed.setdefault("proceed", h)
+            passed.setdefault("proceed", []).append(h)
         elif spawn_kind == "draft_reply" and h["facing"] != "outward":
             # Ben 2026-11-14 (engine.REPLY_RULING): drafts never send, so a
             # hold short of the send does not stop the draft.
-            passed.setdefault("draft", h)
+            passed.setdefault("draft", []).append(h)
         else:
             return {"stop": f"held by decision {h['decision_id']} ({h['reason']})", "hold": h["decision_id"]}
-    if "proceed" in passed:
-        return {"proceed": passed["proceed"]}
-    if "draft" in passed:
-        return {"draft": passed["draft"]}
-    return None
+    if not passed:
+        return None
+    # Every passed hold, so the engine gates on all of them: 'proceeds' and
+    # 'drafts' list each; 'proceed' / 'draft' stay as the first of each.
+    return {**{k: v[0] for k, v in passed.items()}, "proceeds": passed.get("proceed", []),
+            "drafts": passed.get("draft", [])}
 
 
 # --------------------------------------------------------------- report

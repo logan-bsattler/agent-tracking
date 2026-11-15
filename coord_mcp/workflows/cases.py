@@ -85,6 +85,16 @@ def ensure_workflows(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_case ON tasks(case_id)")
 
 
+def have_workflows(conn: sqlite3.Connection) -> bool:
+    """The case tables and tasks.case_id / case_step exist. Read paths check
+    this and show nothing rather than migrating the file (ensure_workflows
+    is for writers: sync, the engine, attach)."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_case_events'").fetchone() is None:
+        return False
+    have = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    return all(col.split()[0] in have for col in _TASK_COLS)
+
+
 def enabled() -> bool:
     """Case sync rides the dashboard loop unless COORD_WORKFLOW_SYNC=0."""
     return os.environ.get("COORD_WORKFLOW_SYNC", "1").strip() not in ("0", "false", "off", "")
@@ -145,10 +155,13 @@ def _attach(conn: sqlite3.Connection, origin: str) -> set[str]:
     return touched
 
 
-def _step_tasks(conn: sqlite3.Connection, case: sqlite3.Row, d: dict[str, Any] | None) -> list[sqlite3.Row]:
-    """The case's tasks, oldest first, each given its step if it has none."""
+def _assign_steps(conn: sqlite3.Connection, case: Any, d: dict[str, Any] | None) -> tuple[list[sqlite3.Row],
+                                                                                         dict[str, str]]:
+    """The case's tasks, oldest first, and the step each one without a step
+    would be given ({task id: step}). Reads only."""
     rows = conn.execute("SELECT * FROM tasks WHERE case_id=? ORDER BY created_at, id", (case["id"],)).fetchall()
     step_of: dict[str, str | None] = {r["id"]: r["case_step"] for r in rows}
+    updates: dict[str, str] = {}
     for r in rows:
         if r["case_step"] is None and d:
             after = defs.step_index(d, step_of.get(r["parent_id"] or "")) if r["parent_id"] else -1
@@ -158,8 +171,23 @@ def _step_tasks(conn: sqlite3.Connection, case: sqlite3.Row, d: dict[str, Any] |
                 spec = {}
             st = defs.step_for(d, r["kind"], spec if isinstance(spec, dict) else {}, after)
             if st:
-                conn.execute("UPDATE tasks SET case_step=? WHERE id=?", (st, r["id"]))
+                updates[r["id"]] = st
                 step_of[r["id"]] = st
+    return rows, updates
+
+
+def _step_tasks(conn: sqlite3.Connection, case: Any, d: dict[str, Any] | None,
+                write: bool = True) -> list[Any]:
+    """The case's tasks, oldest first, each given its step if it has none.
+    With write=False nothing is stored: rows come back as dicts carrying the
+    step they would get."""
+    rows, updates = _assign_steps(conn, case, d)
+    if not updates:
+        return rows
+    if not write:
+        return [{**dict(r), "case_step": updates.get(r["id"], r["case_step"])} for r in rows]
+    for tid, st in updates.items():
+        conn.execute("UPDATE tasks SET case_step=? WHERE id=?", (st, tid))
     return conn.execute("SELECT * FROM tasks WHERE case_id=? ORDER BY created_at, id", (case["id"],)).fetchall()
 
 
@@ -201,12 +229,9 @@ def where(conn: sqlite3.Connection, case: sqlite3.Row, d: dict[str, Any] | None,
             "since": max(t["completed_at"] or t["created_at"] for t in tasks), "task": last["id"]}
 
 
-def recompute(conn: sqlite3.Connection, case_id: str) -> dict[str, Any]:
-    case = conn.execute("SELECT * FROM workflow_cases WHERE id=?", (case_id,)).fetchone()
-    d = defs.get(case["workflow"])
-    tasks = _step_tasks(conn, case, d)
-    if not tasks:
-        return {"state": case["state"]}
+def _derive(conn: sqlite3.Connection, case: Any, d: dict[str, Any] | None,
+            tasks: list[Any]) -> tuple[dict[str, Any], str | None, bool, tuple]:
+    """(where, commitment, moved, the case row's new derived columns)."""
     w = where(conn, case, d, tasks)
     commitment = None
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='commitments'").fetchone():
@@ -215,6 +240,36 @@ def recompute(conn: sqlite3.Connection, case_id: str) -> dict[str, Any]:
                          "ORDER BY created_at DESC LIMIT 1", ids).fetchone()
         commitment = r["id"] if r else None
     moved = (w["step"], w["waits_on"], w["state"]) != (case["step"], case["waits_on"], case["state"])
+    cols = (w["state"], w["step"], w["since"] if moved or case["step_at"] is None else case["step_at"],
+            w["waits_on"], commitment, w["since"] if w["state"] == "done" else None)
+    return w, commitment, moved, cols
+
+
+_DERIVED = ("state", "step", "step_at", "waits_on", "commitment_id", "closed_at")
+
+
+def _stale(conn: sqlite3.Connection, case_id: str) -> bool:
+    """Would recompute() write anything for this case? Reads only."""
+    case = conn.execute("SELECT * FROM workflow_cases WHERE id=?", (case_id,)).fetchone()
+    if case is None:
+        return False
+    d = defs.get(case["workflow"])
+    rows, updates = _assign_steps(conn, case, d)
+    if updates:
+        return True
+    if not rows:
+        return False
+    _, _, moved, cols = _derive(conn, case, d, rows)
+    return moved or cols != tuple(case[c] for c in _DERIVED)
+
+
+def recompute(conn: sqlite3.Connection, case_id: str) -> dict[str, Any]:
+    case = conn.execute("SELECT * FROM workflow_cases WHERE id=?", (case_id,)).fetchone()
+    d = defs.get(case["workflow"])
+    tasks = _step_tasks(conn, case, d)
+    if not tasks:
+        return {"state": case["state"]}
+    w, _, moved, cols = _derive(conn, case, d, tasks)
     if moved:
         if w["state"] == "done" and case["state"] != "done":
             event(conn, case_id, "closed", w["step"], w["task"], None, ts=w["since"])
@@ -222,34 +277,52 @@ def recompute(conn: sqlite3.Connection, case_id: str) -> dict[str, Any]:
             event(conn, case_id, "reopened", w["step"], w["task"], w["waits_on"], ts=w["since"])
         else:
             event(conn, case_id, "step", w["step"], w["task"], w["waits_on"], ts=w["since"])
-    conn.execute("""UPDATE workflow_cases SET state=?, step=?, step_at=?, waits_on=?, commitment_id=?,
-                    closed_at=?, updated_at=? WHERE id=?""",
-                 (w["state"], w["step"], w["since"] if moved or case["step_at"] is None else case["step_at"],
-                  w["waits_on"], commitment, w["since"] if w["state"] == "done" else None, now(), case_id))
+    if moved or cols != tuple(case[c] for c in _DERIVED):
+        # updated_at moves only when something did (checks.py orders by it).
+        conn.execute("""UPDATE workflow_cases SET state=?, step=?, step_at=?, waits_on=?, commitment_id=?,
+                        closed_at=?, updated_at=? WHERE id=?""", (*cols, now(), case_id))
     return w
 
 
 def sync(conn: sqlite3.Connection, origin: str = "sync", every: bool = False) -> dict[str, int]:
     """Attach new tasks to cases and re-derive where every open case stands
-    (every case when `every`). Idempotent; one transaction."""
+    (every case when `every`). Idempotent.
+
+    Short locks: the attach is one transaction, and each case is checked
+    with reads first and re-derived in its own transaction only when
+    something about it changed, so a quiet pass writes nothing."""
     ensure_workflows(conn)
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        touched = _attach(conn, origin)
-        q = "SELECT id FROM workflow_cases" + ("" if every else " WHERE state='open'")
-        ids = touched | {r["id"] for r in conn.execute(q)}
-        # A loose end resolved or a task closed on a case already done can reopen it.
-        if not every:
-            ids |= {r["case_id"] for r in conn.execute(
-                "SELECT DISTINCT t.case_id FROM follow_ups f JOIN tasks t ON t.id=f.task_id "
-                "JOIN workflow_cases c ON c.id=t.case_id WHERE f.state='open' AND c.state='done'")}
-        for cid in ids:
+    touched: set[str] = set()
+    if conn.execute("SELECT 1 FROM tasks WHERE case_id IS NULL LIMIT 1").fetchone():
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            touched = _attach(conn, origin)
+            conn.execute("COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    q = "SELECT id FROM workflow_cases" + ("" if every else " WHERE state='open'")
+    ids = touched | {r["id"] for r in conn.execute(q)}
+    # A loose end resolved or a task closed on a case already done can reopen it.
+    if not every:
+        ids |= {r["case_id"] for r in conn.execute(
+            "SELECT DISTINCT t.case_id FROM follow_ups f JOIN tasks t ON t.id=f.task_id "
+            "JOIN workflow_cases c ON c.id=t.case_id WHERE f.state='open' AND c.state='done'")}
+    changed = 0
+    for cid in sorted(ids):
+        if not _stale(conn, cid):
+            continue
+        conn.execute("BEGIN IMMEDIATE")
+        try:
             recompute(conn, cid)
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    return {"attached_cases": len(touched), "recomputed": len(ids)}
+            conn.execute("COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        changed += 1
+    return {"attached_cases": len(touched), "recomputed": len(ids), "changed": changed}
 
 
 def backfill(conn: sqlite3.Connection) -> dict[str, int]:
@@ -262,7 +335,8 @@ def backfill(conn: sqlite3.Connection) -> dict[str, int]:
 
 def case_detail(conn: sqlite3.Connection, case_id: str) -> dict[str, Any] | None:
     """A case with its links: intent, tasks, decisions, latest draft, commitment, events."""
-    ensure_workflows(conn)
+    if not have_workflows(conn):
+        return None
     c = conn.execute("SELECT * FROM workflow_cases WHERE id=?", (case_id,)).fetchone()
     if c is None:
         return None
@@ -284,7 +358,8 @@ def case_detail(conn: sqlite3.Connection, case_id: str) -> dict[str, Any] | None
 def list_cases(conn: sqlite3.Connection, open_only: bool = False, workflow: str | None = None,
                client: str | None = None) -> list[dict[str, Any]]:
     """Cases newest first, as plain dicts (the CLI and /workflows)."""
-    ensure_workflows(conn)
+    if not have_workflows(conn):
+        return []
     q, args = "SELECT * FROM workflow_cases WHERE 1=1", []
     if open_only:
         q += " AND state='open'"
