@@ -453,7 +453,11 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # deferred item on its return date.
             "defer_return": True,
             # the weekly workflow miner (workflows/propose.py) files its proposals
-            "workflow_propose": True}
+            "workflow_propose": True,
+            # pipeline lines (coord_mcp/pipeline.py, Ben 2026-11-15): a root
+            # client task must name a pipeline item or a proposal; the mod
+            # creates the SharePoint item for a proposal Ben approved.
+            "require_pipeline": True, "pipeline_create": True}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (
