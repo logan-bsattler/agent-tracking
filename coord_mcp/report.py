@@ -1390,6 +1390,35 @@ def open_path(p: Path, how: str = "open") -> None:
         os.startfile(str(p))  # type: ignore[attr-defined]  # Windows only, as is this dashboard
 
 
+def _workflow_kv(w: dict[str, Any] | None, tid: str) -> str:
+    """The workflow and step rows of a task page's key/value card: which
+    workflow its case runs, this task's step among the workflow's steps, and
+    where the case stands now when it has moved past this task."""
+    if not w:
+        return ""
+    wf = (f'<a class="drill" href="/workflows?wf={quote(w["workflow"] or "", safe="")}">'
+          f'{esc(w["workflow"] or "—")} {esc(w["workflow_name"] or "")}</a>')
+    if w["root_task_id"] and w["root_task_id"] != tid:
+        wf += (f' · case root <a class="drill" href="/board/task/{esc(w["root_task_id"])}">'
+               f'<code>{esc(w["root_task_id"][:8])}</code></a>')
+    if w["step"]:
+        step = (f'<b>{esc(w["step_name"])}</b>'
+                + (f' <span class="muted">(step {w["n"]} of {w["of"]})</span>' if w["n"] else ""))
+    else:
+        step = '<span class="muted">not placed yet</span>'
+    if w["steps"]:
+        step += ('<div class="muted" style="font-size:12px">' + " → ".join(
+            f'<b>{esc(s["name"])}</b>' if s["key"] == w["step"] else esc(s["name"]) for s in w["steps"]) + "</div>")
+    if w["case_state"] != "open":
+        step += f'<div class="muted">case {esc(w["case_state"])}</div>'
+    elif w["case_at"] and w["case_at"] != w["step"]:
+        step += (f'<div class="muted">case now at {esc(w["case_at_name"] or "")}'
+                 + (f', waiting on {esc(w["waits_on"])}' if w["waits_on"] else "") + "</div>")
+    elif w["waits_on"]:
+        step += f'<div class="muted">waiting on {esc(w["waits_on"])}</div>'
+    return f"<dt>workflow</dt><dd>{wf}</dd><dt>step</dt><dd>{step}</dd>"
+
+
 def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False) -> str:
     """One task in full: what was asked, what came back, and how it got there."""
     if d is None:
@@ -1412,6 +1441,7 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
         + (f'<dt>project</dt><dd><a class="drill" href="/client/{quote(proj["client"], safe="")}#p-{esc(proj["id"])}">'
            f'{esc(proj["title"])}</a>{"" if proj["own"] else " <span class=muted>(inherited)</span>"}</dd>'
            if proj else "")
+        + _workflow_kv(d.get("workflow"), d["id"])
         + "</dl></div>"]
     files = d.get("files") or []
     link = _linker(d["id"], files)

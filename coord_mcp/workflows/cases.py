@@ -355,6 +355,42 @@ def case_detail(conn: sqlite3.Connection, case_id: str) -> dict[str, Any] | None
                 "ORDER BY ts, rowid", (case_id,))]}
 
 
+def task_steps(conn: sqlite3.Connection, task_ids: list[str] | tuple[str, ...]) -> dict[str, dict[str, Any]]:
+    """{task id: where it sits in its workflow} for the tasks that are in a
+    case. Reads only: a task sync has not stepped yet shows its case with no
+    step rather than having one assigned here.
+
+    Each value: workflow, workflow_name, case_id, root_task_id, case_state,
+    step (key or None), step_name, n (1-based, 0 when unknown), of (step
+    count), steps ([{key, name, who}]), and the case's own current step and
+    waits_on, which differ from the task's once the case has moved on."""
+    ids = [t for t in dict.fromkeys(task_ids) if t]
+    if not ids or not have_workflows(conn):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        for r in conn.execute(
+                f"""SELECT t.id, t.case_step, c.id case_id, c.workflow, c.root_task_id, c.state case_state,
+                           c.step case_at, c.waits_on
+                    FROM tasks t JOIN workflow_cases c ON c.id = t.case_id
+                    WHERE t.id IN ({marks})""", chunk):
+            d = defs.get(r["workflow"])
+            steps = [{"key": s["key"], "name": s.get("name") or s["key"], "who": s.get("who")}
+                     for s in (d or {}).get("steps") or []]
+            names = {s["key"]: s["name"] for s in steps}
+            n = defs.step_index(d, r["case_step"]) + 1 if d and r["case_step"] else 0
+            out[r["id"]] = {
+                "workflow": r["workflow"], "workflow_name": (d or {}).get("name") or r["workflow"],
+                "case_id": r["case_id"], "root_task_id": r["root_task_id"], "case_state": r["case_state"],
+                "step": r["case_step"], "step_name": names.get(r["case_step"], r["case_step"]),
+                "n": n, "of": len(steps), "steps": steps,
+                "case_at": r["case_at"], "case_at_name": names.get(r["case_at"], r["case_at"]),
+                "waits_on": r["waits_on"]}
+    return out
+
+
 def list_cases(conn: sqlite3.Connection, open_only: bool = False, workflow: str | None = None,
                client: str | None = None) -> list[dict[str, Any]]:
     """Cases newest first, as plain dicts (the CLI and /workflows)."""

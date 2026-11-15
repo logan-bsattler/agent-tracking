@@ -506,6 +506,16 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
             if d["id"] in stalled:
                 d["stalled"] = True
         live.append(d)
+    # Where each task sits in its workflow case: two short keys, only on
+    # tasks in a case, so a board with no workflow tables reads as before.
+    from .workflows import cases
+    steps = cases.task_steps(conn, [d["id"] for d in live])
+    for d in live:
+        w = steps.get(d["id"])
+        if w:
+            d["workflow"] = w["workflow"]
+            if w["step"]:
+                d["step"] = f'{w["step"]} {w["n"]}/{w["of"]}' if w["n"] else w["step"]
     open_intents = conn.execute("SELECT COUNT(*) n FROM intents WHERE state='open'").fetchone()["n"]
     # Done is not finished when the result named next steps. Without this the
     # board reads "nothing open" while work remains. The cap used to be 30,
@@ -1750,6 +1760,8 @@ def task_detail(conn: sqlite3.Connection, task_id: str, root: Path | None = None
     if pid:
         p = projects.get(conn, pid)
         d["project"] = {"id": pid, "title": p["title"], "client": p["client"], "own": d.get("project_id") == pid}
+    from .workflows import cases
+    d["workflow"] = cases.task_steps(conn, [task_id]).get(task_id)
     d["decisions"] = [dict(x) for x in conn.execute(
         "SELECT id, statement, because, supersedes, created_at FROM decisions WHERE task_id=? ORDER BY created_at",
         (task_id,))]
