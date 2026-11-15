@@ -76,7 +76,7 @@ email -> coord_propose_intent -> intents (open, untrusted)
 | --- | --- | --- |
 | `coord_board` | team | counts by kind and state, open/failed task lines, open-intent count |
 | `coord_list_follow_ups` | team | open loose ends newest first, by task, client or owner |
-| `coord_create_task` | team | put a task on the board, get the contract echoed back |
+| `coord_create_task` | team | put a task on the board, get the contract echoed back; a root client task names `pipeline_task_id` or `pipeline_proposal` |
 | `coord_get_task` | team | teammate reads spec and expected result shape |
 | `coord_complete_task` | team | close with a validated result, or a typed failure |
 | `coord_file_draft` | team | client session files a draft Ben asked it for in chat: a finished `draft_reply` in one call |
@@ -340,6 +340,20 @@ Four of master's per-turn procedures run without it (2026-11-13):
   sharepoint-pipeline's `add_task_note`, and reports back
   (`/api/pipeline-note/done`), which records the `Pipeline note <id>: ...`
   decision. Off unless `COORD_AUTO_PIPELINE_NOTES=1`.
+- **Pipeline lines** (`coord_mcp/pipeline.py`, docs/pipeline-lines.md).
+  Every task rolls up to one SharePoint pipeline item, the timesheet line.
+  `coord_create_task` refuses a root client task that passes neither
+  `pipeline_task_id` nor `pipeline_proposal {title, origin_id?, priority?,
+  note?}` (switch `require_pipeline`, on); children and check-ins inherit.
+  A proposal links its tasks as `p:<id>` and puts one "Approve N proposed
+  pipeline items" item per client in Ben's queue. On `/pipeline` Ben
+  presses Create, Use existing or Drop. The worker's mod caches
+  `get_pipeline` every 30 minutes (`/api/pipeline/sync`), and each tick
+  claims one approved proposal (`/api/pipeline/create/claim`), creates it
+  with sharepoint-pipeline's `create_task` and reports back
+  (`/api/pipeline/create/done`), which relinks every `p:<id>` task to the
+  new item (switch `pipeline_create`, on). `python -m coord_mcp.pipeline`
+  has the CLI, including the per-client `backfill dump|apply`.
 
 ### Installing on another machine or account
 

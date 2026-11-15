@@ -32,6 +32,7 @@ def create_task(
     parent_id: str | None = None,
     from_intent: str | None = None,
     pipeline_task_id: str | None = None,
+    pipeline_proposal: Any = None,
 ) -> dict[str, Any]:
     if kind not in contracts.CONTRACTS:
         raise ValueError(
@@ -42,6 +43,9 @@ def create_task(
         raise ValueError(f"title is {len(title)} chars; cap is 80")
     from . import gate
     gate.check_checkin(conn, kind, spec)  # a CVC check-in needs its code approved
+    from . import pipeline
+    line_warnings = pipeline.check_create(conn, kind, spec, assigned_to, parent_id, pipeline_task_id,
+                                          pipeline_proposal)  # every chain names its line
     tid = _id()
     conn.execute(
         """INSERT INTO tasks(id, parent_id, kind, title, spec, state, assigned_to,
@@ -51,8 +55,16 @@ def create_task(
          pipeline_task_id),
     )
     out = {"task_id": tid, "kind": kind, "expected_result_shape": contracts.expected_shape(kind)}
+    if pipeline_proposal is not None:
+        prop = pipeline.propose(conn, assigned_to or "", pipeline_proposal, task_id=tid)
+        pipeline_task_id = prop["pipeline_task_id"]
+        conn.execute("UPDATE tasks SET pipeline_task_id=? WHERE id=?", (pipeline_task_id, tid))
+        out["pipeline_proposal"] = {"id": prop["id"], "reused": prop["reused"],
+                                    "next": "Ben approves it on /pipeline; its tasks move to the item when created"}
+    if pipeline_task_id:
+        out["pipeline_task_id"] = pipeline_task_id
     from . import queue
-    warnings = queue.create_warnings(conn, kind, spec, pipeline_task_id, parent_id)
+    warnings = line_warnings + queue.create_warnings(conn, kind, spec, pipeline_task_id, parent_id)
     # Case-step advice (workflows/checks.py, 2026-11-14): never a refusal.
     from .workflows import checks
     warnings += checks.create_warnings(conn, tid, kind, title, spec, assigned_to, parent_id, from_intent,

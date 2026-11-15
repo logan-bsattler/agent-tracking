@@ -64,11 +64,12 @@ async def main() -> int:
         r = await team.call_tool("coord_create_task", {"params": {
             "kind": "data_pull", "title": "Export Q3 usage",
             "spec": {"query": "usage where quarter = 'Q3'", "out": "C:/tmp/q3.csv"},
-            "assigned_to": "puller",
+            "assigned_to": "puller", "pipeline_task_id": "231",
         }})
         created = json.loads(text(r))
         task_id = created["task_id"]
         check("task created with contract echoed", "output_path" in created["expected_result_shape"])
+        check("root task carries its pipeline line", created.get("pipeline_task_id") == "231", text(r)[:200])
 
         r = await team.call_tool("coord_resolve_intent", {"params": {"intent_id": intent_id, "task_ids": [task_id]}})
         check("intent converted", json.loads(text(r))["state"] == "converted", text(r))
@@ -129,6 +130,21 @@ async def main() -> int:
         r = await team.call_tool("coord_list_follow_ups", {"params": {"client": "nobody"}})
         check("follow-up list answers with an empty, counted list",
               json.loads(text(r)) == {"follow_ups": [], "total": 0}, text(r))
+
+        # Pipeline lines (after the board check: a proposal leaves Ben an item).
+        # (require_pipeline, on by default): a root client task
+        # with no item is refused; one with a proposal proceeds on it.
+        r = await team.call_tool("coord_create_task", {"params": {
+            "kind": "investigation", "title": "No line", "spec": {"question": "x"}, "assigned_to": "puller"}})
+        check("root task with no line refused", "no pipeline item" in text(r), text(r)[:200])
+        r = await team.call_tool("coord_create_task", {"params": {
+            "kind": "investigation", "title": "On a proposal", "spec": {"question": "x"}, "assigned_to": "puller",
+            "pipeline_proposal": {"title": "Sales Order Change Audit", "origin_id": "DEV-39"}}})
+        prop = json.loads(text(r))
+        check("root task proceeds on a pipeline proposal",
+              str(prop.get("pipeline_task_id", "")).startswith("p:") and prop["pipeline_proposal"]["reused"] is False,
+              text(r)[:300])
+
 
     # A client session files a draft Ben asked it for in chat: one call, and it
     # is a finished draft_reply on the board for master to draft in Outlook.

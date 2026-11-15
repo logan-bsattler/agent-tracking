@@ -474,7 +474,12 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             "auto_checkin": True,
             # passive Ben steps close themselves (workflows/passive.py). Off: the first
             # dry run (2026-11-15) found real actions parked at those steps
-            "passive_close": False}
+            "passive_close": False,
+            # pipeline lines (coord_mcp/pipeline.py, Ben 2026-11-15): a root
+            # client task must name a pipeline item or a proposal; the mod
+            # creates the SharePoint item for a proposal Ben approved.
+            "require_pipeline": True, "pipeline_create": True}
+
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).
 SETTINGS = {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0,

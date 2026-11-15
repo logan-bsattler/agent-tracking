@@ -12,11 +12,19 @@ from coord_mcp import queue
 
 
 def pytest_configure(config):
+    config.addinivalue_line("markers", "pipeline_rule: enforce the pipeline-line rule on task creation")
     config.addinivalue_line("markers", "ben_checks: run with the Ben-queue landing checks at their real defaults")
 
 
 @pytest.fixture(autouse=True)
 def _ben_checks_off(request, monkeypatch):
+    if request.node.get_closest_marker("pipeline_rule") is None:
+        # The pipeline-line rule refuses root client tasks with no item; most
+        # tests create bare tasks, so only tests marked pipeline_rule get it.
+        from coord_mcp import pipeline
+        real = pipeline._switch
+        monkeypatch.setattr(pipeline, "_switch",
+                            lambda conn, name: False if name == "require_pipeline" else real(conn, name))
     if request.node.get_closest_marker("ben_checks") is None:
         monkeypatch.setattr(queue, "SWITCHES", {k: False for k in queue.SWITCHES})
     else:
