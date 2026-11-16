@@ -575,7 +575,13 @@ class ResolveIntentInput(Strict):
     ben_item: BenItemInput | None = Field(
         default=None,
         description="An ask only Ben can answer that becomes no task (e.g. an unwired client): leaves a loose "
-                    "end for Ben with no task, in his queue under `client`. Its id goes into the note.")
+                    "end for Ben with no task, in his queue under `client`. Its id goes into the note. "
+                    "For an email, email-reply or email-status intent from a wired client it needs task_ids "
+                    "(the draft_reply) or no_draft.")
+    no_draft: str | None = Field(
+        default=None, max_length=200,
+        description="Why no draft_reply can be written for a wired client's email (even a draft would promise "
+                    "work no task covers). Lets ben_item stand alone; goes into the note.")
 
 
 @tool("coord_resolve_intent", title="Resolve intent")
@@ -589,7 +595,8 @@ async def coord_resolve_intent(params: ResolveIntentInput) -> str:
     """
     try:
         item = params.ben_item.model_dump(exclude_none=True) if params.ben_item else None
-        return _ok(store.resolve_intent(db(), params.intent_id, params.task_ids, params.note, ben_item=item))
+        return _ok(store.resolve_intent(db(), params.intent_id, params.task_ids, params.note, ben_item=item,
+                                                 no_draft=params.no_draft))
     except Exception as e:
         return _err(e)
 

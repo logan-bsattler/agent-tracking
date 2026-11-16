@@ -150,7 +150,8 @@ def test_ben_item_round_trip(conn):
 def test_ben_item_for_a_wired_client_can_go_to_the_agent(conn):
     _done(conn, client="MAG")
     iid = _intent(conn)
-    fid = store.resolve_intent(conn, iid, ben_item={"what": "Reply to Dave", "client": "MAG"})["ben_item"]["follow_up_id"]
+    fid = store.resolve_intent(conn, iid, ben_item={"what": "Reply to Dave", "client": "MAG"},
+                               no_draft="test: the Send-to-agent path")["ben_item"]["follow_up_id"]
     item = queue.ben_queue(conn)["groups"][0]["items"][0]
     assert item["agent_ok"] is True and item["due"] is None
     queue.apply(conn, "agent", [fid])

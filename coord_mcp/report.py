@@ -1742,6 +1742,8 @@ def deliverables_page(v: dict[str, Any]) -> str:
                      f'<button class="primary" title="Copy to {esc(c)}/deliverables as the next version">'
                      f'Promote</button></form>')
         owed = "".join(f'<div class="note">Ben: {esc(w[:220])}</div>' for w in d["ben"])
+        if d.get("set_aside"):
+            owed += f'<div class="note muted">Set aside: {esc(d["set_aside"]["statement"][:220])}</div>'
         hay = " ".join([d["name"], d["path"], d["title"], d["task_id"], c, stage, *d["ben"]]).lower()
         task = (f'<div class="muted">from task <a class="drill" href="/board/task/{esc(d["task_id"])}">'
                 f'{esc(d["title"])}</a> <code>{esc(d["task_id"])}</code></div>')
@@ -1798,8 +1800,10 @@ def drafts_page(v: dict[str, Any]) -> str:
         return page("Drafts", "Drafts", "Email drafts", sub,
                     f'<p class="empty">No drafts in the last {v["days"]} days.</p>',
                     actions=form + SEEN_BOX)
-    todo = [d for d in rows if d["state"] != "drafted"]
-    counts = {k: sum(1 for d in rows if d["state"] == k) for k in ("waiting", "review", "queued", "missing", "drafted")}
+    done_states = ("drafted", "set_aside")  # nothing owed: in Drafts, or held, dropped or superseded
+    todo = [d for d in rows if d["state"] not in done_states]
+    counts = {k: sum(1 for d in rows if d["state"] == k)
+              for k in ("waiting", "review", "queued", "missing", "drafted", "set_aside")}
     # Each tile filters the cards to what it counts; Clients shows them all again.
     kpi = '<div class="kpis">' + "".join(
         f'<button type="button" class="kpi {cls}{" zero" if not n else ""}" data-k="{k}">'
@@ -1811,16 +1815,18 @@ def drafts_page(v: dict[str, Any]) -> str:
             ("review", "Awaiting review", counts["review"], "k-info", "a dod_review must approve it first"),
             ("queued", "Queued", counts["queued"], "k-run", "master drafts it when idle"),
             ("drafted", "In Drafts", counts["drafted"], "k-done", "already typed into Outlook"),
+            ("set_aside", "Set aside", counts["set_aside"], "k-alt", "held, dropped or superseded by a decision"),
             ("missing", "Body missing", counts["missing"], "k-fail", "the file the result named is gone"),
             ("", "Clients", len({d["client"] for d in rows}), "k-alt", "with a draft in range"))) + "</div>"
     badge = {"waiting": '<b class="st-open">to go through</b>',
              "queued": '<b class="st-waiting">queued for master</b>',
              "missing": '<b class="st-failed">body missing</b>',
              "review": '<b class="st-review">{}</b>',
-             "drafted": '<b class="st-done">in Drafts</b>'}
+             "drafted": '<b class="st-done">in Drafts</b>',
+             "set_aside": '<b class="st-waiting">set aside</b>'}
     cards = []
     for d in rows:
-        i = todo.index(d) if d["state"] != "drafted" else None
+        i = todo.index(d) if d["state"] not in done_states else None
         pos = (f'<span class="count">{i + 1} of {len(todo)}</span>' if i is not None else "")
         nxt = (f'<a class="drill next-task" href="#d-{esc(todo[i + 1]["task_id"])}">Next draft →</a>'
                if i is not None and i + 1 < len(todo)

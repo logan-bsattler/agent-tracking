@@ -403,6 +403,10 @@ def pending_gate(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | Non
         if not (line & (refs | tasked)):
             continue
         ben = [f for f in json.loads(r["ben_follow_ups"]) if ben_open(conn, f)]
+        if ben:  # a gate registered before _SETTLED_BY on an item its decision calls settled
+            d = conn.execute("SELECT statement FROM decisions WHERE id=?", (r["decision_id"],)).fetchone()
+            st = d["statement"] if d else ""
+            ben = [f for f in ben if not _SETTLED_BY.search(_after_id(st, f))]
         if ben:
             return {"decision_id": r["decision_id"], "hold_id": r["hold_id"], "ben_follow_ups": ben}
     return None
@@ -490,6 +494,16 @@ def minder_owed(conn: sqlite3.Connection) -> list[str]:
 
 
 _PROCEEDS = re.compile(r"\bmaster default\b[^.]{0,20}\bBen may overrid", re.I)
+# A Ben item the decision itself calls settled ("4fee2410c16d ('accept ladder')
+# is settled by f28533937476") is cited as precedent, not left open to wait on.
+_SETTLED_BY = re.compile(r"^(?:(?!\b(?:open|until|unless|once|when)\b)[^;.]){0,60}?\b(?:is|are|was|were|now|already)?\s*"
+                         r"(?:settled|covered|closed|answered|resolved)\b", re.I)
+
+
+def _after_id(statement: str, ident: str) -> str:
+    """The text right after an id's first mention, up to the clause's end."""
+    at = statement.find(ident)
+    return statement[at + len(ident):] if at >= 0 else ""
 
 
 def after_decision(conn: sqlite3.Connection, decision_id: str, statement: str, because: str | None,
@@ -503,6 +517,8 @@ def after_decision(conn: sqlite3.Connection, decision_id: str, statement: str, b
     for i in _ids(statement):
         f = _fu(conn, i)
         if f is not None and _is_ben(f["who"]) and f["state"] in ("open", "deferred"):
+            if _SETTLED_BY.search(_after_id(statement, i)):
+                continue  # the decision says it is settled: nothing to wait on (9cefc59ded46, 11-16)
             ben.append(i)
         elif f is not None or _task(conn, i) is not None:
             work.append(i)

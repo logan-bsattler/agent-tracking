@@ -664,6 +664,24 @@ STATUS_HANDLING = (
 )
 
 
+# An email only Ben can answer (scope, price, staffing, commitments) is still
+# drafted by the client agent: the draft carries the decision as options, and
+# Ben picks one when he reviews it. A Ben item with no draft is the exception.
+REPLY_SOURCE = "email-reply"
+REPLY_HANDLING = (
+    "Only Ben can decide this, but the client agent still drafts it: create a draft_reply for that client "
+    "with reply_from, reply_date and subject from reply_request (a Reply all on the message), whose body is "
+    "built around the decision and whose summary lists the options, and resolve with its task id. Fall back to "
+    "coord_present_question (or ben_item, with no_draft saying why) only when even a draft would promise work "
+    "no task covers, or the client is not wired."
+)
+# Sources where a wired client's ask becomes a draft (or a task), not a bare
+# Ben item: coord_resolve_intent refuses ben_item without task_ids for these
+# unless no_draft says why. Teams has no draft route, so teams-* is not here.
+DRAFT_SOURCES = (REPLY_SOURCE, "email", STATUS_SOURCE)
+NO_DRAFT_MAX = 200
+
+
 def status_request(context: str | None) -> dict[str, str]:
     """The `key value;` fields of an email-status intent's context."""
     return {k: v.strip().strip('"') for k, v in _STATUS_FIELD.findall(context or "")}
@@ -828,6 +846,9 @@ def list_intents(conn: sqlite3.Connection, state: str = "open", limit: int = 20)
         if d["source"] == STATUS_SOURCE:
             d["status_request"] = status_request(d["context"])
             d["handling"] = " ".join(filter(None, (d.get("handling"), STATUS_HANDLING)))
+        if d["source"] == REPLY_SOURCE:
+            d["reply_request"] = status_request(d["context"])
+            d["handling"] = " ".join(filter(None, (d.get("handling"), REPLY_HANDLING)))
         if d["source"] in INTENT_FIELD_SOURCES:
             key = "teams_message" if d["source"].startswith("teams-") else "email_message"
             d[key] = intent_fields(d["context"])
@@ -882,13 +903,19 @@ def resolve_intent(
     task_ids: list[str] | None = None,
     note: str | None = None,
     ben_item: dict[str, Any] | None = None,
+    no_draft: str | None = None,
 ) -> dict[str, Any]:
     """Close an intent: converted to tasks, or dismissed with a note.
 
     ben_item {what, client, due?} also leaves a loose end for Ben with no task
     (an ask only he can answer); its id goes into the note. due is the words
-    used or an ISO date, read against when the intent was proposed."""
-    row = conn.execute("SELECT state, created_at FROM intents WHERE id=?", (intent_id,)).fetchone()
+    used or an ISO date, read against when the intent was proposed.
+
+    For an email intent from a wired client (DRAFT_SOURCES), a ben_item with
+    no task_ids is refused unless no_draft says why no draft can be written:
+    the reply is drafted by the client agent and reaches Ben as a draft
+    (REPLY_HANDLING), not as a bare loose end."""
+    row = conn.execute("SELECT state, created_at, source FROM intents WHERE id=?", (intent_id,)).fetchone()
     if row is None:
         raise KeyError(f"unknown intent '{intent_id}'")
     if row["state"] != "open":
@@ -906,6 +933,17 @@ def resolve_intent(
             from .commitments import resolve_due
             due_at, _ = resolve_due(str(due), said_at=row["created_at"])
         item_args = (ben_item.get("what") or "", ben_item.get("client") or "", due_at)
+    no_draft = (no_draft or "").strip() or None
+    if no_draft and len(no_draft) > NO_DRAFT_MAX:
+        raise ValueError(f"no_draft is {len(no_draft)} chars; cap is {NO_DRAFT_MAX}")
+    if (item_args and not task_ids and not no_draft and row["source"] in DRAFT_SOURCES
+            and item_args[1].strip().casefold() in client_keys(conn)):
+        raise ValueError(
+            f"intent '{intent_id}' is an {row['source']} from {item_args[1].strip()}, a wired client: its reply is "
+            "drafted, not left as a bare Ben item. Create a draft_reply for that client (reply_from, reply_date and "
+            "subject from the intent, so it is a Reply all; a decision only Ben can make goes in the body as "
+            "options, listed in the summary) and pass its id in task_ids; ben_item may ride along. If even a draft "
+            "would promise work no task covers, pass no_draft with why.")
     if task_ids:
         marks = ",".join("?" * len(task_ids))
         found = {r["id"] for r in conn.execute(f"SELECT id FROM tasks WHERE id IN ({marks})", task_ids)}
@@ -919,7 +957,7 @@ def resolve_intent(
     item = None
     if item_args:  # after every check above, so a refusal leaves no orphan loose end
         item = _insert_ben_item(conn, intent_id, item_args[0], item_args[1], due_at=item_args[2])
-        note = f"Ben item {item['follow_up_id']}" + (f"; {note}" if note else "")
+        note = f"Ben item {item['follow_up_id']}" + (f"; no draft: {no_draft}" if no_draft else "")             + (f"; {note}" if note else "")
     conn.execute(
         "UPDATE intents SET state=?, resolved_at=?, task_ids=?, note=? WHERE id=?",
         (state, now(), json.dumps(task_ids or []), note, intent_id),
@@ -1633,6 +1671,50 @@ def _client_since(conn: sqlite3.Connection, task_id: str, reply_date: str | None
     return int(since or now()), "task"
 
 
+# What a decision on a draft_reply says about its Outlook draft. The latest
+# decision that matches one of these wins, so a hold that is later lifted
+# ("Draft X to Outlook now") reads as owed again. Anything else that merely
+# mentions drafts and Outlook (a handoff listing "owed: Outlook draft of X",
+# "only X goes to Outlook") says nothing about where the draft is: before
+# 2026-11-16 a plain "draft" + "outlook" substring test read those as already
+# in Drafts, so the minder never listed them.
+_IN_DRAFTS = re.compile(r"\bdrafted (?:in)?to (?:ben's )?outlook\b|\b(?:is|are|now|already) in (?:ben's )?outlook drafts\b"
+                        r"|\boutlook draft (?:for \w+ )?(?:now|already) (?:addressed|saved|exists)\b", re.I)
+_SET_ASIDE = re.compile(r"^(?:hold|drop|do not|don't|no outlook draft)\b|\b(?:do not|don't|never) draft\b"
+                        r"|\bout of outlook\b|\bhold (?:the )?outlook draft|\bnot email\b", re.I)
+_OWED = re.compile(r"^(?:retry )?draft\b[^.;]*\boutlook\b", re.I)
+_SUPERSEDES = re.compile(r"\b([0-9a-f]{12}) supersedes ([0-9a-f]{12})\b", re.I)
+SET_ASIDE = "set_aside"
+
+
+def outlook_marks(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """{task id: {mark, decision, at, statement}} for draft_reply tasks whose
+    decisions say where the Outlook draft stands: mark "drafted" (it is in
+    Ben's Drafts), SET_ASIDE (held, dropped or superseded: not owed) or
+    "owed" (a decision that lifts an earlier hold). Latest decision wins.
+    A draft revised by a newer draft_reply child is set aside too."""
+    marks: dict[str, dict[str, Any]] = {}
+    for r in conn.execute("SELECT id, task_id, statement, created_at FROM decisions "
+                          "WHERE task_id IS NOT NULL AND lower(statement) LIKE '%outlook%' "
+                          "OR lower(statement) LIKE '% supersedes %' ORDER BY created_at, rowid"):
+        st = r["statement"] or ""
+        rec = {"decision": r["id"], "at": r["created_at"], "statement": st}
+        for _, old in _SUPERSEDES.findall(st):
+            marks[old.lower()] = {**rec, "mark": SET_ASIDE}
+        if not r["task_id"] or "outlook" not in st.lower():
+            continue
+        mark = ("drafted" if _IN_DRAFTS.search(st) else SET_ASIDE if _SET_ASIDE.search(st)
+                else "owed" if _OWED.search(st) else None)
+        if mark:
+            marks[r["task_id"]] = {**rec, "mark": mark}
+    for r in conn.execute("SELECT DISTINCT p.id, c.id cid, c.created_at FROM tasks p JOIN tasks c ON c.parent_id = p.id "
+                          "WHERE p.kind = 'draft_reply' AND c.kind = 'draft_reply'"):
+        if marks.get(r["id"], {}).get("mark") not in ("drafted", "owed"):
+            marks[r["id"]] = {"decision": None, "at": r["created_at"], "mark": SET_ASIDE,
+                              "statement": f"revised by draft {r['cid']}"}
+    return marks
+
+
 def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None = None) -> dict[str, Any]:
     """Finished draft_reply tasks, in the order Ben works them.
 
@@ -1652,12 +1734,9 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
     if client:
         sql += " AND assigned_to = ?"
         args.append(client)
-    landed: dict[str, dict[str, Any]] = {}
-    for r in conn.execute("SELECT id, task_id, statement, created_at FROM decisions "
-                          "WHERE task_id IS NOT NULL ORDER BY created_at"):
-        w = r["statement"].lower()
-        if "draft" in w and "outlook" in w:
-            landed[r["task_id"]] = {"decision": r["id"], "at": r["created_at"]}
+    marks = outlook_marks(conn)
+    landed = {k: {"decision": m["decision"], "at": m["at"]} for k, m in marks.items() if m["mark"] == "drafted"}
+    aside = {k: m for k, m in marks.items() if m["mark"] == SET_ASIDE}
     live = {r["task_id"] for r in conn.execute(
         "SELECT task_id FROM operator_prompts WHERE action = 'draft' AND taken_at IS NULL "
         "AND created_at >= ?", (t - PROMPT_TTL,)) if r["task_id"]}
@@ -1690,20 +1769,22 @@ def draft_replies(conn: sqlite3.Connection, days: int = 30, client: str | None =
                   "summary": res.get("summary", ""), "ben": ben.get(r["id"], []),
                   "from": origin if isinstance(origin, str) else None,
                   "queued": r["id"] in live, "drafted": sent,
+                  "set_aside": (aside[r["id"]] if r["id"] in aside and not sent and r["id"] not in live
+                                else None),
                   "waits_on": held_by.get(r["id"], []), "blocks": holds.get(r["id"], []),
                   "review": g and {**g, "label": STAGES[g["stage"]]},
-                  "state": ("drafted" if sent else "queued" if r["id"] in live
+                  "state": ("drafted" if sent else "queued" if r["id"] in live else SET_ASIDE if r["id"] in aside
                             else "missing" if not d["exists"] else "review" if unreviewed else "waiting")})
         from .queue import REPLY_LATE
-        d["late"] = not sent and t - since > REPLY_LATE
+        d["late"] = not sent and d["state"] != SET_ASIDE and t - since > REPLY_LATE
         out.append(d)
-    rank = {"waiting": 0, "review": 0, "missing": 0, "queued": 0, "drafted": 1}
+    rank = {"waiting": 0, "review": 0, "missing": 0, "queued": 0, "drafted": 1, SET_ASIDE: 1}
     # A draft that waits on another follows every unworked one that does
     # not, so the walk reaches its blocker first.
     out.sort(key=lambda d: (rank[d["state"]], not rank[d["state"]] and bool(d["waits_on"]),
                             -d["completed_at"] if rank[d["state"]] else d["client_since"]))
     return {"drafts": out, "days": days, "client": client, "as_of": t,
-            "open": sum(1 for d in out if d["state"] != "drafted"),
+            "open": sum(1 for d in out if d["state"] not in ("drafted", SET_ASIDE)),
             "late": sum(1 for d in out if d["late"])}
 
 

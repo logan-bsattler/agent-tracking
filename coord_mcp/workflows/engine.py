@@ -148,7 +148,84 @@ def _pick(fus: list[Any], sp: dict[str, Any]) -> Any:
 def plan(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int,
          write: bool = True) -> dict[str, Any] | None:
     """What the engine would do for one case: {'spawn': ...}, {'stop': ...} or
-    None. With write=False it stores nothing (steps it would assign stay in memory)."""
+    None. A step spawn comes first; failing one, an interim reply (below)."""
+    p = _plan_step(conn, case, t, since, write)
+    if p and "spawn" in p:
+        return p
+    return _interim_reply(conn, case, t, since, write) or p
+
+
+# A client loose end on finished case work that asks for a message to be
+# drafted ("Draft reply to Shannon: ...", "Draft a note to Darren asking ..."),
+# not merely mentioning email. Before 2026-11-16 these waited for a step
+# spawn, and a case reaches its reply step only at the end (A3: after the
+# check-in) or never (B1 has none), so LNK 4700028a910d and MAG ecb72d2e37f7
+# sat finished with no draft while Ben items stood on their cases.
+_ASKS_DRAFT = re.compile(r"\b(draft|write)\b[^.;:]{0,40}\b(repl(y|ies)|note|e-?mail|message|answer|response)\b"
+                         r"|\brepl(y|ies) to\b|\brespond to\b", re.I)
+INTERIM_STEP = "interim_reply"  # matches no definition step, so it never moves the case's position
+INTERIM_SPEC = {
+    "goal": "Draft the message this loose end asks for: {follow_up}",
+    "read_first": "coord_get_task_result {prev} with fields [\"verdict\", \"evidence\", \"pointers\", \"summary\"] "
+                  "(case {case}: {root_title}); the case's intent is {intent}.",
+    "reply_from": "{reply_from}",
+    "reply_date": "{reply_date}",
+    "constraints": [
+        "Nothing sends: write the body to a file and return the draft_reply envelope.",
+        "With reply_from it is a Reply all on that message; without it, a new message: take to/cc from the "
+        "client's correspondence and say who you chose in the summary.",
+        "The body ends with 'Thanks!' and no name; Ben's Outlook signature carries it.",
+        "Promise nothing no task covers; if the answer needs more work, put it in follow_ups instead.",
+        "Say Devoir, never offshore.",
+    ],
+    "created_by": "workflow engine ({workflow}, case {case}, interim reply)",
+}
+
+
+def _interim_reply(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int,
+                   write: bool) -> dict[str, Any] | None:
+    """A draft_reply for a client loose end that asks for one, on a case task
+    that finished done within LOOKBACK, wherever the case stands. Open Ben
+    items on the case do not stop it, and neither does a deferral of the loose
+    end (REPLY_RULING: drafting never sends); work still in flight on the case
+    does (do the work, then reply), and so does an outward-facing hold."""
+    d = defs.get(case["workflow"])
+    if not d or not d.get("engine"):
+        return None
+    tasks = _step_tasks(conn, case, d, write=write)
+    if not tasks or any(x["state"] == "open" for x in tasks):
+        return None
+    floor = max(since, t - LOOKBACK)
+    recent = {x["id"]: x for x in tasks if x["state"] == "done" and (x["completed_at"] or 0) >= floor}
+    if not recent:
+        return None
+    marks = ",".join("?" * len(recent))
+    fus = conn.execute(f"SELECT id, task_id, who, what FROM follow_ups WHERE state IN ('open','deferred') "
+                       f"AND task_id IN ({marks}) ORDER BY created_at, idx, rowid", list(recent)).fetchall()
+    take = next((f for f in fus if _is_client(f["who"]) and _ASKS_DRAFT.search(f["what"] or "")), None)
+    if take is None:
+        return None
+    from .. import holds
+    ids = [x["id"] for x in tasks]
+    held = holds.case_hold(conn, ids, "draft_reply")
+    if held and "stop" in held:
+        return None  # an outward-facing hold: master's call, as for a step reply
+    prev = recent[take["task_id"]]
+    ctx = _context(conn, case, prev, take["what"] or "")
+    spec = {k: v for k, v in _fill(INTERIM_SPEC, ctx).items() if v not in ("", None)}
+    title = f"{case['client'] or ''}: reply per {take['id']} on {prev['title']}"
+    title = title if len(title) <= 80 else title[:77] + "..."
+    drafts = [h["decision_id"] for h in (held or {}).get("drafts", [])]
+    proceeds = [h["decision_id"] for h in (held or {}).get("proceeds", [])]
+    return {"spawn": INTERIM_STEP, "kind": "draft_reply", "title": title, "spec": spec, "prev": prev["id"],
+            "client": case["client"], "follow_up": take["id"], "hold": None, "holds_past": [],
+            "draft_past": (drafts + proceeds)[0] if drafts + proceeds else None, "drafts_past": drafts + proceeds}
+
+
+def _plan_step(conn: sqlite3.Connection, case: sqlite3.Row, t: int, since: int,
+               write: bool = True) -> dict[str, Any] | None:
+    """A step spawn or stop for one case, or None. With write=False it stores
+    nothing (steps it would assign stay in memory)."""
     d = defs.get(case["workflow"])
     if not d or not d.get("engine"):
         return None

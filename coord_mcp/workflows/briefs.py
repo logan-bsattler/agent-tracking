@@ -105,7 +105,7 @@ def brief(conn: sqlite3.Connection, meeting_id: str, t: int) -> dict[str, Any] |
     have_com = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='commitments'").fetchone()
     out["commitments"] = commitments.list_commitments(conn, client, "live") if have_com else []
     out["drafts"] = [d for d in store.draft_replies(conn, days=30, client=client)["drafts"]
-                     if d.get("state") != "drafted"]
+                     if d.get("state") not in ("drafted", store.SET_ASIDE)]
     out["questions"] = [dict(r) for r in conn.execute(
         """SELECT f.id, f.task_id, f.what, f.created_at, f.due_at, t.title FROM follow_ups f
            LEFT JOIN tasks t ON t.id = f.task_id
