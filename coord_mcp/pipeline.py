@@ -17,6 +17,7 @@ Three pieces:
   check-ins inherit theirs, so only the first task of a chain is asked.
 
     python -m coord_mcp.pipeline sync <get_pipeline.json>     # fill the cache by hand
+    python -m coord_mcp.pipeline sync-status                  # last sync, item count, last attempt
     python -m coord_mcp.pipeline lines [<client>]             # the /pipeline ranking as text
     python -m coord_mcp.pipeline unfiled [<client>] [--days N]
     python -m coord_mcp.pipeline propose <client> <title> [--origin ID] [--priority P] [--task T]
@@ -54,6 +55,11 @@ CREATE_LEASE = 120
 CREATE_RETRY = 1800
 TITLE_MAX = 200
 SYNC_KEY = "pipeline_synced_at"
+# The last sync attempt, whatever came of it (2026-11-16): the worker's mod
+# reports each stage (get_pipeline called, answered, posted, failed) through
+# /api/pipeline/sync/report, and sync() writes the outcome of every POST. A
+# sync that never lands shows here instead of failing in silence.
+SYNC_LAST_KEY = "pipeline_sync_last"
 MAP_KEY = "pipeline_client_map"
 LEASE_KEY = "pipeline_create_lease"
 ERRORS_KEY = "pipeline_create_errors"
@@ -206,8 +212,14 @@ def sync(conn: sqlite3.Connection, payload: Any, now_ts: int | None = None) -> d
     never empties the cache."""
     ensure_pipeline(conn)
     t = _now() if now_ts is None else now_ts
-    rows = _items_of(payload)
+    size = len(payload) if isinstance(payload, str) else None
+    try:
+        rows = _items_of(payload)
+    except ValueError as e:
+        sync_report(conn, "refused", False, f"payload is not JSON ({size} chars): {e}", now_ts=t)
+        raise ValueError(f"pipeline payload is not JSON: {e}") from e
     if not rows:
+        sync_report(conn, "refused", False, f"payload has no items ({size} chars)", now_ts=t)
         raise ValueError("pipeline payload has no items; the cache is left as it was")
     keys, over = client_keys(conn), client_map(conn)
     unmapped: dict[str, int] = {}
@@ -233,7 +245,22 @@ def sync(conn: sqlite3.Connection, payload: Any, now_ts: int | None = None) -> d
         conn.execute("ROLLBACK")
         raise
     n = conn.execute("SELECT COUNT(*) FROM pipeline_items").fetchone()[0]
+    sync_report(conn, "synced", True, f"{n} items ({size} chars); unmapped clients: {len(unmapped)}", now_ts=t)
     return {"ok": True, "items": n, "unmapped_clients": unmapped, "synced_at": t}
+
+
+def sync_report(conn: sqlite3.Connection, stage: str, ok: bool, detail: str = "",
+                now_ts: int | None = None) -> dict[str, Any]:
+    """Record the last sync attempt's stage in meta pipeline_sync_last."""
+    v = {"at": _now() if now_ts is None else now_ts, "stage": str(stage)[:40], "ok": bool(ok),
+         "detail": str(detail or "")[:500]}
+    _set_meta(conn, SYNC_LAST_KEY, v)
+    return v
+
+
+def sync_last(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    v = _meta(conn, SYNC_LAST_KEY)
+    return v if isinstance(v, dict) else None
 
 
 def synced_at(conn: sqlite3.Connection) -> int | None:
@@ -685,7 +712,7 @@ def lines(conn: sqlite3.Connection, client: str | None = None, now_ts: int | Non
                                         and (not client or p["client"] == client)],
             "approved": [p for p in props.values() if p["state"] == "approved"
                          and (not client or p["client"] == client)],
-            "unfiled": unfiled(conn, client, t), "synced_at": synced_at(conn), "now": t,
+            "unfiled": unfiled(conn, client, t), "synced_at": synced_at(conn), "sync_last": sync_last(conn), "now": t,
             "require": _switch(conn, "require_pipeline")}
 
 
@@ -854,6 +881,9 @@ def main(argv: list[str] | None = None) -> int:
         if cmd == "sync":
             with open(pos[0], encoding="utf-8") as f:
                 out: Any = sync(conn, f.read())
+        elif cmd == "sync-status":
+            out = {"synced_at": synced_at(conn), "items": conn.execute(
+                "SELECT COUNT(*) FROM pipeline_items").fetchone()[0], "last": sync_last(conn)}
         elif cmd == "lines":
             v = lines(conn, pos[0] if pos else None)
             for x in v["lines"]:

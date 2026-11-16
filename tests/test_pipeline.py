@@ -84,6 +84,24 @@ def test_sync_fills_and_keeps_cache(conn):
     assert set(pipeline.items(conn)) == {"231"}  # replaced, not merged
 
 
+def test_sync_records_last_attempt(conn):
+    """2026-11-16: a sync that never lands must say why on the board."""
+    assert pipeline.sync_last(conn) is None
+    stub = "Error: result (224,641 characters) exceeds maximum allowed tokens. Output has been saved to x.txt."
+    with pytest.raises(ValueError, match="not JSON"):
+        pipeline.sync(conn, stub, now_ts=NOW)
+    last = pipeline.sync_last(conn)
+    assert last["stage"] == "refused" and not last["ok"] and "not JSON" in last["detail"]
+    pipeline.sync_report(conn, "get_pipeline failed", False, "no answer in 120s", now_ts=NOW + 5)
+    assert pipeline.lines(conn, now_ts=NOW + 10)["sync_last"]["stage"] == "get_pipeline failed"
+    v = pipeline.lines(conn, now_ts=NOW + 10)
+    html = pipeline_page.pipeline_page(v, None, ["MAG"])
+    assert "last sync" in html and "no answer in 120s" in html
+    pipeline.sync(conn, json.dumps(PAYLOAD), now_ts=NOW + 20)
+    last = pipeline.sync_last(conn)
+    assert last["ok"] and last["stage"] == "synced" and last["detail"].startswith("5 items")
+
+
 def test_client_map_override_used_by_sync_and_create(conn):
     pipeline._set_meta(conn, pipeline.MAP_KEY, {"Acme Widgets": "MAG"})
     pipeline.sync(conn, PAYLOAD, now_ts=NOW)
@@ -388,6 +406,11 @@ def test_dashboard_routes(tmp_path, monkeypatch):
     with pytest.raises(urllib.error.HTTPError) as e:
         post("/api/pipeline/sync", {"payload": "{}"})
     assert e.value.code == 400
+    with pytest.raises(urllib.error.HTTPError) as e:
+        post("/api/pipeline/sync", {"payload": "Error: result exceeds maximum allowed tokens."})
+    assert e.value.code == 400  # not JSON is a refusal, not a 500
+    r = post("/api/pipeline/sync/report", {"stage": "get_pipeline failed", "ok": "0", "detail": "timeout"})
+    assert json.loads(r.read())["stage"] == "get_pipeline failed"
 
     r = post("/api/pipeline/proposal", {"proposal": prop, "action": "approve", "back": "/pipeline?client=MAG"})
     assert "/pipeline?client=MAG&done=" in r.url

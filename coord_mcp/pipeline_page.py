@@ -154,6 +154,10 @@ def pipeline_page(v: dict[str, Any], client: str | None, keys: list[str], flash:
     synced = v.get("synced_at")
     age = (f'cache {esc(_age(synced, t))} ({datetime.fromtimestamp(synced).strftime("%m-%d %H:%M")})'
            if synced else '<span style="color:var(--critical)">pipeline never synced</span>')
+    last = v.get("sync_last")
+    if last and not last.get("ok"):  # the worker's last try failed: say how, not just "never synced"
+        age += (f' · <span style="color:var(--critical)">last sync {esc(_age(int(last.get("at") or t), t))}: '
+                f'{esc(last.get("stage"))}, {esc(str(last.get("detail"))[:160])}</span>')
     rule = "rule on: root tasks need a line" if v.get("require") else "rule off"
     sub = (f'{len(v["lines"])} line(s) · {len(v["proposals"])} proposal(s) await you · '
            f'{len(v["unfiled"])} root task(s) with no line · {age} · {rule}')

@@ -301,26 +301,80 @@ async function pipelineNote($: EngineInterface): Promise<void> {
 // sharepoint-pipeline's get_pipeline (/api/pipeline/sync), so /pipeline can
 // rank lines and the creation rule can check item numbers. A failed read
 // keeps the old cache (the board refuses an empty payload).
+//
+// 2026-11-16: the first version never filled the cache and said nothing.
+// get_pipeline's whole answer (~225k characters, notes included) is over the
+// engine's MCP result cap, so $.mcp.call can hand back the "exceeds maximum
+// allowed tokens. Output has been saved to <file>" stub instead of JSON, and a
+// throw or hang in the old code left no trace. Now each stage is reported to
+// the board (meta pipeline_sync_last, /api/pipeline/sync/report; `python -m
+// coord_mcp.pipeline sync-status`), the call has a time limit, a saved-to-file
+// answer is read back with $.fs, and only the fields the cache keeps are posted.
 const SYNC_EVERY = 30 * 60_000
+const SYNC_RETRY = 5 * 60_000  // after a failure
+const SYNC_TIMEOUT = 120_000
+const SYNC_FIELDS = ['id', 'title', 'client', 'status', 'priority', 'developer', 'startDate', 'endDate',
+  'estHoursLow', 'estHoursHigh', 'pct', 'cvcTicket', 'modified'] as const
 let syncedAt = 0
-async function pipelineSync($: EngineInterface): Promise<void> {
-  if (Date.now() - syncedAt < SYNC_EVERY) return
-  syncedAt = Date.now()  // one try per window, failed or not
-  let payload = ''
+let syncing = false
+async function syncReport($: EngineInterface, stage: string, ok: boolean, detail = ''): Promise<void> {
   try {
-    const res = await $.mcp.call('sharepoint-pipeline', 'get_pipeline', {})
-    if (res.isError) throw new Error(res.content.map(b => ('text' in b ? b.text : '') ?? '').join(' '))
-    payload = res.content.map(b => ('text' in b ? b.text : '') ?? '').join('')
-  } catch (err) {
-    $.ui.toast(`Pipeline sync: get_pipeline failed: ${String(err).slice(0, 160)}`)
-    return
+    await $.http.fetch(`${DASH}/api/pipeline/sync/report`, {
+      method: 'POST', headers: FORM,
+      body: `stage=${encodeURIComponent(stage)}&ok=${ok ? 1 : 0}&detail=${encodeURIComponent(detail.slice(0, 500))}`,
+    })
+  } catch { /* dashboard down: the toast below still says it */ }
+}
+function pipelineJson(text: string): Record<string, unknown> | null {
+  const i = text.indexOf('{')
+  if (i < 0) return null
+  try { return JSON.parse(text.slice(i)) as Record<string, unknown> } catch { return null }
+}
+async function pipelineSync($: EngineInterface): Promise<void> {
+  if (syncing || Date.now() - syncedAt < SYNC_EVERY) return
+  syncing = true
+  syncedAt = Date.now()
+  const fail = async (stage: string, detail: string) => {
+    syncedAt = Date.now() - SYNC_EVERY + SYNC_RETRY  // try again in 5 minutes, not every tick
+    await syncReport($, stage, false, detail)
+    $.ui.toast(`Pipeline sync: ${stage}: ${detail.slice(0, 160)}`)
   }
   try {
-    const r = await $.http.fetch(`${DASH}/api/pipeline/sync`, {
-      method: 'POST', headers: FORM, body: `payload=${encodeURIComponent(payload)}`,
-    })
-    if (!r.ok) $.ui.toast(`Pipeline sync refused: ${r.text.slice(0, 160)}`)
-  } catch { syncedAt = 0 /* dashboard down: try again next tick */ }
+    await syncReport($, 'get_pipeline called', true)
+    let text = ''
+    try {
+      const res = await Promise.race([
+        $.mcp.call('sharepoint-pipeline', 'get_pipeline', {}),
+        $.clock.sleep(SYNC_TIMEOUT).then(() => { throw new Error(`no answer in ${SYNC_TIMEOUT / 1000}s`) }),
+      ])
+      text = res.content.map(b => ('text' in b ? b.text : '') ?? '').join('')
+      if (res.isError) return await fail('get_pipeline error', text)
+    } catch (err) {
+      return await fail('get_pipeline failed', String(err))
+    }
+    let data = pipelineJson(text)
+    const saved = /saved to (.+?)\.?\s*(?:\n|$)/.exec(text)
+    if (!data && saved) {
+      try { data = pipelineJson(String(await $.fs.read(saved[1].trim()))) } catch (err) {
+        return await fail('read saved answer failed', `${saved[1].trim()}: ${String(err)}`)
+      }
+    }
+    if (!data) return await fail('answer not JSON', `${text.length} chars: ${text.slice(0, 300)}`)
+    const slim = (v: unknown) => (Array.isArray(v) ? v : []).map(x =>
+      Object.fromEntries(SYNC_FIELDS.map(k => [k, (x as Record<string, unknown>)?.[k] ?? null])))
+    const payload = JSON.stringify({ items: slim(data.items), unscheduledItems: slim(data.unscheduledItems) })
+    await syncReport($, 'posting', true, `${payload.length} chars from ${text.length}`)
+    try {
+      const r = await $.http.fetch(`${DASH}/api/pipeline/sync`, {
+        method: 'POST', headers: FORM, body: `payload=${encodeURIComponent(payload)}`,
+      })
+      if (!r.ok) return await fail('board refused', `${r.status} ${r.text}`)
+    } catch (err) {
+      return await fail('post failed', String(err))
+    }
+  } finally {
+    syncing = false
+  }
 }
 
 // Each tick, one proposal Ben approved on /pipeline is created in SharePoint.

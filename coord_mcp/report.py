@@ -2888,6 +2888,11 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         return
                     self._json(200, r)
                     return
+                if path == "/api/pipeline/sync/report":  # the worker's mod: each sync stage, so a silent failure shows
+                    from . import pipeline
+                    g = lambda k: (form.get(k) or [""])[0]
+                    self._json(200, pipeline.sync_report(conn, g("stage") or "unknown", g("ok") == "1", g("detail")))
+                    return
                 if path == "/api/pipeline/create/claim":  # the mod's tick: one approved proposal, under a lease
                     from . import pipeline
                     self._json(200, {"create": pipeline.claim_create(conn)})
