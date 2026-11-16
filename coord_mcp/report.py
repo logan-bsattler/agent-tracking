@@ -1114,6 +1114,20 @@ def _idle(rows: list[dict[str, Any]], t: int) -> str:
             f'or record why it waits.</p><ul>{items}</ul></div>')
 
 
+def _ready_card(items: list, t: int) -> str:
+    """Ben's direct asks, finished and handed back (direct.py): one line each, with Seen."""
+    if not items:
+        return ""
+    rows = "".join(
+        f'<li><a href="/board/task/{esc(r["root_id"])}">{esc(r["title"])}</a> '
+        f'<span class="age">{esc(r.get("client") or "")} · {esc(_age(r["created_at"], t))}</span><br>'
+        f'{esc(r["what"])} <form method="post" action="/api/ready/seen" class="act" style="display:inline">'
+        f'<input type="hidden" name="root" value="{esc(r["root_id"])}"><button>Seen</button></form></li>'
+        for r in items)
+    return (f'<div class="card" id="ready"><h2>Ready for you<span class="count">{len(items)}</span></h2>'
+            f'<ul>{rows}</ul></div>')
+
+
 def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None = None) -> str:
     """Operator command center: the fleet, what is in flight, what finished,
     what waits on Ben, and a timeline of what happened. `client` narrows every
@@ -1159,7 +1173,7 @@ def board_page(v: dict[str, Any], refresh: int | None = 30, client: str | None =
     sub = f"as of {when(t)}{' · refreshes every ' + str(refresh) + 's' if refresh else ''} · straight from ~/.coord/coord.db {scope}"
     actions = (f'{_button("next", "Next question", primary=True)}{_button("board", "Board check")}'
                f'{_button("cleanup", "Board cleanup")}{queued_note}{minder_note}{SEEN_BOX}')
-    body = f"""{health_banner(v.get("health"))}{_kpis(v, n, len(done_24h))}
+    body = f"""{health_banner(v.get("health"))}{_ready_card(v.get("ready") or [], t)}{_kpis(v, n, len(done_24h))}
 {v.get("pipeline_strip") or ""}
 {_fleet(fleet_rows, t, client)}
 {_idle(v.get("idle", []), t)}
@@ -2914,6 +2928,21 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         return
                     self._json(200, r)
                     return
+                if path == "/api/ready/claim":  # the mod's tick: one finished direct ask to toast
+                    from . import direct
+                    self._json(200, {"ready": direct.claim_announce(conn, (form.get("claimer") or ["master"])[0])})
+                    return
+                if path == "/api/ready/seen":  # Seen on /board's Ready for you card
+                    from . import direct
+                    root = (form.get("root") or [""])[0].strip()
+                    ok = direct.valid_id(root) and direct.mark_seen(conn, root)
+                    if "json" in (self.headers.get("Accept") or ""):
+                        self._json(200, {"ok": ok})
+                        return
+                    self.send_response(303)
+                    self.send_header("Location", "/board")
+                    self.end_headers()
+                    return
                 if path == "/api/worker/wake":  # the desk's tick: should it wake the worker?
                     self._json(200, {"wake": store.claim_worker_wake(conn)})
                     return
@@ -2934,6 +2963,10 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                                    "actions": {k: v for k, v in store.OPERATOR_ACTIONS.items()
                                                if k in store.PAGE_ACTIONS and k != "redispatch"}}
                                   ).encode("utf-8")
+            if path == "/api/ready":
+                from . import direct
+                self._type = "application/json"
+                return json.dumps({"ready": direct.ready_items(conn)}).encode("utf-8")
             if path == "/api/health":
                 self._type = "application/json"
                 problems = store.health(conn)
@@ -2946,6 +2979,8 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v["queued"] = store.queued_operator_prompts(conn)
                 v["question"] = store.current_question(conn)
                 v["minder"] = store.minder_status(conn)
+                from . import direct
+                v["ready"] = direct.ready_items(conn)
                 v["fleet"] = store.fleet(conn, v, hours.CLIENTS)
                 v["activity"] = store.activity(conn)
                 from . import sessions

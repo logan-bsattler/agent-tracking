@@ -230,6 +230,27 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
     from .workflows import checks
     if warnings := checks.complete_warnings(conn, task_id):
         out["warnings"] = warnings
+    out.update(_hand_back(conn, task_id))
+    return out
+
+
+def _hand_back(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+    """A direct ask's result goes back to Ben finished (direct.py): its
+    agent-shaped loose ends become tasks now, and a finished chain becomes a
+    ready item. After the close, never part of it: a failure here leaves the
+    result landed, and the minder lists what is still owed."""
+    from . import direct
+    if not direct.is_direct(conn, task_id):
+        return {}
+    out: dict[str, Any] = {"ben_direct": True}
+    try:
+        with savepoint(conn, "hand_back"):
+            if tasked := direct.autotask(conn, task_id):
+                out["hand_back_tasks"] = tasked
+            if ready := direct.sweep(conn):
+                out["ready_for_ben"] = [r["root_id"] for r in ready]
+    except Exception as e:  # noqa: BLE001 - the result stands whatever the hand-back does
+        out["hand_back_error"] = str(e)[:200]
     return out
 
 
@@ -369,6 +390,76 @@ def file_draft(conn: sqlite3.Connection, client: str | None, result: dict[str, A
                 "next": ("Master types it into Outlook Drafts" +
                          (" once its dod_review approves it" if review else "") +
                          ". Do not paste it into Outlook yourself, and do not message master.")})
+    out.update(_hand_back(conn, tid))
+    return out
+
+
+def file_work(conn: sqlite3.Connection, client: str | None, kind: str, result: dict[str, Any], title: str,
+              asked: str | None = None, parent_id: str | None = None, pipeline_task_id: str | None = None,
+              spec: dict[str, Any] | None = None, root: Path | None = None) -> dict[str, Any]:
+    """file_draft for every kind Ben asks a client session for directly
+    (direct.FILE_KINDS): finished work lands as a done task assigned to the
+    caller, flagged ben-direct, and takes the same road as dispatched work
+    (a deliverable's dod_review and promote, the review gate for code) on
+    its way back to Ben. A draft_reply goes through file_draft.
+
+    spec carries what a reviewer needs beyond the result (a deliverable's
+    deliverable_type, dod_path and format; cvc for CVC code); the flag and
+    `asked` are added. parent_id is a task of the caller's this revises or
+    follows."""
+    from . import direct, queue
+    if kind == "draft_reply":
+        return file_draft(conn, client, result, asked, title, parent_id, pipeline_task_id, root)
+    if not client or client.strip().casefold() == DESK or client.strip().casefold() not in client_keys(conn):
+        raise ValueError(f"coord_file_work is for client sessions, and {client!r} is not a client key. "
+                         "The Desk creates a task with coord_create_task(ben_direct=true) instead.")
+    if kind not in direct.FILE_KINDS:
+        raise ValueError(f"kind {kind!r} cannot be filed; one of {', '.join(direct.FILE_KINDS)}")
+    if not isinstance(result, dict) or result.get("done") is not True:
+        raise ValueError('file finished work: result needs "done": true. Work you could not finish is not '
+                         "filed; tell Ben in chat.")
+    if asked is not None and len(asked) > ASKED_MAX:
+        raise ValueError(f"asked is {len(asked)} chars; cap is {ASKED_MAX}")
+    if not title or len(title) > 80:
+        raise ValueError("title is required, 80 chars at most")
+    validated = contracts.validate(kind, result)
+    queue.check_grouped(validated.get("follow_ups") or [], client)
+    sp = dict(spec or {})
+    sp.pop("checkin_of", None)  # a check-in is never filed: it needs its code approved first (gate.py)
+    if kind == "deliverable":
+        missing = [k for k in ("deliverable_type", "dod_path", "format") if not sp.get(k)]
+        if missing:
+            raise ValueError(f"a deliverable needs spec {', '.join(missing)}: its review reads them")
+    if parent_id is not None:
+        p = conn.execute("SELECT assigned_to FROM tasks WHERE id=?", (parent_id,)).fetchone()
+        if p is None:
+            raise KeyError(f"unknown task '{parent_id}'")
+        if (p["assigned_to"] or "").casefold() != client.casefold():
+            raise ValueError(f"parent_id {parent_id} must be one of {client}'s tasks")
+    queue.check_landing(conn, validated.get("follow_ups") or [], client, queue.lineage(conn, parent_id))
+    sp.update({"from": BEN_DIRECT, **({"asked": asked} if asked else {})})
+    from .db import ensure_commitments
+    queue.ensure_routes(conn)
+    queue.ensure_tags(conn)
+    ensure_commitments(conn)
+    ensure_deps(conn)
+    ensure_promotions(conn)
+    with savepoint(conn, "file_work"):
+        tid = _id()
+        t = now()
+        conn.execute(
+            """INSERT INTO tasks(id, parent_id, kind, title, spec, state, assigned_to, created_at,
+                                 picked_up_at, pipeline_task_id)
+               VALUES (?,?,?,?,?,'open',?,?,?,?)""",
+            (tid, parent_id, kind, title.strip(), json.dumps(sp), client, t, t, pipeline_task_id or None),
+        )
+        _event(conn, tid, "picked_up", client)
+        row = conn.execute("SELECT kind, state, assigned_to FROM tasks WHERE id=?", (tid,)).fetchone()
+        out = _complete(conn, tid, row, validated)
+    out.update({"kind": kind, "from": BEN_DIRECT,
+                "next": "The board hands it back to Ben finished (review, promote, follow-ups tasked). "
+                        "Do not message master."})
+    out.update(_hand_back(conn, tid))
     return out
 
 
@@ -2574,14 +2665,23 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     # dispatches or records why it waits.
     idle = [f"{o['client']} {o['session_id']} ({','.join(o['task_ids'])})"
             for o in sessions.idle_sessions(conn, now_ts)]
-    return {"holds": owed_holds, "parked": parked, "stalled": stalled, "undelivered": undelivered,
+    # Ben's direct asks (direct.py): owed the moment they are undelivered,
+    # unread or have an untasked client loose end; listed once, here.
+    from . import direct
+    owed_direct = direct.minder_owed(conn, now_ts, sent, waiting)
+    named = {x.split(" ")[0] for x in owed_direct}
+    undelivered = [i for i in undelivered if i not in named]
+    unread = [i for i in unread if i not in named]
+    loose = [i for i in loose if i not in named]
+    return {"ben_direct": owed_direct, "holds": owed_holds, "parked": parked, "stalled": stalled, "undelivered": undelivered,
             "idle": idle, "unread": unread, "loose": loose,
             "failed": failed, "intents": intents, "unreviewed": unreviewed,
             "undrafted": undrafted, "pipeline": pipeline, "commitments": owed_commitments,
             "superseded": superseded, "case_sla": over["master"], "case_sla_ben": over["ben"]}
 
 
-_MINDER_LABELS = (("holds", "holds behind Ben with a default (supersede, task it)"),
+_MINDER_LABELS = (("ben_direct", "Ben's direct asks (top priority: dispatch, read and hand back, task the loose end)"),
+                  ("holds", "holds behind Ben with a default (supersede, task it)"),
                   ("parked", "parked awaiting re-dispatch"),
                   ("stalled", "picked up but the client session went silent (get_session; if idle, re-dispatch)"),
                   ("undelivered", "never delivered"),
@@ -2701,6 +2801,17 @@ def minder_status(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[s
             "queued": queued_operator_prompts(conn)}
 
 
+def _new_direct(conn: sqlite3.Connection, owed: dict[str, list[str]]) -> bool:
+    """A direct ask the last minder prompt did not carry: it skips the rate limit."""
+    ids = owed.get("ben_direct") or []
+    if not ids:
+        return False
+    r = conn.execute("SELECT text FROM operator_prompts WHERE action='minder' "
+                     "ORDER BY created_at DESC, id DESC LIMIT 1").fetchone()
+    last = r["text"] if r else ""
+    return any(i.split(" ")[0] not in last for i in ids)
+
+
 def minder_check(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, Any]:
     """One pass: queue a minder prompt if work is owed and nothing stands in the way.
 
@@ -2716,13 +2827,18 @@ def minder_check(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[st
     now_ts = now() if now_ts is None else now_ts
     if not MINDER_ENABLED:
         return {"fired": False, "reason": "disabled", "owed": {}, **minder_state(conn, now_ts)}
-    from . import commitments
+    from . import commitments, direct
     commitments.sweep(conn, now_ts)  # stamp slips here, so no scheduled job is needed
+    try:  # a direct chain finished by a decision (Outlook drafted) becomes ready here
+        with savepoint(conn, "direct_sweep"):
+            direct.sweep(conn, now_ts)
+    except Exception as e:  # noqa: BLE001 - never costs the minder
+        record_loop_error(conn, "direct.sweep", str(e)[:200], now_ts)
     owed = minder_owed(conn, now_ts)
     state = minder_state(conn, now_ts, owed)
     if not any(owed.values()):
         return {"fired": False, "reason": "nothing owed", "owed": owed, **state}
-    if state["next_eligible"] > now_ts:
+    if state["next_eligible"] > now_ts and not _new_direct(conn, owed):
         return {"fired": False, "reason": "rate limit", "owed": owed, **state}
     if queued_operator_prompts(conn):
         return {"fired": False, "reason": "a prompt is already queued", "owed": owed, **state}

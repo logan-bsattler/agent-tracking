@@ -161,14 +161,23 @@ def _candidates(conn: sqlite3.Connection, t: int, *, paced: bool = True) -> list
         sql += """ AND t.created_at <= ? AND (t.dispatched_at IS NULL OR t.dispatched_at <= ?)
                    AND NOT EXISTS (SELECT 1 FROM dispatch_attempts a WHERE a.task_id = t.id AND a.created_at > ?)"""
         args = (t - DISPATCH_AFTER, t - RESEND_AFTER, t - RETRY_AFTER)
+    from .direct import direct_ids
+    direct = direct_ids(conn)
+    if paced and direct:
+        # Ben's direct asks skip the DISPATCH_AFTER wait (direct.py); the
+        # resend and retry timers still hold.
+        sql = sql.replace("t.created_at <= ? AND", "(t.created_at <= ? OR t.id IN (%s)) AND"
+                          % ",".join("?" * len(direct)))
+        args = (args[0], *direct, *args[1:])
     rows = conn.execute(sql + " ORDER BY t.created_at, t.rowid", args).fetchall()
     try:
         dues = due_map(conn)
     except sqlite3.Error:
         dues = {}
     inf = float("inf")
-    # sorted() is stable: equal dues keep the created_at order.
-    return sorted(rows, key=lambda r: (dues.get(r["id"]) or {}).get("due_at") or inf)
+    # Direct asks first, then earliest due, then oldest. sorted() is stable:
+    # equal keys keep the created_at order.
+    return sorted(rows, key=lambda r: (r["id"] not in direct, (dues.get(r["id"]) or {}).get("due_at") or inf))
 
 
 def next_dispatch(conn: sqlite3.Connection, now_ts: int | None = None,

@@ -416,7 +416,7 @@ def test_text_is_built_from_rows_only(conn):
             "untracked, 0 questions superseded unanswered, 0 cases past step limit for master, "
             "0 cases past step limit for Ben." in text)
     assert text.endswith("Run the Board check procedure for these ids only, then reply Done / Next for you.")
-    assert "ignore the above" not in text and len(text) < 730  # 600 before the case step-limit labels, 680 before idle (11-14)
+    assert "ignore the above" not in text and len(text) < 760  # 600 before the case step-limit labels, 680 before idle (11-14)
     assert r["prompt_id"] == conn.execute("SELECT MAX(id) FROM operator_prompts").fetchone()[0]
 
 
@@ -424,7 +424,7 @@ def test_long_id_lists_are_capped(conn):
     ids = [_task(conn, "LNK") for _ in range(8)]
     text = store.minder_text(store.minder_owed(conn, now() + (store.MINDER_UNDELIVERED + 1) * MIN), now())
     assert f"8 never delivered ({', '.join(ids[:5])}, +3 more)" in text
-    assert ids[6] not in text and len(text) < 770  # 650 before the case step-limit labels, 720 before idle (11-14)
+    assert ids[6] not in text and len(text) < 800  # +ben_direct label (11-16)  # 650 before the case step-limit labels, 720 before idle (11-14)
 
 
 def test_a_page_cannot_queue_a_minder_prompt(conn):

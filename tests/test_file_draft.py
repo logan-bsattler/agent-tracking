@@ -59,7 +59,7 @@ def test_never_sits_open_for_the_minder(conn, tmp_path):
     out = _file(conn, tmp_path)
     owed = store.minder_owed(conn, now() + 3600)
     assert out["task_id"] not in owed["undelivered"] and out["task_id"] not in owed["stalled"]
-    assert out["task_id"] in owed["unread"]  # master reads it like any result
+    assert f"{out['task_id']} unread" in owed["ben_direct"]  # a direct ask: owed at once, listed first
 
 
 def test_shows_on_drafts_and_goes_to_outlook(conn, tmp_path, monkeypatch):

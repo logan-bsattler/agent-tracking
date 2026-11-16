@@ -120,6 +120,9 @@ class CreateTaskInput(Strict):
         description="When no pipeline item exists yet: {title, origin_id?, priority?, note?}, titled as the "
                     "timesheet line. The task proceeds on the proposal; Ben approves the item on /pipeline. "
                     "Not with pipeline_task_id.")
+    ben_direct: bool = Field(default=False,
+                             description="Ben asked for this himself (the Desk, from his own prompt): top "
+                                         "priority, handed back to him finished. Sets spec.from = 'ben-direct'.")
 
 
 @tool("coord_create_task", title="Create task")
@@ -140,8 +143,9 @@ async def coord_create_task(params: CreateTaskInput) -> str:
     pipeline_proposal?, warnings?}
     """
     try:
+        spec = {**params.spec, "from": store.BEN_DIRECT} if params.ben_direct else params.spec
         return _ok(store.create_task(
-            db(), params.kind, params.title, params.spec,
+            db(), params.kind, params.title, spec,
             params.assigned_to, params.parent_id, params.from_intent, params.pipeline_task_id,
             params.pipeline_proposal,
         ))
@@ -232,6 +236,38 @@ async def coord_file_draft(params: FileDraftInput) -> str:
     try:
         return _ok(store.file_draft(db(), READER, params.result, params.asked, params.title,
                                     params.parent_id, params.pipeline_task_id))
+    except Exception as e:
+        return _err(e)
+
+
+class FileWorkInput(Strict):
+    kind: str = Field(..., description="investigation, data_pull, code_change, deliverable or draft_reply")
+    title: str = Field(..., description="Board title", max_length=80)
+    result: dict[str, Any] = Field(..., description="The kind's result contract, with done: true")
+    asked: str | None = Field(default=None, description="What Ben asked for, in a line", max_length=store.ASKED_MAX)
+    spec: dict[str, Any] | None = Field(
+        default=None, description="What a reviewer needs beyond the result: a deliverable's deliverable_type, "
+                                  "dod_path and format; cvc: true for CVC code")
+    parent_id: str | None = Field(default=None, description="A task of yours this revises or follows", max_length=40)
+    pipeline_task_id: str | None = Field(default=None, description="SharePoint pipeline item, if you know it",
+                                         max_length=40)
+
+
+@tool("coord_file_work", title="File work")
+async def coord_file_work(params: FileWorkInput) -> str:
+    """Client sessions: file finished work Ben asked you for directly (in
+    chat, not as a board task), of any kind. It lands as a done task assigned
+    to you, flagged ben-direct, and the board hands it back to Ben finished:
+    a deliverable through its review and promote, code through the review
+    gate, client loose ends tasked at once. A draft_reply is coord_file_draft.
+
+    Validated against the kind's contract; nothing is written on rejection.
+
+    Returns JSON: {ok, task_id, state, kind, from, next, hand_back_tasks?, ready_for_ben?}
+    """
+    try:
+        return _ok(store.file_work(db(), READER, params.kind, params.result, params.title, params.asked,
+                                   params.parent_id, params.pipeline_task_id, params.spec))
     except Exception as e:
         return _err(e)
 

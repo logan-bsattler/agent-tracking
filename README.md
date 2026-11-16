@@ -80,6 +80,7 @@ email -> coord_propose_intent -> intents (open, untrusted)
 | `coord_get_task` | team | teammate reads spec and expected result shape |
 | `coord_complete_task` | team | close with a validated result, or a typed failure |
 | `coord_file_draft` | team | client session files a draft Ben asked it for in chat: a finished `draft_reply` in one call |
+| `coord_file_work` | team | client session files finished work of any kind Ben asked it for in chat, flagged ben-direct (docs/ben-direct.md) |
 | `coord_get_task_result` | team | read a result projected to named fields |
 | `coord_record_decision` | team | write a decision and why |
 | `coord_get_decisions` | team | standing decisions, superseded ones hidden |

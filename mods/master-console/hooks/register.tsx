@@ -151,6 +151,7 @@ function start($: EngineInterface): Promise<void> {
         if (wakeTo) await wake($)
         if (autoDispatch) await dispatch($)
         if (autoNotes) await pipelineNote($)
+        await readyToast($)
         if (isMaster && !isDesk) {
           await pipelineSync($)
           await pipelineCreate($)
@@ -261,6 +262,25 @@ async function dispatch($: EngineInterface): Promise<void> {
     })
   } catch { /* the lease lapses; the board retries after its wait */ }
   if (status === 'error') $.ui.toast(`Auto-dispatch of ${d.task_id} to ${d.client} failed: ${said.slice(0, 160)}`)
+}
+
+// Ben's direct asks, handed back (2026-11-16, coord_mcp/direct.py). When a
+// chain he asked for himself is finished, the board records one ready item;
+// this toasts it once (the desk while it is live, else the worker) with the
+// link. Not a question: the item waits on /board's Ready for you card.
+async function readyToast($: EngineInterface): Promise<void> {
+  type Ready = { root_id: string; client: string | null; title: string; what: string }
+  let r: Ready | null = null
+  try {
+    const res = await $.http.fetch(`${DASH}/api/ready/claim`, {
+      method: 'POST', headers: FORM, body: `claimer=${isDesk ? 'desk' : 'master'}`,
+    })
+    if (!res.ok) return
+    r = (JSON.parse(res.text) as { ready: Ready | null }).ready
+  } catch { return }
+  if (!r) return
+  $.ui.toast(`Ready for you${r.client ? ` (${r.client})` : ''}: ${r.title.slice(0, 80)}. ${r.what.slice(0, 200)} ` +
+    `${DASH}/board/task/${r.root_id}`, { timeoutMs: 20000 })
 }
 
 // Pipeline notes in code (2026-11-13). The board writes the one factual line
