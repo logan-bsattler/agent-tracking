@@ -217,7 +217,10 @@ async function wake($: EngineInterface): Promise<void> {
     const res = await $.mcp.call('ccd_session_mgmt', 'send_message', { session_id: wakeTo, message: text })
     const said = res.content.map(b => ('text' in b ? b.text : '') ?? '').join(' ')
     if (res.isError || !/delivered|queued/.test(said)) {
-      $.ui.toast(`Worker wake not delivered (${sent.reason}): ${said.slice(0, 160)}`)
+      // The fallback's answer is the useful part; the in-process reason is long
+      // and only ever says the worker was not running, so it goes last.
+      $.ui.toast(`Worker wake not delivered: ${said.slice(0, 300) || 'no reply from send_message'} ` +
+        `(in-process: ${(sent.reason ?? '').slice(0, 60)})`)
     }
   } catch (err) {
     $.ui.toast(`Worker wake failed: ${String(err).slice(0, 160)}`)
