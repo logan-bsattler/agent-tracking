@@ -2600,7 +2600,8 @@ MINDER_IDS = 5                                        # ids listed per condition
 # a hold), and a hold turned into a working default ("Holds become working
 # defaults": the work goes out now; only its outward steps wait, and
 # holds.pending_gate enforces that, not dispatch). LIKE is case-insensitive.
-NOT_HOLD_PREFIXES = ("Workflow engine:", "Engine drafted reply", "Proceed on master default")
+NOT_HOLD_PREFIXES = ("Workflow engine:", "Engine drafted reply", "Proceed on master default",
+                    "Ben-direct hand-back")
 
 
 def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any]]:
