@@ -15,8 +15,12 @@ to the worker. The worker's mod consumes the marked line without a turn and
 takes the prompt at once. A minder prompt lives PROMPT_TTL (30 minutes), so
 a 15-minute check never misses one.
 
-    python -m coord_mcp.wake          # claim and print the wake line, or nothing
-    python -m coord_mcp.wake --peek   # say what it would do; claims nothing
+    python -m coord_mcp.wake          # print the wake line, or nothing
+    python -m coord_mcp.wake --peek   # say what it would do
+    python -m coord_mcp.wake --sent   # after send_message delivered/queued it
+
+worker_woken is stamped only by --sent, never by the check, so a refused
+send leaves no record of a wake that did not happen.
 """
 
 from __future__ import annotations
@@ -40,17 +44,11 @@ def wake_text(w: dict[str, Any]) -> str:
 def check(conn, peek: bool = False) -> dict[str, Any] | None:
     """{"to", "text", "id", "action", "waited"} when the worker should be woken now.
 
-    peek runs the same rule inside a transaction it rolls back, so the wake
-    is not claimed."""
-    if peek:
-        conn.execute("SAVEPOINT peek")
-        try:
-            w = store.claim_worker_wake(conn)
-        finally:
-            conn.execute("ROLLBACK TO peek")
-            conn.execute("RELEASE peek")
-    else:
-        w = store.claim_worker_wake(conn)
+    Claims nothing either way; peek only changes what main prints."""
+    # Never stamped here: the send happens after this returns and can be
+    # refused (11-16: every run hit "send_message needs a person's approval"
+    # and still stamped worker_woken). `--sent` stamps once it lands.
+    w = store.claim_worker_wake(conn, stamp=False)
     if w is None:
         return None
     to = (os.environ.get("COORD_WORKER_ID") or "").strip() or WORKER_ID
@@ -61,9 +59,14 @@ def main(argv: list[str] | None = None) -> int:
     from .db import connect
     p = argparse.ArgumentParser(prog="python -m coord_mcp.wake", description="Wake a stopped master worker.")
     p.add_argument("--peek", action="store_true", help="say what would happen; claim nothing")
+    p.add_argument("--sent", action="store_true", help="record that the wake line was delivered")
     a = p.parse_args(argv)
     conn = connect()
     try:
+        if a.sent:
+            store.mark_worker_woken(conn)
+            print("worker_woken stamped")
+            return 0
         w = check(conn, peek=a.peek)
         if w is None:
             seen = store._seen_at(conn, "worker_seen")

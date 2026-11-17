@@ -27,10 +27,19 @@ def test_waiting_prompt_wakes_once_and_peek_claims_nothing(conn, monkeypatch, ca
     _age(conn, pid, store.WAKE_AFTER)
     p = wake.check(conn, peek=True)
     assert p["id"] == pid and p["to"] == wake.WORKER_ID
-    assert store._seen_at(conn, "worker_woken") is None  # peek rolled back
     w = wake.check(conn)
     assert w["id"] == pid and w["text"].startswith(wake.WAKE_MARK)
-    assert wake.check(conn) is None  # one wake per WAKE_EVERY
+    assert store._seen_at(conn, "worker_woken") is None  # a check never stamps
+    assert wake.check(conn)["id"] == pid  # a refused send is retried next run
+
+
+def test_sent_stamps_and_holds_the_next_wake(conn):
+    pid = store.queue_operator_prompt(conn, "board")["id"]
+    _age(conn, pid, store.WAKE_AFTER)
+    assert wake.check(conn)["id"] == pid
+    store.mark_worker_woken(conn)
+    assert store._seen_at(conn, "worker_woken") is not None
+    assert wake.check(conn) is None  # one wake per WAKE_EVERY, counted from the send
 
 
 def test_live_worker_is_not_woken(conn):

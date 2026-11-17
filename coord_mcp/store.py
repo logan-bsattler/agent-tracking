@@ -2473,13 +2473,18 @@ def mark_seen(conn: sqlite3.Connection, taker: str = "master", t: int | None = N
     _mark(conn, "desk_seen" if taker == DESK else "worker_seen", now() if t is None else t)
 
 
-def claim_worker_wake(conn: sqlite3.Connection, t: int | None = None) -> dict[str, Any] | None:
+def claim_worker_wake(conn: sqlite3.Connection, t: int | None = None,
+                      stamp: bool = True) -> dict[str, Any] | None:
     """Whether the desk should wake the worker now, claiming the wake if so.
 
     {"id", "action", "waited"} for the oldest prompt the worker would take,
     when it has waited WAKE_AFTER seconds, the worker has not polled in
     WORKER_STALE, and no wake was claimed in the last WAKE_EVERY. Else None.
-    The wake carries no prompt: the worker's own poll takes it once awake."""
+    The wake carries no prompt: the worker's own poll takes it once awake.
+
+    stamp=False leaves worker_woken alone, for a caller that may fail to
+    send (the worker-wake task): it stamps with mark_worker_woken once the
+    send lands, so a refused send never reads as a wake."""
     t = now() if t is None else t
     if worker_live(conn, t):
         return None
@@ -2492,8 +2497,14 @@ def claim_worker_wake(conn: sqlite3.Connection, t: int | None = None) -> dict[st
                      [t - PROMPT_TTL, t - WAKE_AFTER, *args]).fetchone()
     if r is None:
         return None
-    _mark(conn, "worker_woken", t)
+    if stamp:
+        _mark(conn, "worker_woken", t)
     return {"id": r["id"], "action": r["action"], "waited": t - r["created_at"]}
+
+
+def mark_worker_woken(conn: sqlite3.Connection, t: int | None = None) -> None:
+    """Record a wake that was actually delivered (see claim_worker_wake stamp)."""
+    _mark(conn, "worker_woken", now() if t is None else t)
 
 
 def queued_operator_prompts(conn: sqlite3.Connection) -> int:
