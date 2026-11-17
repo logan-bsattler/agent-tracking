@@ -147,7 +147,7 @@ async def coord_create_task(params: CreateTaskInput) -> str:
         return _ok(store.create_task(
             db(), params.kind, params.title, spec,
             params.assigned_to, params.parent_id, params.from_intent, params.pipeline_task_id,
-            params.pipeline_proposal,
+            params.pipeline_proposal, refuse_duplicate_draft=True,
         ))
     except Exception as e:
         return _err(e)

@@ -23,6 +23,39 @@ def _id() -> str:
 # ------------------------------------------------------------------ tasks
 
 
+def duplicate_draft(conn: sqlite3.Connection, kind: str, spec: dict[str, Any],
+                    assigned_to: str | None, parent_id: str | None) -> str | None:
+    """The draft_reply already answering the same email, or None.
+
+    Same email = same client, same reply_from address and reply_date, created
+    in the last 14 days, not failed and not set aside. A revision (parent is a
+    draft_reply) is not a duplicate. 2026-11-17: one Royal DEV-124 email became
+    four draft_reply tasks and four Outlook drafts."""
+    if kind != "draft_reply" or not isinstance(spec, dict):
+        return None
+    frm = email.utils.parseaddr(str(spec.get("reply_from") or ""))[1].lower()
+    when = str(spec.get("reply_date") or "").strip()
+    if not frm or not when or spec.get("duplicate_ok"):
+        return None
+    if parent_id:
+        p = conn.execute("SELECT kind FROM tasks WHERE id=?", (parent_id,)).fetchone()
+        if p and p["kind"] == "draft_reply":
+            return None
+    aside = {k for k, m in outlook_marks(conn).items() if m["mark"] == SET_ASIDE}
+    for r in conn.execute("SELECT id, spec FROM tasks WHERE kind='draft_reply' AND state != 'failed' "
+                          "AND assigned_to IS ? AND created_at >= ? ORDER BY created_at",
+                          (assigned_to, now() - 14 * 86400)):
+        try:
+            s = json.loads(r["spec"] or "{}")
+        except ValueError:
+            continue
+        if (r["id"] not in aside and isinstance(s, dict)
+                and email.utils.parseaddr(str(s.get("reply_from") or ""))[1].lower() == frm
+                and str(s.get("reply_date") or "").strip() == when):
+            return r["id"]
+    return None
+
+
 def create_task(
     conn: sqlite3.Connection,
     kind: str,
@@ -33,6 +66,7 @@ def create_task(
     from_intent: str | None = None,
     pipeline_task_id: str | None = None,
     pipeline_proposal: Any = None,
+    refuse_duplicate_draft: bool = False,
 ) -> dict[str, Any]:
     if kind not in contracts.CONTRACTS:
         raise ValueError(
@@ -46,6 +80,12 @@ def create_task(
     from . import pipeline
     line_warnings = pipeline.check_create(conn, kind, spec, assigned_to, parent_id, pipeline_task_id,
                                           pipeline_proposal)  # every chain names its line
+    dup = duplicate_draft(conn, kind, spec, assigned_to, parent_id)
+    if dup and refuse_duplicate_draft:
+        raise ValueError(
+            f"draft_reply {dup} already answers this email ({spec.get('reply_from')}, {spec.get('reply_date')}). "
+            f"Dispatch or revise that one (parent_id={dup}); if it was set aside, record that on it first. "
+            "Set spec duplicate_ok=true only for a genuinely separate reply to the same message.")
     tid = _id()
     conn.execute(
         """INSERT INTO tasks(id, parent_id, kind, title, spec, state, assigned_to,
@@ -65,6 +105,8 @@ def create_task(
         out["pipeline_task_id"] = pipeline_task_id
     from . import queue
     warnings = line_warnings + queue.create_warnings(conn, kind, spec, pipeline_task_id, parent_id)
+    if dup:
+        warnings.append(f"draft_reply {dup} already answers this email; this one duplicates it")
     # Case-step advice (workflows/checks.py, 2026-11-14): never a refusal.
     from .workflows import checks
     warnings += checks.create_warnings(conn, tid, kind, title, spec, assigned_to, parent_id, from_intent,
@@ -1770,7 +1812,12 @@ def _client_since(conn: sqlite3.Connection, task_id: str, reply_date: str | None
 # 2026-11-16 a plain "draft" + "outlook" substring test read those as already
 # in Drafts, so the minder never listed them.
 _IN_DRAFTS = re.compile(r"\bdrafted (?:in)?to (?:ben's )?outlook\b|\b(?:is|are|now|already) in (?:ben's )?outlook drafts\b"
-                        r"|\boutlook draft (?:for \w+ )?(?:now|already) (?:addressed|saved|exists)\b", re.I)
+                        r"|\boutlook draft (?:for \w+ )?(?:now|already) (?:addressed|saved|exists)\b"
+                        # One Outlook draft answering several tasks (2026-11-17: "covered by <id>
+                        # Outlook draft" did not count, so the minder re-listed it and master made
+                        # a fourth DEV-124 draft).
+                        r"|\bcovered by (?:task )?[0-9a-f]{12}\b|\bsame outlook draft as\b"
+                        r"|\bno second (?:outlook )?draft\b", re.I)
 _SET_ASIDE = re.compile(r"^(?:hold|drop|do not|don't|no outlook draft)\b|\b(?:do not|don't|never) draft\b"
                         r"|\bout of outlook\b|\bhold (?:the )?outlook draft|\bnot email\b", re.I)
 _OWED = re.compile(r"^(?:retry )?draft\b[^.;]*\boutlook\b", re.I)

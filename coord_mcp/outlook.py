@@ -28,6 +28,12 @@ from email.utils import parseaddr
 from urllib.parse import quote, urlencode
 
 COMPOSE = "https://outlook.office.com/mail/deeplink/compose"
+# 2026-11-17: a click on the body editor put the caret inside Ben's signature,
+# so every body landed after the disclaimer or between his name and address.
+TYPING = ("Typing: click the body editor, press ctrl+Home so the caret sits on the first line, "
+          "above the signature (and above the quoted thread), then type. Check the screenshot: "
+          "the greeting must come before the signature line. One Outlook draft per task: if this "
+          "task (or the email it answers) is already in Drafts, open that draft instead of a new one.")
 MAIL = "https://outlook.office.com/mail/"
 _PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd)\s*:\s*)+", re.I)
 
@@ -156,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     if d["in_reply_to"]:
         print(f"In reply to: {d['in_reply_to']}")
     print(f"Body: {d['body_path']}" + ("" if d["exists"] else "  (NOT ON DISK)"))
+    print(TYPING)
     print("-" * 40)
     print(d["body"], end="")
     return 0
