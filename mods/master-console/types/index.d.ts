@@ -13,8 +13,13 @@ export type Question = {
   recommended: number | null
 }
 
+// A finished direct ask the board handed back (coord_mcp/direct.py).
+export type Ready = { root_id: string; client: string | null; title: string; what: string }
+
 declare module 'claude-code' {
   interface PluginState {
-    'master-console': { parked: Parked[]; actions: Record<string, string>; question: Question | null }
+    'master-console': {
+      parked: Parked[]; actions: Record<string, string>; question: Question | null; ready: Ready | null
+    }
   }
 }

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Parked, Question } from '../types'
+import type { Parked, Question, Ready } from '../types'
 
 // The master's console, so Ben clicks instead of typing the prompts he sends
 // most, and the master clears itself instead of waiting for his "clear".
@@ -62,6 +62,9 @@ const FALLBACK: Record<string, string> = {
 const parked = atom({ plugin: 'master-console', key: 'parked' } as const, [])
 const actions = atom({ plugin: 'master-console', key: 'actions' } as const, FALLBACK)
 const question = atom({ plugin: 'master-console', key: 'question' } as const, null)
+// The last ready item, drawn in the band with a real link: a toast is plain
+// text, so its URL cannot be clicked (Ben, 2026-11-17).
+const ready = atom({ plugin: 'master-console', key: 'ready' } as const, null)
 
 const numOr = (v: string | undefined, d: number) => (v && Number.isFinite(Number(v)) ? Number(v) : d)
 const k = (n: number) => `${Math.round(n / 1000)}k`
@@ -269,7 +272,6 @@ async function dispatch($: EngineInterface): Promise<void> {
 // this toasts it once (the desk while it is live, else the worker) with the
 // link. Not a question: the item waits on /board's Ready for you card.
 async function readyToast($: EngineInterface): Promise<void> {
-  type Ready = { root_id: string; client: string | null; title: string; what: string }
   let r: Ready | null = null
   try {
     const res = await $.http.fetch(`${DASH}/api/ready/claim`, {
@@ -279,6 +281,8 @@ async function readyToast($: EngineInterface): Promise<void> {
     r = (JSON.parse(res.text) as { ready: Ready | null }).ready
   } catch { return }
   if (!r) return
+  const item = r
+  await update($, ready, () => item)
   $.ui.toast(`Ready for you${r.client ? ` (${r.client})` : ''}: ${r.title.slice(0, 80)}. ${r.what.slice(0, 200)} ` +
     `${DASH}/board/task/${r.root_id}`, { timeoutMs: 20000 })
 }
@@ -500,6 +504,7 @@ export const register: Register = on => {
     const list = await read($, parked)
     const texts = await read($, actions)
     const q = await read($, question)
+    const rd = await read($, ready)
     const { Box, Button, Link, Text } = $.ui.resolve(e)
     const send = (text: string) => () => { void $.prompt.submit({ text, asUser: true }) }
     // The worker's work, queued to it from the desk.
@@ -535,6 +540,16 @@ export const register: Register = on => {
           ))}
           {list.length > MAX_BUTTONS ? <Text dimColor>+{list.length - MAX_BUTTONS} parked on /board</Text> : null}
         </Box>
+        {rd ? (
+          <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
+            <Text>
+              Ready for you{rd.client ? ` (${rd.client})` : ''}:{' '}
+              <Link href={`${DASH}/board/task/${rd.root_id}`}>{rd.title.slice(0, 80)}</Link>
+              <Text dimColor> {rd.what.slice(0, 160)}</Text>
+            </Text>
+            <Button key="ready-done" onPress={() => { void update($, ready, () => null) }}>Dismiss</Button>
+          </Box>
+        ) : null}
         {q ? <Text>{q.question}</Text> : null}
         {q ? (
           <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
