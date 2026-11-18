@@ -240,6 +240,14 @@ def _transcripts() -> list[tuple[Path, str, str | None]]:
     return out
 
 
+INGEST_CHUNK_LINES = 500
+INGEST_CHUNK_SECONDS = 0.5
+
+
+def _ingest_mark(conn: sqlite3.Connection, key: str, offset: int, size: int) -> None:
+    conn.execute("INSERT OR REPLACE INTO ingest_files(path, offset, size) VALUES (?,?,?)", (key, offset, size))
+
+
 def ingest(conn: sqlite3.Connection) -> dict[str, int]:
     """Pull new lines from every transcript. Incremental by byte offset."""
     files = requests = 0
@@ -257,7 +265,14 @@ def ingest(conn: sqlite3.Connection) -> dict[str, int]:
             continue
         files += 1
         seen: set[str] = set()
-        conn.execute("BEGIN")
+        # IMMEDIATE, not deferred: a deferred transaction that upgrades to a
+        # write on a stale WAL snapshot fails at once with "database is
+        # locked" (SQLITE_BUSY_SNAPSHOT), and busy_timeout never applies.
+        # Committed every INGEST_CHUNK_LINES lines or INGEST_CHUNK_SECONDS,
+        # with the offset reached, so one big transcript never holds the
+        # write lock for long and a failure loses only the open chunk.
+        conn.execute("BEGIN IMMEDIATE")
+        started, lines = time.monotonic(), 0
         try:
             with path.open("rb") as fh:
                 fh.seek(offset)
@@ -268,23 +283,28 @@ def ingest(conn: sqlite3.Connection) -> dict[str, int]:
                     if not line.endswith(b"\n"):
                         break  # partial write in progress; pick it up next run
                     offset += len(line)
+                    lines += 1
                     try:
                         d = json.loads(line)
                     except json.JSONDecodeError:
-                        continue
+                        d = None
                     if isinstance(d, dict):
                         requests += _ingest_line(conn, d, dirname, agent_id, key, seen)
-            conn.execute(
-                "INSERT OR REPLACE INTO ingest_files(path, offset, size) VALUES (?,?,?)",
-                (key, offset, size),
-            )
+                    if lines >= INGEST_CHUNK_LINES or time.monotonic() - started >= INGEST_CHUNK_SECONDS:
+                        _ingest_mark(conn, key, offset, size)
+                        conn.execute("COMMIT")
+                        conn.execute("BEGIN IMMEDIATE")
+                        started, lines = time.monotonic(), 0
+            _ingest_mark(conn, key, offset, size)
             conn.execute("COMMIT")
         except OSError:
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             files -= 1
             continue  # same as a vanished file above: skip it, keep the rest
         except Exception:
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise
     return {"files_read": files, "requests_added": requests,
             "desktop_quota_added": ingest_desktop_quota(conn),

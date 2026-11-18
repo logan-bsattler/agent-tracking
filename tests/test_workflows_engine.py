@@ -134,10 +134,10 @@ def test_one_failing_case_does_not_skip_the_next(c, monkeypatch):
     assert len(cases) == 2
     real_plan = engine.plan
 
-    def plan(conn, case, t, since):
+    def plan(conn, case, t, since, write=True):
         if case["id"] == cases[0]:
             raise ValueError("boom")
-        return real_plan(conn, case, t, since)
+        return real_plan(conn, case, t, since, write)
 
     monkeypatch.setattr(engine, "plan", plan)
     with pytest.raises(engine.EngineCaseErrors) as err:

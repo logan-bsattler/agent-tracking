@@ -373,6 +373,15 @@ def run(conn: sqlite3.Connection, dry_run: bool = False, t: int | None = None) -
                 out.append({"case": case["id"], "workflow": case["workflow"], **p})
             continue
         try:
+            # Reads first, outside the write lock: most cases have nothing to
+            # do, and a BEGIN IMMEDIATE per case back to back held the lock
+            # for most of the pass (95 transactions, 2026-11-18). A case
+            # takes the lock only when it would act or store step assignments,
+            # and plans again under it.
+            from .cases import _assign_steps
+            if (plan(conn, case, t, since, write=False) is None
+                    and not _assign_steps(conn, case, defs.get(case["workflow"]))[1]):
+                continue
             # Inside the try: a lock timeout here costs this case, not the pass.
             conn.execute("BEGIN IMMEDIATE")
             p = plan(conn, case, t, since)

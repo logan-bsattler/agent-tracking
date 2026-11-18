@@ -396,6 +396,19 @@ def mark_manual(conn: sqlite3.Connection, task_id: str, session_id: str | None =
 
 # ------------------------------------------------------------ claim and report
 
+def _claim_fingerprint(conn: sqlite3.Connection) -> tuple:
+    """Moves whenever a claim is added or changes status, or a task is stamped
+    dispatched (a hand-send included)."""
+    a = conn.execute("SELECT COUNT(*), MAX(rowid), SUM(status='claimed'), "
+                     "MAX(COALESCE(sent_at, 0)) FROM dispatch_attempts").fetchone()
+    return (*a, conn.execute("SELECT MAX(dispatched_at) FROM tasks").fetchone()[0])
+
+
+def _still_dispatchable(conn: sqlite3.Connection, task_id: str) -> bool:
+    r = conn.execute("SELECT state, picked_up_at FROM tasks WHERE id=?", (task_id,)).fetchone()
+    return bool(r) and r["state"] == "open" and r["picked_up_at"] is None
+
+
 def claim(conn: sqlite3.Connection, claimer: str | None = None, now_ts: int | None = None) -> dict[str, Any] | None:
     """next_dispatch under a LEASE-second claim, so a second process asking
     at the same moment gets the next one or nothing. The claim is the
@@ -406,9 +419,20 @@ def claim(conn: sqlite3.Connection, claimer: str | None = None, now_ts: int | No
     ensure_deps(conn)      # (waiting_on, inside next_dispatch)
     from .db import ensure_commitments
     ensure_commitments(conn)  # (due_map, inside next_dispatch)
+    # next_dispatch reads the whole board (4.5 s on an idle machine, far
+    # longer in the busy dashboard process), so it runs before the write lock,
+    # not under it: holding BEGIN IMMEDIATE through it starved every other
+    # writer past busy_timeout ("database is locked", 2026-11-18). Under the
+    # lock, the pick stands only if no claim landed and the task did not move
+    # since the read; otherwise it is re-picked there, as before.
+    seen = _claim_fingerprint(conn)
+    d = next_dispatch(conn, t)
+    if d is None:
+        return None
     conn.execute("BEGIN IMMEDIATE")
     try:
-        d = next_dispatch(conn, t)
+        if _claim_fingerprint(conn) != seen or not _still_dispatchable(conn, d["task_id"]):
+            d = next_dispatch(conn, t)
         if d is not None:
             from .store import _id
             d["attempt_id"] = _id()

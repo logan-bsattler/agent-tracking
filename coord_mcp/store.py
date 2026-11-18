@@ -286,7 +286,7 @@ def _hand_back(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
         return {}
     out: dict[str, Any] = {"ben_direct": True}
     try:
-        with savepoint(conn, "hand_back"):
+        with savepoint(conn, "hand_back", immediate=False):  # direct.sweep: long reads
             if tasked := direct.autotask(conn, task_id):
                 out["hand_back_tasks"] = tasked
             if ready := direct.sweep(conn):
@@ -302,10 +302,20 @@ class savepoint:
     release then), so a table created on first use cannot turn a success
     into an error."""
 
-    def __init__(self, conn: sqlite3.Connection, name: str):
-        self.conn, self.name = conn, name
+    def __init__(self, conn: sqlite3.Connection, name: str, immediate: bool = True):
+        self.conn, self.name, self.immediate = conn, name, immediate
+        self.began = False
 
     def __enter__(self):
+        # Outermost, a bare SAVEPOINT is a deferred BEGIN: a block that reads
+        # and then writes on a stale WAL snapshot fails at once with
+        # "database is locked", and busy_timeout never applies. So the
+        # outermost one takes the write lock up front (2026-11-18), unless
+        # the block is long reads that seldom write (immediate=False), where
+        # holding the lock through the reads would cost every other writer.
+        if self.immediate and not self.conn.in_transaction:
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.began = True
         self.conn.execute(f"SAVEPOINT {self.name}")
         return self
 
@@ -316,6 +326,16 @@ class savepoint:
             self.conn.execute(f"RELEASE {self.name}")
         except sqlite3.OperationalError:
             pass  # already committed by an executescript inside the block
+        if self.began and self.conn.in_transaction:
+            try:
+                self.conn.execute("COMMIT" if exc_type is None else "ROLLBACK")
+            except sqlite3.Error:
+                # Never leave a write transaction open on a long-lived
+                # connection: it would hold the lock until the process exits.
+                if self.conn.in_transaction:
+                    self.conn.execute("ROLLBACK")
+                if exc_type is None:
+                    raise
         return False
 
 
@@ -2889,7 +2909,7 @@ def minder_check(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[st
     from . import commitments, direct
     commitments.sweep(conn, now_ts)  # stamp slips here, so no scheduled job is needed
     try:  # a direct chain finished by a decision (Outlook drafted) becomes ready here
-        with savepoint(conn, "direct_sweep"):
+        with savepoint(conn, "direct_sweep", immediate=False):  # 6.5 s of reads
             direct.sweep(conn, now_ts)
     except Exception as e:  # noqa: BLE001 - never costs the minder
         record_loop_error(conn, "direct.sweep", str(e)[:200], now_ts)
