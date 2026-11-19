@@ -22,6 +22,10 @@ from pathlib import Path
 POLL = 0.5
 DUMP_AFTER = 10.0
 REDUMP = 60.0
+# The log reached 87.7 MB in one morning (2026-11-19). Over LOG_MAX it is
+# moved aside to lock-holders.log.1 (replacing the last one), so the pair
+# stays under 2 x LOG_MAX.
+LOG_MAX = 5 * 1024 * 1024
 
 
 def log_path() -> Path:
@@ -38,6 +42,11 @@ def dump(held: float, out: Path) -> None:
         lines.append(f"thread {names.get(ident, ident)}:")
         lines.extend(x.rstrip("\n") for x in traceback.format_stack(frame))
     out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if out.stat().st_size > LOG_MAX:
+            out.replace(out.with_name(out.name + ".1"))
+    except OSError:
+        pass
     with out.open("a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n\n")
 

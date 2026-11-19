@@ -40,10 +40,12 @@ Tables made on first use (no SCHEMA_VERSION bump): ``ready_items``.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 import sqlite3
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from .db import now
 
@@ -101,14 +103,45 @@ def is_direct(conn: sqlite3.Connection, task_id: str | None) -> bool:
     return root_of(conn, task_id) is not None
 
 
+# Per-call memo (perf review 2026-11-19): one /api/parked or minder pass
+# reached direct_ids two or three times (direct.minder_owed, then
+# sessions._candidates via idle_sessions), each walking every direct chain.
+# Inside memo() the first answer is reused for the same connection until
+# that connection writes (total_changes), so a caller's own writes are seen.
+_MEMO: contextvars.ContextVar[dict | None] = contextvars.ContextVar("direct_memo", default=None)
+
+
+@contextmanager
+def memo() -> Iterator[None]:
+    """Reuse direct_ids (and draft_replies in sweep) within this block."""
+    if _MEMO.get() is not None:
+        yield
+        return
+    tok = _MEMO.set({})
+    try:
+        yield
+    finally:
+        _MEMO.reset(tok)
+
+
+def _memo_get(conn: sqlite3.Connection, name: str, *args: Any) -> tuple[dict | None, tuple]:
+    m = _MEMO.get()
+    return m, (name, id(conn), conn.total_changes, *args)
+
+
 def direct_ids(conn: sqlite3.Connection) -> set[str]:
     """Every direct task on the board: the flagged ones and all below them.
     LIKE is only a prefilter; the flag is the parsed field, so a spec that
     merely quotes the words is not a direct ask."""
+    m, key = _memo_get(conn, "direct_ids")
+    if m is not None and key in m:
+        return set(m[key])
     out: set[str] = set()
     for r in conn.execute("SELECT id, spec FROM tasks WHERE spec LIKE '%ben-direct%'").fetchall():
         if marked(_spec(r["spec"])) and r["id"] not in out:
             out.update(c["id"] for c in chain(conn, r["id"]))
+    if m is not None:
+        m[key] = frozenset(out)
     return out
 
 
@@ -395,7 +428,16 @@ def _engine_case(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
 
 def _drafted(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
     from . import store
-    for d in store.draft_replies(conn, days=60, client=row["assigned_to"])["drafts"]:
+    # draft_replies reads every draft's body file; sweep asked once per
+    # chain (14x, ~590 file opens a minder pass). memo() keeps one per client.
+    m, key = _memo_get(conn, "draft_replies", row["assigned_to"])
+    if m is not None and key in m:
+        drafts = m[key]
+    else:
+        drafts = store.draft_replies(conn, days=60, client=row["assigned_to"])["drafts"]
+        if m is not None:
+            m[key] = drafts
+    for d in drafts:
         if d["task_id"] == row["id"]:
             return d["state"] == "drafted"
     return False
@@ -494,6 +536,12 @@ def _what(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> str:
 
 
 def sweep(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict[str, Any]]:
+    """_sweep under memo(): draft_replies is read once per client, not per chain."""
+    with memo():
+        return _sweep(conn, now_ts)
+
+
+def _sweep(conn: sqlite3.Connection, now_ts: int | None = None) -> list[dict[str, Any]]:
     """Record a ready item for every direct chain that is finished and has
     none since its last completion. Closes Ben's "review and draft" items in
     the chain behind it. Returns the items it recorded."""

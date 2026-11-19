@@ -2798,7 +2798,14 @@ def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any
 
 
 def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
-    """Ids per condition, each past its threshold. Empty lists mean nothing owed."""
+    """Ids per condition, each past its threshold. Empty lists mean nothing owed.
+    Under direct.memo(): direct_ids is read once, not once per caller."""
+    from . import direct
+    with direct.memo():
+        return _minder_owed(conn, now_ts)
+
+
+def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     parked = [d["id"] for d in parked_tasks(conn) if d["parked_at"] <= now_ts - MINDER_PARKED * 60]
     # A held task is not owed (held_tasks()), nor one with a wait on the board
     # that still holds (task_deps): its blocker going done is the signal.

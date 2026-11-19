@@ -146,7 +146,13 @@ function start($: EngineInterface): Promise<void> {
       } catch { /* dashboard down: nothing queued reaches us, nothing lost */ }
     }
     await refresh()
+    // One tick at a time (perf review 2026-11-19): a tick whose dashboard
+    // calls outlast 10 s used to overlap the next, so each session kept two
+    // or three /api/parked and dispatch claims in flight on the dashboard.
+    let ticking = false
     $.clock.every(10_000, () => {
+      if (ticking) return
+      ticking = true
       void (async () => {
         if (!isMaster && !isDesk) return  // a scheduled session, demoted on its prompt
         await refresh()  // ~20 ms; a question master just presented shows within 10s
@@ -164,7 +170,7 @@ function start($: EngineInterface): Promise<void> {
         const hhmm = () => new Date().toTimeString().slice(0, 5)
         $.ui.status(`console ${isDesk ? 'desk' : 'worker'}: tick ${hhmm()}, ${busy ? 'busy' : 'idle'}, took ${tookAt}`)
         await take()
-      })()
+      })().finally(() => { ticking = false })
     })
     $.ui.toast(`master-console: ${isDesk ? 'desk' : 'worker'} polling for queued prompts`)
   })()

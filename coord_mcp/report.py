@@ -2476,6 +2476,23 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
 
     _normal_priority()
     home: list[tuple[float, bytes]] = []  # (built at, page); one slot, swapped whole
+    # minder_status, built by the ingest thread after each minder pass. It
+    # walks every direct chain (1.5 s on the 2026-11-19 board, 13-15 s before
+    # 9d74834), and the master-console mod asked for it every 10 s from each
+    # master session via /api/parked. Served from here unless stale; the
+    # queued-prompt count is always read live.
+    minder: list[tuple[float, dict[str, Any]]] = []
+
+    def build_minder(conn) -> dict[str, Any]:
+        m = store.minder_status(conn)
+        minder[:] = [(time.monotonic(), m)]
+        return m
+
+    def minder_status(conn) -> dict[str, Any]:
+        cached = minder[0] if minder else None
+        if cached and time.monotonic() - cached[0] < 2 * INGEST_EVERY:
+            return {**cached[1], "queued": store.queued_operator_prompts(conn)}
+        return build_minder(conn)
 
     def build_home(conn) -> bytes:
         body = render(usage.summary(conn, days), usage.live(conn), refresh=60).encode("utf-8")
@@ -2507,6 +2524,10 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         store.minder_check(conn)
                     except Exception:
                         loop_error(connect, "minder")
+                    try:
+                        build_minder(conn)
+                    except Exception:
+                        loop_error(connect, "minder_status")
                     # Once a day: Ben's stale, undated loose ends are
                     # deferred behind one decision (queue.expire_due).
                     try:
@@ -2570,17 +2591,21 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
 
     threading.Thread(target=ingest_loop, name="ingest", daemon=True).start()
     # Names whatever thread holds the write lock past 10 s (lockwatch.py).
-    try:
-        from . import lockwatch
-        c = connect()
+    # Not under pytest: tests serve throwaway boards, and their dumps landed
+    # in the live ~/.coord/lock-holders.log (perf review 2026-11-19).
+    import sys
+    if "pytest" not in sys.modules:
         try:
-            db_file = c.execute("PRAGMA database_list").fetchone()[2]
-        finally:
-            c.close()
-        if db_file:
-            lockwatch.start(db_file)
-    except Exception:  # noqa: BLE001 - a diagnostic never stops the dashboard
-        loop_error(connect, "lockwatch")
+            from . import lockwatch
+            c = connect()
+            try:
+                db_file = c.execute("PRAGMA database_list").fetchone()[2]
+            finally:
+                c.close()
+            if db_file:
+                lockwatch.start(db_file)
+        except Exception:  # noqa: BLE001 - a diagnostic never stops the dashboard
+            loop_error(connect, "lockwatch")
 
     class H(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
@@ -2971,7 +2996,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 return json.dumps({"parked": store.parked_tasks(conn),
                                    "queued": store.queued_operator_prompts(conn),
                                    "question": store.current_question(conn),
-                                   "minder": store.minder_status(conn),
+                                   "minder": minder_status(conn),
                                    "actions": {k: v for k, v in store.OPERATOR_ACTIONS.items()
                                                if k in store.PAGE_ACTIONS and k != "redispatch"}}
                                   ).encode("utf-8")
@@ -2990,7 +3015,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v["parked"] = store.parked_tasks(conn)
                 v["queued"] = store.queued_operator_prompts(conn)
                 v["question"] = store.current_question(conn)
-                v["minder"] = store.minder_status(conn)
+                v["minder"] = minder_status(conn)
                 from . import direct
                 v["ready"] = direct.ready_items(conn)
                 v["fleet"] = store.fleet(conn, v, hours.CLIENTS)
