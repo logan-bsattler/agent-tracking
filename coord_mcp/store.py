@@ -56,6 +56,92 @@ def duplicate_draft(conn: sqlite3.Connection, kind: str, spec: dict[str, Any],
     return None
 
 
+def revision_target(conn: sqlite3.Connection, kind: str, spec: dict[str, Any] | None,
+                    parent_id: str | None) -> str | None:
+    """The deliverable a new deliverable task revises: spec.revises, or its
+    parent when that parent is a deliverable. None when it is not a revision."""
+    if kind != "deliverable":
+        return None
+    if isinstance(spec, dict) and spec.get("revises"):
+        return str(spec["revises"])
+    if parent_id:
+        p = conn.execute("SELECT kind FROM tasks WHERE id=?", (parent_id,)).fetchone()
+        if p is not None and p["kind"] == "deliverable":
+            return parent_id
+    return None
+
+
+def open_revision(conn: sqlite3.Connection, target: str) -> str | None:
+    """The open deliverable task already revising target, or None. One live
+    revision per deliverable (MAG audit 2026-11-17, fix 3): two at once leave
+    no single candidate to approve and promote."""
+    r = conn.execute(
+        "SELECT t.id FROM tasks t LEFT JOIN tasks p ON p.id = t.parent_id "
+        "WHERE t.kind='deliverable' AND t.state='open' "
+        "AND ((t.parent_id=? AND p.kind='deliverable') OR json_extract(t.spec, '$.revises')=?) "
+        "ORDER BY t.created_at LIMIT 1", (target, target)).fetchone()
+    return r["id"] if r else None
+
+
+def check_one_revision(conn: sqlite3.Connection, kind: str, spec: dict[str, Any] | None,
+                       parent_id: str | None) -> None:
+    target = revision_target(conn, kind, spec, parent_id)
+    if target and (live := open_revision(conn, target)):
+        raise ValueError(f"deliverable {target} already has an open revision, task {live}. One live revision "
+                         f"per deliverable: put these changes into {live} (or fail it first).")
+
+
+_RE_PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd)\s*:\s*)+", re.I)
+SAME_EMAIL_DAYS = 7
+
+
+def _subject_key(subject: Any) -> str:
+    return " ".join(_RE_PREFIX.sub("", str(subject or "")).split()).casefold()
+
+
+def _to_key(to: Any) -> frozenset[str]:
+    items = to if isinstance(to, list) else [to] if to else []
+    return frozenset(a for a in (email.utils.parseaddr(str(x))[1].lower() or str(x).strip().lower()
+                                 for x in items) if a)
+
+
+def same_email_draft(conn: sqlite3.Connection, client: str | None, subject: Any, to: Any,
+                     parent_id: str | None = None, days: int = SAME_EMAIL_DAYS) -> str | None:
+    """A live draft_reply for the same client with the same subject and the
+    same To recipients in the last `days`, or None. A revision (parent_id is
+    a draft_reply) never matches; set-aside, revised and failed drafts do not
+    count. One email, one live draft (MAG audit 2026-11-17, fix 6)."""
+    subj, to_k = _subject_key(subject), _to_key(to)
+    if not subj or not to_k:
+        return None
+    if parent_id:
+        p = conn.execute("SELECT kind FROM tasks WHERE id=?", (parent_id,)).fetchone()
+        if p is not None and p["kind"] == "draft_reply":
+            return None
+    aside = {k for k, m in outlook_marks(conn).items() if m["mark"] == SET_ASIDE}
+    revised = {r["parent_id"] for r in conn.execute(
+        "SELECT parent_id FROM tasks WHERE kind='draft_reply' AND parent_id IS NOT NULL")}
+    for r in conn.execute("SELECT id, spec, result FROM tasks WHERE kind='draft_reply' AND state != 'failed' "
+                          "AND lower(assigned_to) IS lower(?) AND created_at >= ? ORDER BY created_at DESC",
+                          (client, now() - days * 86400)):
+        if r["id"] in aside or r["id"] in revised:
+            continue
+        for raw in (r["result"], r["spec"]):
+            try:
+                d = json.loads(raw or "{}")
+            except ValueError:
+                continue
+            if isinstance(d, dict) and _subject_key(d.get("subject")) == subj and _to_key(d.get("to")) == to_k:
+                return r["id"]
+    return None
+
+
+def _same_email_error(dup: str, subject: Any) -> ValueError:
+    return ValueError(f"draft_reply {dup} already answers {str(subject)[:80]!r} to the same recipients. "
+                      f"One email, one live draft: revise it with parent_id={dup}. Set spec duplicate_ok=true "
+                      "only for a genuinely separate message.")
+
+
 def create_task(
     conn: sqlite3.Connection,
     kind: str,
@@ -80,6 +166,10 @@ def create_task(
     from . import pipeline
     line_warnings = pipeline.check_create(conn, kind, spec, assigned_to, parent_id, pipeline_task_id,
                                           pipeline_proposal)  # every chain names its line
+    check_one_revision(conn, kind, spec, parent_id)
+    if kind == "draft_reply" and isinstance(spec, dict) and not spec.get("duplicate_ok"):
+        if same := same_email_draft(conn, assigned_to, spec.get("subject"), spec.get("to"), parent_id):
+            raise _same_email_error(same, spec.get("subject"))
     dup = duplicate_draft(conn, kind, spec, assigned_to, parent_id)
     if dup and refuse_duplicate_draft:
         raise ValueError(
@@ -270,10 +360,24 @@ def complete_task(conn: sqlite3.Connection, task_id: str, result: dict[str, Any]
             out["auto_promote"] = {"ok": False, "error": str(e)[:200]}
     # Case-step advice after the close lands (workflows/checks.py): never a refusal.
     from .workflows import checks
-    if warnings := checks.complete_warnings(conn, task_id):
+    if warnings := checks.complete_warnings(conn, task_id) + self_check_warnings(row["kind"], validated):
         out["warnings"] = warnings
     out.update(_hand_back(conn, task_id))
     return out
+
+
+def self_check_warnings(kind: str, result: dict[str, Any]) -> list[str]:
+    """A deliverable handed in with its own self_check unmet: the producer
+    knew. Never a refusal (MAG audit 2026-11-17, fix 2)."""
+    if kind != "deliverable" or not result.get("done"):
+        return []
+    unmet = [str(c.get("item"))[:80] for c in result.get("self_check") or []
+             if isinstance(c, dict) and c.get("met") is False]
+    if not unmet:
+        return []
+    return [f"self_check has {len(unmet)} unmet item(s): {'; '.join(unmet[:5])}. Fix them in the file now, "
+            "before the reviewer reads it, or say in the item's note why it cannot be met. A review that "
+            "finds what you already knew costs a round."]
 
 
 def _hand_back(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
@@ -369,7 +473,26 @@ def _complete(conn: sqlite3.Connection, task_id: str, row: sqlite3.Row, validate
     if state == "done":
         # Not echoed to the producer: the review is another session's job.
         create_review(conn, task_id)
+        if row["kind"] == "draft_reply" and (aside := set_aside_revised(conn, task_id)):
+            out["set_aside"] = aside
     return out
+
+
+def set_aside_revised(conn: sqlite3.Connection, task_id: str) -> str | None:
+    """A revised draft landed and the draft it revises is already in Ben's
+    Outlook Drafts: record that one as set aside, so the Outlook step never
+    types or keeps a stale one (MAG audit 2026-11-17, fix 6). Returns the
+    decision id, or None."""
+    r = conn.execute("SELECT t.parent_id, p.kind FROM tasks t JOIN tasks p ON p.id = t.parent_id "
+                     "WHERE t.id=?", (task_id,)).fetchone()
+    if r is None or r["kind"] != "draft_reply":
+        return None
+    if outlook_marks(conn).get(r["parent_id"], {}).get("mark") != "drafted":
+        return None
+    d = record_decision(conn, f"{r['parent_id']} set aside: superseded by {task_id} ({task_id} supersedes "
+                              f"{r['parent_id']}); delete it from Outlook Drafts",
+                        because="one email, one live draft (MAG audit 2026-11-17)", task_id=r["parent_id"])
+    return d["decision_id"]
 
 
 # A draft Ben asked a client session for in chat, not through a task master
@@ -423,6 +546,8 @@ def file_draft(conn: sqlite3.Connection, client: str | None, result: dict[str, A
             if prior and _resolve(str(Path(prior).expanduser()), client, root) == body:
                 raise ValueError(f"{validated['body_path']} is already on the board as task {r['id']}. "
                                  f"If this is a revision of it, file again with parent_id={r['id']}.")
+        if same := same_email_draft(conn, client, validated["subject"], validated["to"]):
+            raise _same_email_error(same, validated["subject"])
     queue.check_landing(conn, validated.get("follow_ups") or [], client, queue.lineage(conn, parent_id))
     spec = {"from": BEN_DIRECT, "asked": asked, "reply_date": validated.get("reply_date")}
     spec = {k: v for k, v in spec.items() if v}
@@ -498,6 +623,7 @@ def file_work(conn: sqlite3.Connection, client: str | None, kind: str, result: d
             raise KeyError(f"unknown task '{parent_id}'")
         if (p["assigned_to"] or "").casefold() != client.casefold():
             raise ValueError(f"parent_id {parent_id} must be one of {client}'s tasks")
+    check_one_revision(conn, kind, sp, parent_id)
     queue.check_landing(conn, validated.get("follow_ups") or [], client, queue.lineage(conn, parent_id))
     sp.update({"from": BEN_DIRECT, **({"asked": asked} if asked else {})})
     from .db import ensure_commitments
@@ -521,6 +647,8 @@ def file_work(conn: sqlite3.Connection, client: str | None, kind: str, result: d
     out.update({"kind": kind, "from": BEN_DIRECT,
                 "next": "The board hands it back to Ben finished (review, promote, follow-ups tasked). "
                         "Do not message master."})
+    if warnings := self_check_warnings(kind, validated):
+        out["warnings"] = warnings
     out.update(_hand_back(conn, tid))
     return out
 
@@ -1519,8 +1647,10 @@ REVIEW_BRIEF = (
     "1. Read that task's spec (coord_get_task {parent}) and its result (coord_get_task_result {parent}, "
     "fields {fields}). 2. Read the file(s) under review and the checklist at dod_path. 3. Judge every "
     "checklist item in criteria BEFORE reading the producer's self_check, so it cannot steer you. "
-    "4. Put each change needed in follow_ups with who = {client}. verdict approve only when every item "
-    "is met; escalate a judgement the checklist cannot settle."
+    "4. Put each change needed in follow_ups with who = {client}. verdict approve when every item is met "
+    "and every remaining finding is non-blocker (major or minor): list those in findings and follow_ups as "
+    "notes for the next version; they do not open a new round. request_changes only for a blocker or an "
+    "unmet item; escalate a judgement the checklist cannot settle."
 )
 
 

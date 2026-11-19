@@ -182,26 +182,74 @@ def _clients(conn: sqlite3.Connection) -> set[str]:
 # ------------------------------------------------------------ hand-back
 
 
-def _pick_kind(src: sqlite3.Row, what: str) -> str:
-    """The kind of the child task a client loose end becomes."""
+def _pick_kind(src: sqlite3.Row, what: str, revision_src: bool = False) -> str:
+    """The kind of the child task a client loose end becomes. A deliverable
+    only when the source was itself a deliverable revision; otherwise a
+    deliverable's follow-up is an investigation, so it gets no automatic
+    review (MAG audit 2026-11-17, fix 3)."""
     from .workflows.engine import _REPLYISH
     if _REPLYISH.search(what or ""):
         return "draft_reply"
-    if src["kind"] in ("investigation", "data_pull", "code_change", "deliverable"):
+    if src["kind"] == "deliverable":
+        return "deliverable" if revision_src else "investigation"
+    if src["kind"] in ("investigation", "data_pull", "code_change"):
         return src["kind"]
     return "investigation"
 
 
+# Items that wait on something, or only report: deferred, never tasked (fix 4).
+_CONDITIONAL = re.compile(r"^\W*(?:when|after|once|if|on reply|next)\b", re.I)
+_STATUS_NOTE = re.compile(r"\b(?:is|are) now done\b|\bsister task\b", re.I)
+NEXT_VERSION = "Notes for the next version of "
+
+
+def waits(what: str) -> bool:
+    """A conditional item (When/After/Once/If/On reply/Next ...) or a status note."""
+    return bool(_CONDITIONAL.search(what or "") or _STATUS_NOTE.search(what or ""))
+
+
+def version_notes(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    """Notes an approving review left for the next version of task_id or any
+    task above it (fix 1), newest first."""
+    from .queue import lineage
+    ids = list(lineage(conn, task_id))
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    return [r["statement"][len(NEXT_VERSION) + 14:] for r in conn.execute(
+        f"SELECT statement FROM decisions WHERE task_id IN ({marks}) AND statement LIKE ? "
+        f"ORDER BY created_at DESC", [*ids, NEXT_VERSION + "%"])]
+
+
+def _ben_item(conn: sqlite3.Connection, task_id: str, what: str) -> str:
+    """One loose end for Ben on task_id; its id."""
+    from . import store
+    idx = conn.execute("SELECT COALESCE(MAX(idx), -1) + 1 FROM follow_ups WHERE task_id=?",
+                       (task_id,)).fetchone()[0]
+    fid = store._id()
+    conn.execute("INSERT INTO follow_ups(id, task_id, idx, who, what, state, created_at) "
+                 "VALUES (?,?,?,'Ben',?,'open',?)", (fid, task_id, idx, what[:300], now()))
+    return fid
+
+
 def autotask(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
     """Turn a just-finished direct task's open client loose ends into child
-    tasks, and resolve each with its task. Returns [{follow_up, task_id, kind}].
+    tasks, and resolve each with its task. Returns [{follow_ups, task_id, kind}].
 
-    A dod_review that requests changes revises the task it reviewed: the
-    child is that task's kind, parent = that task, spec copied with the
-    findings. Anything else: a reply-shaped item is a draft_reply, otherwise
-    the source's own kind (investigation for a review). A check-in is never
-    created here (checkin_auto owns it), nor a step the workflow engine owns:
-    a task in an engine case leaves its loose ends to the engine."""
+    Brakes (MAG audit 2026-11-17, section 3):
+    - An approving dod_review's follow-ups are notes for the next version:
+      recorded on the work it approved, never tasked (fix 1).
+    - Conditional items and status notes are deferred, not tasked (fix 4).
+    - One child per result, not one per item; a reply-shaped item still goes
+      to its own draft_reply (fix 3).
+    - A dod_review that requests changes revises the task it reviewed (that
+      task's kind, parent = that task, spec copied with the findings), unless
+      that task already has an open revision (the findings are folded into it,
+      fix 3) or the round cap is reached: then Ben gets one item, accept as
+      is or revise once more (fix 5).
+    A check-in is never created here (checkin_auto owns it), nor a step the
+    workflow engine owns: a task in an engine case leaves its loose ends to
+    the engine."""
     from . import store
     if not is_direct(conn, task_id):
         return []
@@ -217,19 +265,69 @@ def autotask(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
     if not fus:
         return []
     result = _spec(src["result"])
+    verdict = result.get("verdict") if src["kind"] == "dod_review" else None
+    if verdict == "approve":
+        target = src["parent_id"] or src["id"]
+        notes = "; ".join(f["what"] for f in fus)
+        d = store.record_decision(conn, f"{NEXT_VERSION}{target}: {notes}"[:2000],
+                                  because=f"approved with notes by review {src['id']}; carried to the next "
+                                          "version, not a new task (MAG audit 2026-11-17)", task_id=target)
+        for f in fus:
+            store.resolve_follow_up(conn, f["id"], decision_id=d["decision_id"])
+        return []
+    later = [f for f in fus if waits(f["what"])]
+    if later:
+        d = store.record_decision(conn, f"Ben-direct hand-back: {len(later)} item(s) of task {src['id']} wait on "
+                                        "their condition, deferred: " + "; ".join(f["what"] for f in later)[:1500],
+                                  because="conditional items and status notes wait (MAG audit 2026-11-17)",
+                                  task_id=src["id"])
+        for f in later:
+            store.resolve_follow_up(conn, f["id"], decision_id=d["decision_id"], defer=True)
+    fus = [f for f in fus if not waits(f["what"])]
+    if not fus:
+        return []
     base, parent = src, src["id"]
-    if src["kind"] == "dod_review" and result.get("verdict") == "request_changes" and src["parent_id"]:
+    if verdict == "request_changes" and src["parent_id"]:
         p = conn.execute("SELECT * FROM tasks WHERE id=?", (src["parent_id"],)).fetchone()
         if p is not None:
             base, parent = p, p["id"]
-    out = []
     revision = parent != src["id"]
-    groups: list[list[sqlite3.Row]] = [fus] if revision else [[f] for f in fus]
+    out: list[dict[str, Any]] = []
+    if revision:
+        if store.review_rounds(conn, base["id"]) >= store.REVIEW_ROUNDS:
+            d = store.record_decision(conn, f"Round cap: {base['title']} ({base['id']}) is not revised again; "
+                                            "Ben accepts it as is or asks for one more revision"[:200],
+                                      because=f"{store.REVIEW_ROUNDS} request_changes rounds reached "
+                                              "(MAG audit 2026-11-17)", task_id=src["id"])
+            for f in fus:
+                store.resolve_follow_up(conn, f["id"], decision_id=d["decision_id"])
+            fid = _ben_item(conn, src["id"], f"Accept {base['title'].removeprefix('Revise: ')} as is, or revise once more "
+                                             f"(review {src['id']}: {len(fus)} finding(s))")
+            return [{"follow_ups": [f["id"] for f in fus], "ben_item": fid, "kind": "round_cap"}]
+        live = store.open_revision(conn, base["id"]) if base["kind"] == "deliverable" else None
+        if live:
+            d = store.record_decision(conn, f"Findings of review {src['id']} folded into open revision {live}: "
+                                            + "; ".join(f["what"] for f in fus)[:1500],
+                                      because="one live revision per deliverable (MAG audit 2026-11-17)",
+                                      task_id=live)
+            for f in fus:
+                store.resolve_follow_up(conn, f["id"], task_id=live)
+            return [{"follow_ups": [f["id"] for f in fus], "task_id": live, "kind": base["kind"],
+                     "folded": d["decision_id"]}]
+        groups: list[list[sqlite3.Row]] = [fus]
+    else:
+        from .workflows.engine import _REPLYISH
+        replies = [f for f in fus if _REPLYISH.search(f["what"] or "")]
+        rest = [f for f in fus if f not in replies]
+        groups = [g for g in (rest, replies) if g]
+    revision_src = src["kind"] == "deliverable" and store.revision_target(
+        conn, "deliverable", _spec(src["spec"]), src["parent_id"]) is not None
     for group in groups:
         what = "; ".join(f["what"] for f in group)
-        kind = base["kind"] if revision else _pick_kind(base, what)
+        kind = base["kind"] if revision else _pick_kind(base, what, revision_src)
         spec = {k: v for k, v in _spec(base["spec"]).items()
-                if k not in ("checkin_of", "created_by", "follow_up", "findings")} if kind == base["kind"] else {}
+                if k not in ("checkin_of", "created_by", "follow_up", "findings", "revises", "notes")} \
+            if kind == base["kind"] else {}
         spec.update({"from": BEN_DIRECT, "created_by": f"ben-direct hand-back (from task {src['id']})"})
         if revision:
             spec["findings"] = [f["what"] for f in group][:10]
@@ -240,11 +338,20 @@ def autotask(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
             spec["follow_up"] = what
             spec["instructions"] = (f"Ben asked for this directly (task chain {root_of(conn, task_id)}). "
                                     f"Do the follow-up task {src['id']} named: {what}")
+            if kind == "deliverable":
+                spec["revises"] = src["id"]
+        if kind == "deliverable" and (notes := version_notes(conn, spec.get("revises") or base["id"])):
+            spec["notes"] = notes[:5]
         if kind == "draft_reply":
             for k in ("reply_from", "reply_date", "asked"):
                 if _spec(base["spec"]).get(k) or result.get(k):
                     spec.setdefault(k, _spec(base["spec"]).get(k) or result.get(k))
-        title = (("Revise: " if revision else "") + (base["title"] if revision else what))[:80]
+        title = (("Revise: " if revision else "") + (base["title"].removeprefix("Revise: ") if revision else what))[:80]
+        if kind == "deliverable" and (live := store.open_revision(conn, spec.get("revises") or base["id"])):
+            for f in group:
+                store.resolve_follow_up(conn, f["id"], task_id=live)
+            out.append({"follow_ups": [f["id"] for f in group], "task_id": live, "kind": kind})
+            continue
         new = store.create_task(conn, kind, title, spec, assigned_to=src["assigned_to"], parent_id=parent)
         tid = new["task_id"]
         for f in group:

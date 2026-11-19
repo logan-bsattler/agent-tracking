@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MAG Noise Audit</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--muted:#5f5e58;--line:#dedbd2;--card:#ffffff;--accent:#9a4a12;--good:#2f6b3a;--bad:#a12f2f;--warn:#8a6a00;--chip:#f1eee6}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#171716;--fg:#ecebe6;--muted:#a3a198;--line:#34332f;--card:#1f1f1d;--accent:#e2925a;--good:#7cc08a;--bad:#ef8a8a;--warn:#e0c060;--chip:#2a2a27}}
+:root[data-theme="dark"]{--bg:#171716;--fg:#ecebe6;--muted:#a3a198;--line:#34332f;--card:#1f1f1d;--accent:#e2925a;--good:#7cc08a;--bad:#ef8a8a;--warn:#e0c060;--chip:#2a2a27}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:28px 16px 64px}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:19px;margin:36px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
+h3{font-size:16px;margin:22px 0 6px}
+.sub{color:var(--muted);margin:0 0 20px}
+.bluf{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);padding:14px 18px;border-radius:6px}
+.bluf p{margin:6px 0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;background:var(--card)}
+th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{background:var(--chip);font-weight:600}
+td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.wrap{overflow-x:auto}
+code{background:var(--chip);padding:1px 4px;border-radius:3px;font-size:13px}
+.tag{display:inline-block;font-size:12px;padding:1px 7px;border-radius:10px;background:var(--chip);border:1px solid var(--line)}
+.brk{color:var(--bad);font-weight:600}.ok{color:var(--good);font-weight:600}.mid{color:var(--warn);font-weight:600}
+.bar{height:10px;background:var(--accent);border-radius:2px;display:inline-block;vertical-align:middle}
+ol li,ul li{margin:4px 0}
+.small{font-size:13px;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+<h1>MAG noise audit</h1>
+<p class="sub">Read-only audit of MAG board output and <code>MAG/work/</code> files, 2026-11-03 to 2026-11-17 (14 days). Board read with <code>sqlite3 …coord.db?mode=ro</code>. No code changed.</p>
+
+<div class="bluf">
+<p><b>Goal (Ben, 2026-11-17): more work reaching Done, meaning promoted or drafted. Versions are fine; the problem is chains that never finish.</b> In this window 5 of 87 MAG deliverable tasks were promoted. Work stalls between "written" and "approved": 55% of reviews ask for changes, approvals' minor notes are turned into new tasks, parallel revisions leave no single candidate, and conditional tasks keep chains open. Section 3 ranks the fixes by how much more work they get to Done.</p>
+<p><b>Bottom line: about 3% of MAG's board output reached a client or Ben. About 55% is superseded drafts or agent-to-agent process.</b> Of 301 tasks (1.28 MB, about 320k tokens of specs, results, decisions, loose ends and parks), 17 tasks (54 KB) ended as an Outlook draft or a promoted deliverable. 77 tasks (334 KB) were superseded, duplicated, failed or never read. 70 tasks (379 KB) were review rounds and process material. The <code>work/</code> folder grew by 699 files (45 MB), and 37% of those bytes are older versions of files that were later replaced.</p>
+<p><b>The biggest source is new, and it has no brakes:</b> the Ben-direct hand-back (<code>direct.autotask</code>, added 2026-11-16). In about 24 hours, one direct ask (<code>9fcb50eca2a3</code>) grew into a 32-task chain. Every loose end became its own task, often a <code>deliverable</code> that then got its own automatic review, which raised more loose ends. That path skips the two-round review cap and turns conditional notes ("When Ben closes …") into open tasks. Fixing autotask is the cheapest large win and needs no schema change.</p>
+<p><b>The workflow engine is not a MAG noise source.</b> It created 0 MAG tasks and 0 interim replies in this window.</p>
+</div>
+
+<h2>1. Findings</h2>
+<div class="wrap"><table>
+<tr><th>#</th><th>Noise source</th><th>Size (14 days)</th><th>Mechanism in coord-mcp</th></tr>
+<tr><td>1</td><td><b>DoD review rounds</b> on every deliverable, including internal ones and every intermediate revision</td><td class="n">55 reviews, 237 KB of results; 30 request_changes, 21 approve, 4 escalate; 52 superseded versions</td><td><code>store.review_owed</code> / <code>create_review</code> (store.py ~1531-1568) open a <code>dod_review</code> marked <code>"created_by": "board (auto)"</code> for every finished <code>deliverable</code>. <code>REVIEW_ROUNDS = 2</code> (store.py 1495).</td></tr>
+<tr><td>2</td><td><b>Ben-direct hand-back fan-out</b></td><td class="n">36 tasks in about 24 h (15 still open), 102 KB, plus 8 reviews of them (41 KB). One ask became 32 tasks (106 KB).</td><td><code>direct.autotask</code> (direct.py 195-255), called from <code>store._hand_back</code> (store.py ~282) on every completion in a direct chain.</td></tr>
+<tr><td>3</td><td><b>Version churn in work/</b></td><td class="n">699 files, 45.4 MB; 245 non-latest versions (16.9 MB) in 84 file families; 157 <code>.bak*</code> files (8.6 MB)</td><td>Each revision is a new task that writes a new <code>-rN</code> file (store.py 1500: "each revision is a new task"). Specs say "write in work/". Nothing marks or archives the superseded file.</td></tr>
+<tr><td>4</td><td><b>Loose-end volume for Ben</b></td><td class="n">759 follow-ups (104 KB), 2.7 per result, 54 results with 5 or more; 250 Ben items from this window still open. MAG holds 440 of 688 open Ben items board-wide (64%).</td><td>The <code>_FOLLOW_UPS</code> contract allows up to 10 per result (contracts.py 42). <code>queue.check_grouped</code> refuses only 3 or more items of the <i>same shape</i> (queue.py 341-410). "Optional: …" items pass.</td></tr>
+<tr><td>5</td><td><b>Repeat drafts of one email</b></td><td class="n">Lynx re-review: 3 draft_reply tasks, 3 Outlook drafts. MIT asks: 2 and 2. Darren note: 2 tasks.</td><td><code>store.file_draft</code> catches a duplicate only by the same <code>body_path</code> (store.py 399-405). A revision with a new body file passes, and the earlier Outlook draft is never marked set aside.</td></tr>
+</table></div>
+<p class="small">Smaller items: 74 parks (75 KB of park progress); 42 results done but never read (11 inside this window); 9 failed tasks.</p>
+
+<h3>1a. DoD reviews: reviews are larger than the work they review</h3>
+<ul>
+<li>An average review result is <b>4.3 KB</b>. An average deliverable result is <b>2.6 KB</b>. Review <code>criteria</code> alone total 146 KB, and deliverable <code>self_check</code> another 128 KB. Both restate the same checklist item by item.</li>
+<li>55% of reviews request changes. 8 of 32 deliverable chains went through 3 or more versions. The worst: the mapping-confidence page (<code>c85b6126</code>), with 16 deliverables and 7 reviews; rejected-browse FDDs (<code>4faac79a</code>), with 13 and 5; the wave-plan re-cut (<code>801c7985</code>), with 6 and 5.</li>
+<li>Only 5 MAG deliverable tasks were promoted in the window (20 files). All the other review effort went into versions that were superseded or never shipped.</li>
+<li>Each review runs in a fresh or cleared session (about 90-120k cache write, per the 2026-11-02 token note). The cost per review is far larger than its board bytes.</li>
+</ul>
+
+<h3>1b. Ben-direct hand-back: six defects in <code>direct.autotask</code></h3>
+<ol>
+<li><b>One task per loose end.</b> <code>groups = [fus] if revision else [[f] for f in fus]</code> (direct.py ~229). A result with 4 client follow-ups spawns 4 tasks.</li>
+<li><b>The source's kind is inherited.</b> <code>_pick_kind</code> returns <code>deliverable</code> when the source was a deliverable (25 of 36). Each child therefore gets an automatic <code>dod_review</code>, whose loose ends are tasked in turn. The fan-out is recursive.</li>
+<li><b>Conditional and status notes are tasked.</b> 8 children are "When Ben closes a146…", "After Ben rules 49eb…", "Once the CSVs are saved", "On reply, fill…", "Sister task 4f8e…: run…", and "Task 79ae… is now done by this task". Five of these sit open and can't run. One (<code>22fa95e6</code>) failed.</li>
+<li><b>Nits from approving reviews become tasks.</b> 4 children came from <code>approve</code> verdicts (<code>62758894</code>, <code>cdfc8994</code>, <code>06811fa0</code>, <code>ad620e52</code>). The contract lets an approval carry non-blocker findings (contracts.py 185-190), so each nit turns into a task.</li>
+<li><b>No round cap.</b> autotask never calls <code>store.review_rounds</code>. It opened a third-round revision twice: <code>750dcdd8</code> "Revise: Revise: Finish r11" and <code>4b64f896</code> "Revise: Revise: Revise 13 browse FDDs". <code>review_owed</code> then correctly declines a review, so these are revisions no one will check.</li>
+<li><b>Parallel revisions of one deliverable.</b> <code>4faac79a</code> has three revising children (<code>bae100b7</code>, <code>9bba7c31</code>, <code>316021f3</code>). <code>c85b6126</code> has three (<code>48620bba</code>, <code>19e10ee5</code>, <code>9d4a0c45</code>). The autotask revision and a filed or master revision both run.</li>
+</ol>
+
+<h3>1c. What Ben actually sees</h3>
+<ul>
+<li>Outlook: 15 drafts typed in this window. 3 of them are stale copies of a later draft: Lynx <code>3203d696</code> and <code>2037ce8c</code> (superseded by <code>4b2353de</code>), and MIT <code>9b7e01bf</code> (superseded by <code>4de49a38</code>). The DEV-124 pattern from Royal also shows up on MAG.</li>
+<li>Queue: a sample of the 250 open Ben items mixes real rulings ("Treasury: must the source be BoC…") with optional or agent-shaped items ("Optional: add an EE-source clause to MAG dod/fdd.md…", "Get one existing browse Jira ticket from Rajesh…").</li>
+</ul>
+
+<h2>2. Output by group</h2>
+<p>Bytes per task = spec + result + its decisions + its follow-ups + its park progress. Tokens ≈ bytes ÷ 4.</p>
+<div class="wrap"><table>
+<tr><th>Group</th><th>Rule used</th><th class="n">Tasks</th><th class="n">Bytes</th><th class="n">≈ Tokens</th><th>Share</th></tr>
+<tr><td><b>(a1) Reached client or Ben</b></td><td>Promoted to deliverables/, or typed into Outlook Drafts, and not superseded</td><td class="n">17</td><td class="n">54 KB</td><td class="n">14k</td><td><span class="bar" style="width:4px"></span> 4%</td></tr>
+<tr><td><b>(a2) Read and used internally</b></td><td>Final version, result read by master (mostly investigations feeding later work)</td><td class="n">119</td><td class="n">493 KB</td><td class="n">123k</td><td><span class="bar" style="width:38px"></span> 38%</td></tr>
+<tr><td><b>(b) Superseded, duplicated, failed, never read</b></td><td>52 replaced by a same-kind child; 11 never read; 9 failed; 5 drafts never typed to Outlook</td><td class="n">77</td><td class="n">334 KB</td><td class="n">84k</td><td><span class="bar" style="width:26px"></span> 26%</td></tr>
+<tr><td><b>(c) Agent-to-agent process</b></td><td>55 dod_reviews, 10 DoD-checklist drafts, 4 board-cleanup checks, 1 handoff</td><td class="n">70</td><td class="n">379 KB</td><td class="n">95k</td><td><span class="bar" style="width:30px"></span> 30%</td></tr>
+<tr><td>Open now</td><td>Not yet classifiable (15 are hand-back children)</td><td class="n">18</td><td class="n">22 KB</td><td class="n">6k</td><td>2%</td></tr>
+<tr><th>Total</th><th></th><th class="n">301</th><th class="n">1,283 KB</th><th class="n">320k</th><th></th></tr>
+</table></div>
+<p class="small">(a2) is generous. "Read by master" does not prove the result changed anything, so the true "acted on" share sits between (a1) alone and (a1)+(a2). By kind: (a1) 12 draft_reply and 5 deliverable; (b) 49 deliverable, 11 code_change, 10 draft_reply and 7 investigation; (c) 55 dod_review, 10 code_change, 4 investigation and 1 deliverable. Process material outside tasks: 415 decisions (93 KB) and 74 parks (75 KB), included above. Tasks per day: 11-04 55, 11-17 58, 11-16 31, other days 1-27.</p>
+
+<h3>Files in MAG/work/ (modified in the window)</h3>
+<div class="wrap"><table>
+<tr><th>Slice</th><th class="n">Files</th><th class="n">Bytes</th></tr>
+<tr><td>All</td><td class="n">699</td><td class="n">45.4 MB</td></tr>
+<tr><td>Older versions in a family with a newer file (84 families)</td><td class="n">245</td><td class="n">16.9 MB</td></tr>
+<tr><td><code>.bak*</code> copies</td><td class="n">157</td><td class="n">8.6 MB</td></tr>
+<tr><td>Markdown (agent-only notes)</td><td class="n">123</td><td class="n">1.3 MB</td></tr>
+<tr><td>Python builders (<code>.py</code>)</td><td class="n">110</td><td class="n">2.0 MB</td></tr>
+<tr><td>Promoted to deliverables/ (for comparison)</td><td class="n">20</td><td class="n">—</td></tr>
+</table></div>
+<p class="small">Largest families: wave-plan breakdown re-cut .xlsx (16 versions), mapping-confidence plan .xlsx (12), dev priority list .xlsx/.py/.html/check.json (11, 10, 10, 10), wave-recut internal note .md (10). Families were found by stripping rN/vN/dates/DRAFT/FINAL from names, so the counts are approximate. The older and .bak sets overlap.</p>
+
+<h2>3. Getting more work to Done (Ben's goal, ranked by work finished per unit of risk)</h2>
+<p>Done means a deliverable promoted to <code>deliverables/</code>, a draft typed into Outlook, or code approved. Versions stay as they are.</p>
+<div class="wrap"><table>
+<tr><th>#</th><th>Change</th><th>Why it gets more work to Done</th><th>Risk</th><th>Breaking?</th></tr>
+<tr><td>1</td><td><b>Approve with notes.</b> A <code>dod_review</code> whose findings are all non-blockers approves, and the board auto-promotes as it does today. The notes go into the next version's spec instead of becoming a revision task now. In <code>direct.autotask</code>, leave an approving review's follow-ups as notes, not tasks.</td><td>Most of the 30 request_changes and the 4 nit tasks were minor. Those chains would have promoted on the first or second pass instead of looping or escalating.</td><td class="ok">Low</td><td class="ok">No. The contract already allows non-blocker findings on an approval (contracts.py 185-190); this changes reviewer guidance and what the board does with them.</td></tr>
+<tr><td>2</td><td><b>The producer fixes before the review.</b> <code>complete_task</code> warns (does not refuse) when a deliverable's own <code>self_check</code> has an unmet item, and asks the producer to fix it before handing in.</td><td>Reviews stop finding what the producer already knew was missing, so more first reviews approve.</td><td class="ok">Low</td><td class="ok">No (a warning).</td></tr>
+<tr><td>3</td><td><b>One live revision per deliverable.</b> Refuse a second open revision of the same deliverable, whether from autotask, master or a filed one. In autotask, group a result's follow-ups into one child task.</td><td>There is always one candidate to approve and promote. Today <code>4faac79a</code> and <code>c85b6126</code> each had three running at once.</td><td class="ok">Low</td><td class="ok">No.</td></tr>
+<tr><td>4</td><td><b>Conditional items wait as deferred loose ends.</b> autotask defers When/After/Once/If/On reply items, and status notes, instead of opening tasks. <code>chain_state</code> ignores deferred items.</td><td>A finished chain reads Done and becomes a "Ready for you" item. Today 5 open conditional tasks block their chains.</td><td class="ok">Low</td><td class="ok">No.</td></tr>
+<tr><td>5</td><td><b>At the round cap, offer Ben "accept as is" with one click,</b> instead of autotask opening a third revision.</td><td>Chains at the cap finish on Ben's yes instead of looping (<code>750dcdd8</code>, <code>4b64f896</code>).</td><td class="ok">Low</td><td class="ok">No.</td></tr>
+<tr><td>6</td><td><b>One email, one live draft.</b> A revised draft sets aside the earlier Outlook draft (land the unpushed <code>outlook_marks</code> work).</td><td>The draft in Ben's Outlook Drafts folder is the finished one.</td><td class="ok">Low</td><td class="ok">No.</td></tr>
+</table></div>
+<p class="small"><b>Applied 2026-11-18</b> (no schema or contract change; tests in <code>tests/test_mag_done_fixes.py</code>):
+1. <code>direct.py:autotask</code> records an approving review's client follow-ups as one "Notes for the next version of &lt;id&gt;" decision and closes them; <code>direct.py:version_notes</code> puts them in the next revision's spec <code>notes</code>; <code>store.py:REVIEW_BRIEF</code> says approve when every remaining finding is non-blocker.
+2. <code>store.py:self_check_warnings</code>, called from <code>complete_task</code> and <code>file_work</code>: a warning, never a refusal.
+3. <code>store.py:check_one_revision</code> / <code>open_revision</code> / <code>revision_target</code> refuse a second open revision in <code>create_task</code> and <code>file_work</code>; <code>autotask</code> folds a review's findings into an open revision, makes one child per result (plus at most one draft_reply), and a deliverable's follow-up becomes an investigation unless the source was a revision.
+4. <code>direct.py:waits</code>: When/After/Once/If/On reply/Next items and status notes are deferred behind one decision; <code>chain_state</code> already counts only open loose ends.
+5. <code>autotask</code> checks <code>store.review_rounds</code>; at <code>REVIEW_ROUNDS</code> it opens no revision and leaves Ben one item, "Accept &lt;title&gt; as is, or revise once more".
+6. <code>store.py:same_email_draft</code> refuses a same-subject, same-To draft within 7 days in <code>create_task</code> and <code>file_draft</code> unless it revises one (or <code>duplicate_ok</code>); <code>store.py:set_aside_revised</code> records "&lt;parent&gt; set aside: superseded by &lt;new&gt; ...; delete it from Outlook Drafts" when a revision of a drafted parent lands (read by the existing <code>outlook_marks</code>).</p>
+<p class="small">Measure it with deliverable tasks promoted per week (5 in this window), share of first reviews that approve (21 of 55 reviews approved overall), and median hours from first draft to promote.</p>
+<h3>Earlier noise-reduction options (kept for reference; version limits not wanted)</h3>
+<div class="wrap"><table>
+<tr><th>#</th><th>Change</th><th>Noise removed (est.)</th><th>Risk</th><th>Breaking?</th></tr>
+<tr><td>1</td><td><b>Put brakes on <code>direct.autotask</code>.</b> (a) Make one child per result: group all client follow-ups as the revision path already does. (b) Make the child an <code>investigation</code> or <code>code_change</code> unless the item names a client-bound file, so it gets no automatic review. (c) Defer, rather than task, items starting When/After/Once/If/On reply/Next revision, plus status notes ("… is now done"). (d) Leave follow-ups of an <code>approve</code> review as client loose ends; don't task them. (e) Call <code>store.review_rounds</code>, and at <code>REVIEW_ROUNDS</code> escalate to Ben instead of opening "Revise: Revise:". (f) Refuse a second open revision of the same deliverable.</td><td>About 25 of the 36 hand-back tasks and most of their 8 reviews: roughly 110 KB and 20+ session dispatches in one day</td><td class="ok">Low</td><td class="ok">No. Behaviour inside one module; no schema or contract change.</td></tr>
+<tr><td>2</td><td><b>One email, one live draft.</b> In <code>file_draft</code>, and when master creates a draft_reply, refuse a new draft with the same subject and recipients within 7 days unless <code>parent_id</code> names the one it revises. When a revision lands after its parent was typed into Outlook, record the parent as set aside and tell Ben to delete that draft. Land the unpushed <code>outlook_marks</code> work from the reply-pipeline worktree (sibling note 2026-11-16).</td><td>3 stale Outlook drafts here (and the Royal DEV-124 case). Small in bytes, but it's the output Ben handles himself.</td><td class="ok">Low</td><td class="ok">No. It adds a refusal; existing tasks are untouched.</td></tr>
+<tr><td>3</td><td><b>Review only what leaves.</b> Skip the automatic <code>dod_review</code> when a deliverable is internal: an audience of Ben or agents, or a deliverable_type on an internal list such as mapping-confidence-workbook or task-list. Review the version about to be promoted, not each intermediate revision: one review per chain once the producer marks it final.</td><td>Roughly 30-40% of the 55 reviews and the revisions they trigger: 100-150 KB, plus 15-20 fresh-session reviews (about $1-2 each in cache writes)</td><td class="mid">Medium. This changes Ben's DoD policy ("When unsure, it is a deliverable"), so it's his call.</td><td class="ok">No schema change. It needs a new optional spec field such as <code>internal: true</code> or <code>final: true</code>; additive.</td></tr>
+<tr><td>4</td><td><b>Slimmer review results.</b> List only <i>unmet</i> criteria in full, and count the met ones. Drop <code>self_check</code> to unmet items only.</td><td>About 200 of the 274 KB of criteria and self_check</td><td class="mid">Medium. Reviewers lose the itemised audit trail.</td><td class="brk">Breaking: <code>dod_review.criteria</code> is required and an approval must judge every item (contracts.py 171-190). Live reviewer and producer sessions use the old shape.</td></tr>
+<tr><td>5</td><td><b>Follow-up budget.</b> Warn at more than 4 follow-ups per result and at "Optional:" items, and route optional items into <code>notes</code>. A later step could lower <code>_FOLLOW_UPS.max</code> from 10 to 5.</td><td>Perhaps a third of the 250 open Ben items from this window</td><td class="mid">Medium. Some real questions may be folded away.</td><td>Warning: no. Lowering <code>max</code>: <span class="brk">breaking</span>. complete_task would refuse results agents produce today.</td></tr>
+<tr><td>6</td><td><b>work/ hygiene.</b> When a revision task lands, move the file it replaces into <code>work/superseded/</code>, and keep one <code>.bak</code> per file, not one per edit. Do this in the client CLAUDE.md and spec template; the board can name the replaced path from <code>spec.revises</code>.</td><td>About 17 MB of stale versions and 8.6 MB of .bak off the working set</td><td class="ok">Low</td><td class="ok">No. Mostly outside coord-mcp.</td></tr>
+</table></div>
+<p class="small">Out of scope but related: the weekend and minder volume costs in the 2026-11-02 token note still apply. The 2026-11-16 reply-pipeline note's open item, a false <code>ben_precedent</code> match (<code>4984e0f40b1a</code>), also affects what reaches Ben.</p>
+
+<h2>4. Method and evidence</h2>
+<ul>
+<li>Tasks: <code>assigned_to='MAG' AND created_at &gt;= now-14d</code> (301 tasks: 85 investigation, 87 deliverable, 57 dod_review, 37 code_change, 24 draft_reply, 1 data_pull). Joined to <code>decisions</code>, <code>follow_ups</code>, <code>task_parks</code> and <code>promotions</code>.</li>
+<li>"Typed into Outlook" means a decision on the task containing "drafted to Outlook". "Superseded" means a child task of the same kind (deliverable, draft_reply, code_change) exists.</li>
+<li>Hand-back tasks: <code>spec.created_by</code> starts "ben-direct hand-back". Direct roots in the window: <code>9fcb50ec</code> (32-task chain), <code>c85b6126</code> (29, inside it), <code>4faac79a</code> (18), <code>316021f3</code> (10).</li>
+<li>Files: <code>os.walk</code> of <code>MAG/work/</code>, mtime in the window.</li>
+<li>Scripts and the raw dump (<code>mag.json</code>, <code>cls.json</code>, <code>files.json</code>) are in this session's scratchpad. They're not committed.</li>
+</ul>
+</main>
+</body>
+</html>
