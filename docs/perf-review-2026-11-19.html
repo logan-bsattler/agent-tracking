@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Performance review 2026-11-19</title>
+<style>
+:root{--bg:#fff;--fg:#1d1d1f;--mut:#666;--line:#ddd;--acc:#b3261e;--ok:#1b6e3a;--card:#f6f6f7}
+@media (prefers-color-scheme:dark){:root{--bg:#161618;--fg:#eee;--mut:#aaa;--line:#333;--acc:#ff8a80;--ok:#7fd49b;--card:#202024}}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,sans-serif;max-width:980px;margin:0 auto;padding:16px}
+h1{font-size:1.5em;margin:.2em 0}h2{margin-top:1.6em;border-bottom:1px solid var(--line);padding-bottom:.2em}
+.bluf{background:var(--card);border-left:4px solid var(--acc);padding:12px 16px}
+table{border-collapse:collapse;width:100%;margin:.6em 0;font-size:14px}th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--mut);font-weight:600}td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+code{font-size:.92em}.mut{color:var(--mut)}.wrap{overflow-x:auto}
+</style></head><body>
+<h1>Performance review: Claude and coord on this machine</h1>
+<p class="mut">2026-11-19, measured 11:57–12:08 plus timings on a snapshot of <code>~/.coord/coord.db</code> taken at 12:01. No code changed.</p>
+
+<div class="bluf">
+<p><b>The coord dashboard is the main CPU problem, and one fix takes about 90% of it away.</b> Each master session's console tick (every 10 s) calls <code>/api/parked</code>, which takes <b>13–15 s</b>, and <code>/api/dispatch/claim</code>, which takes <b>5–7 s</b>. The ingest loop's <code>minder_check</code> adds <b>21 s</b> every pass. Both master sessions tick, and ticks overlap because the mod does not wait for the previous one to finish, so the dashboard asks for about 4 cores of work and gets 2–4. That matches the 2–4 cores seen this morning, and it is also what holds the write lock for minutes.</p>
+<p>Almost all of that time is <code>direct.chain</code>. Commit <code>9d74834</code> (branch <code>claude/magical-morse-047d02</code>, <b>not on main yet</b>) cuts <code>/api/parked</code> to 1.5 s, <code>minder_check</code> to 3.8 s and the claim to 0.6 s. Next steps: merge it, cache the minder's owed list so <code>/api/parked</code> costs milliseconds, and stop ticks from overlapping.</p>
+<p><b>Memory is the second problem, and coord is not the cause.</b> There is 15.5 GB of RAM and 0.9 GB was free. Each Claude Code session holds about 520–690 MB of private memory, the desktop app about 2.1 GB, and the <code>Logan_Client</code> Hyper-V VM 4.1 GB and about 1 core. The coord MCP servers are small: about 35 MB and 0 CPU each.</p>
+</div>
+
+<h2>1. Top consumers, measured</h2>
+<p class="mut">The 10-minute sample ran during a quiet window: the Claude app had restarted at 11:49, only 3–5 Code sessions were live, and the dashboard was <b>down</b> (its scheduled task last ran at 11:04 and exited with code 1; nothing listens on :8765). The dashboard figures come from timing its own functions on the board snapshot.</p>
+<div class="wrap"><table>
+<tr><th>#</th><th>Consumer</th><th>CPU</th><th>Memory (private)</th><th>Evidence</th></tr>
+<tr><td>1</td><td>Coord dashboard (pythonw, when running)</td><td class="n">2–4 cores</td><td class="n">—</td><td>Earlier lock probes: pid 69988 at ~2.5 cores and pid 33236 at 2–4 cores while holding the write lock for 13–206 s. Timings below account for it.</td></tr>
+<tr><td>2</td><td>Hyper-V VM <code>Logan_Client</code> (vmmem, running since 06:35)</td><td class="n">1.33 cores (≈1 core average since boot: 20,865 CPU-s)</td><td class="n">4.1 GB</td><td>vmconnect shows the VM is open. This is not Claude, but it is the largest single block of RAM.</td></tr>
+<tr><td>3</td><td>Defender for Endpoint (MsSense + MsMpEng)</td><td class="n">1.9 cores</td><td class="n">0.9 GB</td><td>This is managed security. A likely factor is file churn: <code>lock-holders.log</code> reached 87 MB and 1M lines in 5 hours, and transcripts total 5.1 GB. Not proven.</td></tr>
+<tr><td>4</td><td>Claude desktop (Electron, 16 processes)</td><td class="n">0.84 cores</td><td class="n">2.1 GB</td><td>The main renderer alone is 674 MB.</td></tr>
+<tr><td>5</td><td>Claude Code CLI, one per session</td><td class="n">0.19 cores (3–5 sessions)</td><td class="n">520–690 MB each</td><td>At ~15 live sessions (13 clients, desk, worker, side sessions) that is about 8–10 GB, more than the RAM that is free.</td></tr>
+<tr><td>6</td><td>coord MCP servers (<code>python -m coord_mcp</code>)</td><td class="n">≈0</td><td class="n">≈35 MB each</td><td>Two processes per session: the venv launcher (12 MB) and python3.13 (≈40 MB WS). Startup cost only.</td></tr>
+<tr><td>7</td><td>Hooks (coord-guard, coord-rules, master-console, usage-pane)</td><td class="n">≈0</td><td class="n">—</td><td>They are in-process JS mods. Nothing starts Python per tool call any more, and no stray Python processes were seen.</td></tr>
+</table></div>
+
+<h2>2. Causes in coord, with timings</h2>
+<p class="mut">Each figure is the minimum of three runs on the 12:01 snapshot (1,930 tasks, 5,054 decisions, 94,521 request rows). "Fixed" means with <code>9d74834</code>'s <code>direct.py</code> applied.</p>
+<div class="wrap"><table>
+<tr><th>Call</th><th>Who calls it, how often</th><th>Now</th><th>Fixed</th><th>Hot spot</th></tr>
+<tr><td><code>GET /api/parked</code> → <code>minder_status</code></td><td>master-console <code>refresh</code>, every 10 s, in both worker and desk</td><td class="n">13.0–15.4 s</td><td class="n">1.35–1.65 s</td><td><code>minder_owed</code> → <code>direct_ids</code>, run twice (42 <code>chain</code> calls), plus <code>sessions.idle_sessions</code> → <code>_candidates</code> → <code>direct_ids</code> again</td></tr>
+<tr><td><code>POST /api/dispatch/claim</code></td><td>master-console <code>dispatch</code>, every 10 s per session (COORD_AUTO_DISPATCH=1)</td><td class="n">4.8–7.5 s</td><td class="n">0.57–0.76 s</td><td><code>next_dispatch</code> → <code>_candidates</code> → <code>direct_ids</code> (21 <code>chain</code> calls)</td></tr>
+<tr><td><code>store.minder_check</code></td><td>ingest loop, every 30 s plus the pass time</td><td class="n">21.1 s</td><td class="n">3.8 s</td><td>63 <code>chain</code> calls. <code>direct.sweep</code> calls <code>store.draft_replies</code> 14 times, which opens about 590 draft body files per pass.</td></tr>
+<tr><td><code>direct.sweep</code> alone</td><td>inside the minder</td><td class="n">7.3 s</td><td class="n">2.7 s</td><td>The same <code>draft_replies</code> repeat: 1.7 s of the 2.7 s</td></tr>
+<tr><td><code>usage.ingest</code></td><td>ingest loop, every 30 s</td><td class="n">0.5–1.1 s</td><td class="n">same</td><td>Incremental by offset. Most of the time is a scandir and stat of 3,005 transcripts. Fine.</td></tr>
+<tr><td>Home page build (<code>usage.summary</code> 7d + render)</td><td>every ingest pass</td><td class="n">≈1.3 s</td><td class="n">≈0.5 s</td><td>Runs even when nobody is looking</td></tr>
+<tr><td><code>cases.sync</code> + <code>engine.run</code></td><td>every ingest pass</td><td class="n">0.57 s</td><td class="n">0.35 s</td><td>Fine</td></tr>
+<tr><td>health, prompts/take, worker/wake, ready/claim, pipeline claims</td><td>every 10 s</td><td class="n">&lt;0.07 s</td><td class="n">—</td><td>Fine</td></tr>
+</table></div>
+<p><b>Why it piles up.</b> <code>$.clock.every(10_000, …)</code> fires a new async tick every 10 s whether or not the last one has finished. When <code>/api/parked</code> plus the claim take about 20 s, each session keeps about two ticks in flight. <code>ThreadingHTTPServer</code> starts a thread for every request, and sqlite releases the GIL, so the work runs on several cores at once. Every request holds a read snapshot, and the claim's reads ran inside <code>BEGIN IMMEDIATE</code> before <code>528e728</code>. That is how the dashboard became both the CPU hog and the long lock holder.</p>
+<p><b>Self-inflicted I/O.</b> <code>~/.coord/lock-holders.log</code> (the <code>d544a45</code> watchdog) is 87.7 MB after one morning and has no size cap. Pytest runs write to it too, because <code>tests/test_health.py</code> stacks appear in it. <code>dashboard-errors.log</code> is capped at 2 MB. <code>coord.db</code> is 60 MB, and four backups in <code>~/.coord</code> add about 158 MB.</p>
+
+<h2>3. Recommended fixes, by gain over effort</h2>
+<div class="wrap"><table>
+<tr><th>#</th><th>Fix</th><th>Gain</th><th>Effort</th><th>Risk</th></tr>
+<tr><td>A</td><td><b>Merge <code>9d74834</code></b> to main and restart the dashboard (it is down now anyway)</td><td>≈90% of dashboard CPU: about 4 cores of demand drops to about 0.4. Ends the minute-long locks.</td><td>Minutes</td><td>Low: already written and checked against every root on a snapshot</td></tr>
+<tr><td>B</td><td><b>Cache the minder's owed list.</b> Compute <code>minder_owed</code> once per ingest pass and have <code>/api/parked</code> return the cached copy, as <code>/</code> already does. Memoize <code>direct_ids</code> per connection or pass, so <code>idle_sessions</code> and <code>next_dispatch</code> reuse it.</td><td><code>/api/parked</code> 1.5 s → about 0.01 s, the claim 0.6 s → about 0.05 s</td><td>½ day</td><td>Low: the list can be up to 30 s stale, against a 10 s poll</td></tr>
+<tr><td>C</td><td><b>No overlapping ticks</b> in master-console: skip a tick while the last one is still running. Run <code>dispatch</code> only from the worker, not the desk as well.</td><td>Caps the dashboard at one request per session at a time. Halves the dispatch load.</td><td>1 h</td><td>Low</td></tr>
+<tr><td>D</td><td><b><code>direct.sweep</code>: call <code>draft_replies</code> once per sweep</b>, not once per chain (14×, about 590 file opens)</td><td><code>minder_check</code> 3.8 s → about 2 s</td><td>1–2 h</td><td>Low</td></tr>
+<tr><td>E</td><td><b>Cap and rotate <code>lock-holders.log</code></b> (for example 5 MB, as with the error log), and do not start lockwatch under pytest</td><td>Stops about 90 MB a day of writes that Defender scans</td><td>1 h</td><td>None</td></tr>
+<tr><td>F</td><td><b>Build the home page only on request</b>, or every 5 minutes, instead of every 30 s pass</td><td>About 0.5–1.3 s per pass (2–4% of a core)</td><td>1 h</td><td>Low</td></tr>
+<tr><td>G</td><td><b>Fewer live Code sessions.</b> Archive or stop idle client sessions; each holds about 0.6 GB.</td><td>Roughly 0.6 GB of RAM per session closed</td><td>Ben's habit or a policy</td><td>Slower first turn after a wake</td></tr>
+<tr><td>H</td><td><b>Hyper-V VM:</b> shut down <code>Logan_Client</code> when it is not in use, or lower its memory and vCPU count</td><td>4.1 GB of RAM and about 1 core</td><td>Ben's call</td><td>PBE delivery needs it up</td></tr>
+</table></div>
+<p class="mut">Not worth changing: the hooks (already in-process), the coord MCP server startup (≈35 MB per session), <code>usage.ingest</code> (0.5 s per 30 s), and the engine and cases sync. Not measured: Defender exclusions, which are the security team's call; and per-process load before the 11:49 app restart, because the earlier processes were gone.</p>
+</body></html>
