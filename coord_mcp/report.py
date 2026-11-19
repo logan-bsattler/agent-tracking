@@ -2569,6 +2569,18 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             time.sleep(INGEST_EVERY)
 
     threading.Thread(target=ingest_loop, name="ingest", daemon=True).start()
+    # Names whatever thread holds the write lock past 10 s (lockwatch.py).
+    try:
+        from . import lockwatch
+        c = connect()
+        try:
+            db_file = c.execute("PRAGMA database_list").fetchone()[2]
+        finally:
+            c.close()
+        if db_file:
+            lockwatch.start(db_file)
+    except Exception:  # noqa: BLE001 - a diagnostic never stops the dashboard
+        loop_error(connect, "lockwatch")
 
     class H(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
