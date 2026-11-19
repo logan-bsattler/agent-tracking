@@ -113,15 +113,32 @@ def direct_ids(conn: sqlite3.Connection) -> set[str]:
 
 
 def chain(conn: sqlite3.Connection, root_id: str) -> list[sqlite3.Row]:
-    """root_id and every task below it (parent chain and check-ins)."""
-    return conn.execute(
-        """WITH RECURSIVE d(id) AS (
-             SELECT ?
-           UNION
-             SELECT t.id FROM tasks t JOIN d ON t.parent_id = d.id
-                OR (t.spec LIKE '%checkin_of%' AND json_extract(t.spec, '$.checkin_of') = d.id)
-           ) SELECT t.* FROM tasks t JOIN d ON d.id = t.id ORDER BY t.created_at, t.rowid""",
-        (root_id,)).fetchall()
+    """root_id and every task below it (parent chain and check-ins).
+
+    Walked here, not in one recursive CTE: its join `parent_id = d.id OR
+    json_extract(spec...)` could not use tasks_parent, so every step scanned
+    every spec. With direct_ids looping it over each root on every
+    /api/parked poll and dispatch claim, the dashboard held the board's write
+    lock for minutes ("database is locked", 2026-11-19). Now one scan for
+    check-ins and indexed parent lookups."""
+    checkins: dict[str, list[str]] = {}
+    for r in conn.execute("SELECT id, json_extract(spec, '$.checkin_of') AS c FROM tasks "
+                          "WHERE spec LIKE '%checkin_of%' AND json_valid(spec)"):
+        if r["c"]:
+            checkins.setdefault(r["c"], []).append(r["id"])
+    seen, frontier = {root_id}, [root_id]
+    while frontier:
+        nxt: list[str] = []
+        for i in range(0, len(frontier), 500):
+            part = frontier[i:i + 500]
+            q = f"SELECT id FROM tasks WHERE parent_id IN ({','.join('?' * len(part))})"
+            nxt += [r["id"] for r in conn.execute(q, part)]
+        for p in frontier:
+            nxt += checkins.get(p, [])
+        frontier = [x for x in dict.fromkeys(nxt) if x not in seen]
+        seen.update(frontier)
+    return conn.execute("SELECT * FROM tasks WHERE id IN (SELECT value FROM json_each(?)) "
+                        "ORDER BY created_at, rowid", (json.dumps(sorted(seen)),)).fetchall()
 
 
 # ------------------------------------------------------------ priority
