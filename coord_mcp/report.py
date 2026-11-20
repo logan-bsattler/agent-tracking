@@ -2583,6 +2583,17 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                         propose.weekly(conn)
                     except Exception:
                         loop_error(connect, "propose")
+                    # The idle-session reaper (reaper.py): every
+                    # idle_reaper_interval minutes it ends (switch
+                    # idle_reaper on) or only logs (off, the default) idle
+                    # client sessions' claude.exe. Not under pytest.
+                    try:
+                        import sys as _sys
+                        if "pytest" not in _sys.modules:
+                            from . import reaper
+                            reaper.tick(conn)
+                    except Exception:
+                        loop_error(connect, "reaper")
                 finally:
                     conn.close()
             except Exception:  # a locked db or a vanished file: the next pass gets it

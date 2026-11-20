@@ -453,6 +453,11 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
 #   workflow_propose the dashboard runs `python -m coord_mcp.workflows propose
 #                   --file` once a week, Monday 06:30 local: up to 3
 #                   workflow proposals in Ben's queue.                  (on)
+#   idle_reaper     the dashboard ends idle client sessions' claude.exe
+#                   to free memory (coord_mcp/reaper.py); off, it only
+#                   logs what it would end to ~/.coord/reaper.log.      (off)
+#   idle_reaper_keep_rc  the reaper leaves sessions with Remote Control
+#                   on (ending one turns RC off).                        (on)
 
 REASONS = ("send", "approve", "scope", "access", "judgement")
 SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_wide": True,
@@ -478,12 +483,17 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # pipeline lines (coord_mcp/pipeline.py, Ben 2026-11-15): a root
             # client task must name a pipeline item or a proposal; the mod
             # creates the SharePoint item for a proposal Ben approved.
-            "require_pipeline": True, "pipeline_create": True}
+            "require_pipeline": True, "pipeline_create": True,
+            # the idle-session reaper (coord_mcp/reaper.py, Ben 2026-11-20): off is a
+            # dry run that only logs; keep_rc leaves sessions with Remote Control on
+            "idle_reaper": False, "idle_reaper_keep_rc": True}
 
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).
 SETTINGS = {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0,
-            "auto_checkin_hours": 4.0}  # the check-in veto window, business hours
+            "auto_checkin_hours": 4.0,  # the check-in veto window, business hours
+            # the idle-session reaper (reaper.py): idle this long, checked this often
+            "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (
@@ -1174,7 +1184,7 @@ def create_warnings(conn: sqlite3.Connection, kind: str, spec: dict[str, Any],
 def _print_settings(conn: sqlite3.Connection) -> None:
     for k, d in SETTINGS.items():
         v = setting(conn, k)
-        print(f"{k:<19} {v:g}" + ("" if v == d else f"  (default {d:g})"))
+        print(f"{k:<21} {v:g}" + ("" if v == d else f"  (default {d:g})"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1201,7 +1211,7 @@ def main(argv: list[str] | None = None) -> int:
             if a.name and a.state:
                 set_switch(conn, a.name, a.state == "on")
             for k in SWITCHES:
-                print(f"{k:<15} {'on' if switch(conn, k) else 'off'}" + ("" if switch(conn, k) == SWITCHES[k]
+                print(f"{k:<20} {'on' if switch(conn, k) else 'off'}" + ("" if switch(conn, k) == SWITCHES[k]
                                                                        else "  (default " + ("on" if SWITCHES[k] else "off") + ")"))
             _print_settings(conn)
             return 0

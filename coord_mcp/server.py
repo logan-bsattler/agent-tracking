@@ -859,6 +859,10 @@ def main() -> None:
     from .backup import start_daily
 
     start_daily()
+    # Which claude.exe this server runs under, for the idle-session reaper
+    # (reaper.py). A background write; no tool or result changes.
+    from .reaper import record_self_background
+    record_self_background()
     mcp.run()
 
 

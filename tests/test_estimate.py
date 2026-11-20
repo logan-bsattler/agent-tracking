@@ -80,7 +80,8 @@ def test_only_the_approval_closes(conn):
 
 def test_defaults():
     assert queue.SWITCHES["auto_estimate"] is True
-    assert queue.SETTINGS == {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0, "auto_checkin_hours": 4.0}
+    assert queue.SETTINGS == {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0, "auto_checkin_hours": 4.0,
+                              "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0}
 
 
 @pytest.mark.parametrize("low,high,ok", [
