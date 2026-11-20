@@ -775,7 +775,7 @@ def is_lead(conn: sqlite3.Connection, reader: str | None) -> bool:
     return r != DESK and r not in client_keys(conn)
 
 
-def board(conn: sqlite3.Connection) -> dict[str, Any]:
+def board(conn: sqlite3.Connection, loose_limit: int | None = None) -> dict[str, Any]:
     """Counts by kind and state, plus one line per open or failed task.
 
     No specs, no results. Cost grows with open work, not with history.
@@ -830,12 +830,25 @@ def board(conn: sqlite3.Connection) -> dict[str, Any]:
         """SELECT f.id, f.task_id, COALESCE(t.assigned_to, f.client) client, f.who, f.what, f.intent_id
            FROM follow_ups f LEFT JOIN tasks t ON t.id = f.task_id
            WHERE f.state='open' ORDER BY f.created_at, f.idx LIMIT ?""",
-        (LOOSE_ENDS_CAP,))]
+        (LOOSE_ENDS_CAP if loose_limit is None else min(loose_limit, LOOSE_ENDS_CAP),))]
     loose_total = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='open'").fetchone()["n"]
     deferred = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='deferred'").fetchone()["n"]
-    return {"tasks_by_kind": counts, "live": live, "loose_ends": loose,
-            "loose_ends_total": loose_total, "deferred_total": deferred,
-            "open_intents": open_intents, "as_of": now()}
+    out: dict[str, Any] = {"tasks_by_kind": counts, "live": live, "loose_ends": loose,
+                           "loose_ends_total": loose_total, "deferred_total": deferred}
+    # When the list is cut, say where the rest sit, so a capped list never
+    # reads as "caught up": counts by owner and by client, each a
+    # coord_list_follow_ups filter away.
+    if loose_total > len(loose):
+        out["loose_ends_by_who"] = {r["who"] or "?": r["n"] for r in conn.execute(
+            "SELECT trim(f.who) who, COUNT(*) n FROM follow_ups f WHERE f.state='open' "
+            "GROUP BY lower(trim(f.who)) ORDER BY n DESC")}
+        out["loose_ends_by_client"] = {r["client"] or "?": r["n"] for r in conn.execute(
+            """SELECT COALESCE(t.assigned_to, f.client) client, COUNT(*) n
+               FROM follow_ups f LEFT JOIN tasks t ON t.id = f.task_id
+               WHERE f.state='open' GROUP BY 1 ORDER BY n DESC""")}
+    out.update({
+            "open_intents": open_intents, "as_of": now()})
+    return out
 
 
 def list_follow_ups(
@@ -843,6 +856,7 @@ def list_follow_ups(
     task_id: str | None = None,
     client: str | None = None,
     who: str | None = None,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Open loose ends narrowed by source task, client and/or owner, newest first.
 
@@ -871,7 +885,7 @@ def list_follow_ups(
                      (SELECT MAX(g.rowid) FROM follow_ups g WHERE g.task_id = f.task_id) DESC,
                      f.idx
             LIMIT ?""",
-        (*args, LOOSE_ENDS_CAP))]
+        (*args, LOOSE_ENDS_CAP if limit is None else min(limit, LOOSE_ENDS_CAP)))]
     total = conn.execute(
         f"SELECT COUNT(*) n FROM follow_ups f LEFT JOIN tasks t ON t.id = f.task_id WHERE {sql_where}", args
     ).fetchone()["n"]
@@ -904,18 +918,47 @@ def record_decision(
 
 
 def get_decisions(
-    conn: sqlite3.Connection, task_id: str | None = None, include_superseded: bool = False
+    conn: sqlite3.Connection, task_id: str | None = None, include_superseded: bool = False,
+    limit: int | None = None, since: str | None = None, query: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Standing decisions, oldest first. With limit, the newest `limit` of
+    them (still oldest first within the page). since is an ISO timestamp;
+    query matches statement or because, case-insensitive."""
+    where, args = _decision_filters(task_id, include_superseded, since, query)
+    sql = "SELECT id, task_id, statement, because, created_at FROM decisions"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    if limit is None:
+        return [dict(r) for r in conn.execute(sql + " ORDER BY created_at, rowid", args)]
+    rows = [dict(r) for r in conn.execute(sql + " ORDER BY created_at DESC, rowid DESC LIMIT ?", (*args, limit))]
+    rows.reverse()
+    return rows
+
+
+def count_decisions(
+    conn: sqlite3.Connection, task_id: str | None = None, include_superseded: bool = False,
+    since: str | None = None, query: str | None = None,
+) -> int:
+    where, args = _decision_filters(task_id, include_superseded, since, query)
+    sql = "SELECT COUNT(*) n FROM decisions" + (" WHERE " + " AND ".join(where) if where else "")
+    return conn.execute(sql, args).fetchone()["n"]
+
+
+def _decision_filters(task_id, include_superseded, since, query):
     where, args = [], []
     if task_id:
         where.append("task_id = ?")
         args.append(task_id)
     if not include_superseded:
         where.append("id NOT IN (SELECT supersedes FROM decisions WHERE supersedes IS NOT NULL)")
-    sql = "SELECT id, task_id, statement, because, created_at FROM decisions"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    return [dict(r) for r in conn.execute(sql + " ORDER BY created_at", args)]
+    if since:
+        where.append("created_at >= ?")
+        args.append(since)
+    if query:
+        where.append("(lower(statement) LIKE ? OR lower(COALESCE(because,'')) LIKE ?)")
+        q = f"%{query.lower()}%"
+        args += [q, q]
+    return where, args
 
 
 # ---------------------------------------------------------------- intents

@@ -31,7 +31,9 @@ const saysClear = (text: string) =>
 
 const TASK_ID = /"task_id"\s*:\s*\\?"([0-9a-f]{12})\\?"/
 
-const DO_TASK = /bDo task ([0-9a-f]{12})b/
+// Word boundaries, not literal b's: written as /bDo task ...b/ it never matched,
+// so hand-sent dispatches were never stamped (found 2026-11-19).
+const DO_TASK = /\bDo task ([0-9a-f]{12})\b/
 const DASH = 'http://127.0.0.1:8765'
 
 const bare = (tool: string) => String(tool).split('__').pop() ?? ''

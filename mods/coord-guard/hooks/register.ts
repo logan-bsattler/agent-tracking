@@ -101,6 +101,8 @@ const numOr = (v: string | undefined, dflt: number) => {
   return Number.isFinite(n) && n > 0 ? n : dflt
 }
 
+const PROMPT_REPEAT = 5
+
 const pausedUntil = (text: string) => Number(String(text).trim()) * 1000
 
 // Every $ call sits in a hook (the engine reads them off the source), so the
@@ -111,6 +113,11 @@ export const register: Register = on => {
   let coordDir = ''
   let isOff = false
   let calls = 0
+  // Prompt banners cost ~150 tokens each and used to ride every prompt. Inject
+  // when the level changes; while it holds, repeat a context warning every
+  // PROMPT_REPEAT prompts and a rate-limit note not at all. A block always shows.
+  let lastLevel = 'ok'
+  let prompts = 0
 
   on('session.start', async ($, e, next) => {
     L = {
@@ -193,7 +200,12 @@ export const register: Register = on => {
       } catch { /* no pause file */ }
     }
     const a = assess(figures, L, nowMs)
+    const key = `${a.level}/${a.ctxLevel}`
+    const changed = key !== lastLevel
+    lastLevel = key
+    prompts = changed ? 0 : prompts + 1
     if (a.level === 'ok') return next(e)
+    if (a.level !== 'block' && !changed && (a.ctxLevel === 'ok' || prompts % PROMPT_REPEAT !== 0)) return next(e)
     const text = a.ctxLevel === 'ok'
       ? 'Usage guard: ' + a.reasons.join(' ')
       : banner(a.level === 'block' ? 'BLOCKED BY THE USAGE GUARD' : 'CONTEXT IS RUNNING OUT -- SAVE AND CLEAR', a.reasons)

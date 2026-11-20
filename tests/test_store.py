@@ -535,3 +535,41 @@ def test_teams_status_closes_needs_follow_ups(conn):
     store.propose_intent(conn, "Moog: deployed", "teams-status", base + "; effect closes; follow_ups abc, def")
     store.propose_intent(conn, "Moog: in test", "teams-status", base + "; effect progress")
     assert sorted(i["teams_message"]["effect"] for i in store.list_intents(conn)) == ["closes", "progress"]
+
+
+def test_board_cut_says_where_the_rest_are(conn):
+    """A capped loose-end list must never read as caught up (2026-11-19)."""
+    _finish_with(conn, "MAG", [{"who": "MAG", "what": "a"}, {"who": "Ben", "what": "b"}])
+    _finish_with(conn, "Moog", [{"who": "Ben", "what": "c"}])
+    b = store.board(conn, 1)
+    assert len(b["loose_ends"]) == 1 and b["loose_ends_total"] == 3
+    assert b["loose_ends_by_who"] == {"Ben": 2, "MAG": 1}
+    assert b["loose_ends_by_client"] == {"MAG": 2, "Moog": 1}
+    full = store.board(conn)
+    assert "loose_ends_by_who" not in full and len(full["loose_ends"]) == 3
+    assert store.list_follow_ups(conn, who="Ben", limit=1)["total"] == 2
+    assert len(store.list_follow_ups(conn, who="Ben", limit=1)["follow_ups"]) == 1
+
+
+def test_get_decisions_limit_query_since(conn):
+    ids = [store.record_decision(conn, f"rule {i}", "Ben ruling" if i == 0 else None)["decision_id"]
+           for i in range(5)]
+    for i, d in enumerate(ids):
+        conn.execute("UPDATE decisions SET created_at=? WHERE id=?", (f"2026-11-0{i + 1}T00:00:00", d))
+    assert [d["statement"] for d in store.get_decisions(conn)] == [f"rule {i}" for i in range(5)]
+    assert [d["statement"] for d in store.get_decisions(conn, limit=2)] == ["rule 3", "rule 4"]
+    assert [d["id"] for d in store.get_decisions(conn, limit=2, query="BEN RULING")] == [ids[0]]
+    assert store.count_decisions(conn, since="2026-11-04") == 2
+    store.record_decision(conn, "rule 4 again", supersedes=ids[4])
+    assert store.count_decisions(conn) == 5
+    assert store.count_decisions(conn, include_superseded=True) == 6
+
+
+def test_get_decisions_tool_is_paged(conn, monkeypatch):
+    import asyncio, json
+    from coord_mcp import server
+    monkeypatch.setattr(server, "db", lambda: conn)
+    for i in range(35):
+        store.record_decision(conn, f"d{i}")
+    out = json.loads(asyncio.run(server.coord_get_decisions(server.GetDecisionsInput())))
+    assert out["total"] == 35 and out["shown"] == 30 and len(out["decisions"]) == 30

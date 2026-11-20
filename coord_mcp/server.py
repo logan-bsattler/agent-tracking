@@ -415,8 +415,18 @@ class Empty(Strict):
     pass
 
 
+BOARD_LOOSE_DEFAULT = 20
+FOLLOW_UPS_DEFAULT = 20
+DECISIONS_DEFAULT = 30
+
+
+class BoardInput(Strict):
+    loose_ends_limit: int = Field(default=BOARD_LOOSE_DEFAULT, ge=0, le=100,
+                                  description="How many loose ends to list (oldest first); totals always cover all")
+
+
 @tool("coord_board", read_only=True, title="Board")
-async def coord_board(params: Empty) -> str:
+async def coord_board(params: BoardInput) -> str:
     """Counts by kind and state, one line per open or failed task, and the
     number of open intents. No specs, no results. Call this first each turn.
 
@@ -425,15 +435,17 @@ async def coord_board(params: Empty) -> str:
 
     Returns JSON: {tasks_by_kind, live: [{id, kind, title, state, assigned_to}],
     loose_ends: [{id, task_id, client, who, what}], loose_ends_total,
-    deferred_total, open_intents, as_of}
+    deferred_total, open_intents, as_of}, plus loose_ends_by_who and
+    loose_ends_by_client when the list is cut.
 
-    loose_ends is oldest first and capped; loose_ends_total counts every open
-    one. If the total is larger than the list, some are not shown: use
-    coord_list_follow_ups (by task_id, client or who) to reach them. Deferred
-    follow-ups are not loose ends; deferred_total counts them.
+    loose_ends is oldest first and capped at loose_ends_limit (default 20);
+    loose_ends_total counts every open one. If the total is larger than the
+    list you are NOT caught up: the by_who / by_client counts say where the
+    rest are, and coord_list_follow_ups (by task_id, client or who) reaches
+    them. Deferred follow-ups are not loose ends; deferred_total counts them.
     """
     try:
-        return _ok(store.board(db()))
+        return _ok(store.board(db(), params.loose_ends_limit))
     except Exception as e:
         return _err(e)
 
@@ -445,6 +457,8 @@ class ListFollowUpsInput(Strict):
                                max_length=40)
     who: str | None = Field(default=None, description="Only follow-ups owed by this party (e.g. Ben)",
                             max_length=40)
+    limit: int = Field(default=FOLLOW_UPS_DEFAULT, ge=1, le=100,
+                       description="How many to list, newest first; total always counts all")
 
 
 @tool("coord_list_follow_ups", read_only=True, title="List follow-ups")
@@ -455,10 +469,12 @@ async def coord_list_follow_ups(params: ListFollowUpsInput) -> str:
     the oldest ones, so a just-finished task's follow-ups may be cut off. The
     ids here go to coord_resolve_follow_up.
 
-    Returns JSON: {follow_ups: [{id, task_id, client, who, what}], total}
+    Returns JSON: {follow_ups: [{id, task_id, client, who, what}], total}.
+    Lists at most `limit` (default 20); when total is larger, narrow the
+    filter or raise the limit.
     """
     try:
-        return _ok(store.list_follow_ups(db(), params.task_id, params.client, params.who))
+        return _ok(store.list_follow_ups(db(), params.task_id, params.client, params.who, params.limit))
     except Exception as e:
         return _err(e)
 
@@ -498,16 +514,35 @@ async def coord_record_decision(params: DecisionInput) -> str:
 class GetDecisionsInput(Strict):
     task_id: str | None = Field(default=None, description="Filter to one task")
     include_superseded: bool = Field(default=False)
+    query: str | None = Field(default=None, max_length=100,
+                              description="Only decisions whose statement or because contains this text "
+                                          "(case-insensitive): use it to find an earlier ruling")
+    since: str | None = Field(default=None, max_length=40,
+                              description="Only decisions created at or after this ISO timestamp")
+    limit: int = Field(default=DECISIONS_DEFAULT, ge=1, le=200,
+                       description="Newest N to return")
 
 
 @tool("coord_get_decisions", read_only=True, title="Get decisions")
 async def coord_get_decisions(params: GetDecisionsInput) -> str:
-    """Standing decisions. Call immediately after a clear or compaction.
+    """Standing decisions. Call immediately after a clear or compaction: the
+    default returns the newest 30, which holds the latest handoff.
 
-    Returns JSON: [{id, task_id, statement, because, created_at}]
+    The board holds thousands of decisions, so an older ruling is not in the
+    default page: look for precedent with query (and/or task_id, since)
+    rather than raising the limit.
+
+    Returns JSON: {decisions: [{id, task_id, statement, because, created_at}]
+    (oldest first within the page), total, shown}. total > shown means older
+    matches exist.
     """
     try:
-        return _ok(store.get_decisions(db(), params.task_id, params.include_superseded))
+        conn = db()
+        rows = store.get_decisions(conn, params.task_id, params.include_superseded,
+                                   limit=params.limit, since=params.since, query=params.query)
+        total = store.count_decisions(conn, params.task_id, params.include_superseded,
+                                      since=params.since, query=params.query)
+        return _ok({"decisions": rows, "total": total, "shown": len(rows)})
     except Exception as e:
         return _err(e)
 

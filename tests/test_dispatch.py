@@ -369,3 +369,17 @@ def test_a_failed_hand_send_frees_the_session(conn):
     assert conn.execute("SELECT dispatched_at FROM tasks WHERE id=?", (b,)).fetchone()[0] is None
     with pytest.raises(ValueError):
         sessions.mark_manual(conn, b, phase="bogus")
+
+
+def test_coord_rules_do_task_pattern_matches_a_dispatch_line():
+    """The hand-send stamp keyed off /bDo task ...b/ (literal b's) and never
+    fired. Pin the pattern: it must match the dispatch line CLAUDE.md gives."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "mods/coord-rules/hooks/register.ts").read_text(encoding="utf-8")
+    m = re.search(r"const DO_TASK = /(.+)/\s*$", src, re.M)
+    assert m, "DO_TASK not found"
+    pat = re.compile(m.group(1))
+    assert pat.search("Do task 4b20aa71c0de. Start with coord_get_task.").group(1) == "4b20aa71c0de"
+    assert not pat.search("Do task 4b20aa71c0de0")       # longer id: no partial stamp
+    assert not pat.search("Redo task 4b20aa71c0de.")      # mid-word: no stamp
