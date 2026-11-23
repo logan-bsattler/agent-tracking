@@ -3110,7 +3110,7 @@ _MINDER_LABELS = (("ben_direct", "Ben's direct asks (top priority: dispatch, rea
                   ("stalled", "picked up but the client session went silent (get_session; if idle, re-dispatch)"),
                   ("undelivered", "never delivered"),
                   ("idle", "free client sessions beside owed work 15+ min (dispatch, or record why it waits)"),
-                  ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids)"),
+                  ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids; each client on its own: a busy or stuck session holds only its own client, so task the rest now)"),
                   ("failed", "failed with no decision"), ("intents", "open intents"),
                   ("unreviewed", "client deliverables with no dod_review (CVC code, emails)"),
                   ("undrafted", "finished drafts not yet in Outlook (draft each, never send)"),

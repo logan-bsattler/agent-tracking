@@ -57,6 +57,11 @@ from .db import now
 DECISION_PREFIX = "Auto-task:"   # store.NOT_HOLD_PREFIXES: bookkeeping, not a hold
 HANDOFF_SETTLE = 120             # seconds after a handoff before the minder fires for it
 _WAITS_BEN = re.compile(r"\b(once|after|when|until|if) Ben\b", re.I)
+# Conditional openers direct.waits does not catch: "Only if ...", "Before any
+# promotion ...", "At build start ...", "once DEVL access is back".
+_CONDITIONAL_MORE = re.compile(r"^\W*(only if|unless|before (any|the|each|every)|at build start|at the next"
+                               r"|at the \w+ (re-?baseline|start|kick-?off|review))\b"
+                               r"|\b(once|when|after|until) (the )?(vpn|devl|test|prod|migr|access|server)\b", re.I)
 _HANDOFF = re.compile(r"^\s*(handoff|hand-off)\b", re.I)
 
 
@@ -102,7 +107,8 @@ def _skip_why(conn: sqlite3.Connection, r: sqlite3.Row, clients: set[str]) -> st
         return f"source task is {r['src_state']}"
     if r["src_kind"] == "dod_review":
         return "on a dod_review (its verdict decides)"
-    if direct.waits(r["what"]) or _WAITS_BEN.search(r["what"] or ""):
+    if direct.waits(r["what"]) or _WAITS_BEN.search(r["what"] or "") \
+            or _CONDITIONAL_MORE.search(r["what"] or ""):
         return "conditional or a status note"
     from .queue import bens_own
     if bens_own(r["what"] or ""):

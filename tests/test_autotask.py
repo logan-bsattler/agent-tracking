@@ -103,15 +103,17 @@ def test_what_master_keeps(conn):
                        {"who": "LNK", "what": "Check the LNK side"},
                        {"who": "MAG", "what": "When DEVL is back: rerun the harness"},
                        {"who": "MAG", "what": "Draft the note to Alex once Ben decides"},
-                       {"who": "MAG", "what": "Approve or drop RAIDs 615/505"}])
+                       {"who": "MAG", "what": "Approve or drop RAIDs 615/505"},
+                       {"who": "MAG", "what": "Before any promotion: diff the output in MIGR"},
+                       {"who": "MAG", "what": "Rerun the probe once DEVL access is back"}])
     p = autotask.plan_loose(conn, LATER)
     assert p["create"] == [] and p["queued"] == {}
     assert p["left"]["Ben's"] == 1
     assert p["left"]["not a client's (master or a person)"] == 2
     assert p["left"]["names another client than its task's"] == 1
-    assert p["left"]["conditional or a status note"] == 2
+    assert p["left"]["conditional or a status note"] == 4
     assert p["left"]["reads as Ben's (approve, send, scope, estimate, access)"] == 1
-    assert len(_open_fus(conn, src)) == 7
+    assert len(_open_fus(conn, src)) == 9
 
 
 def test_no_session_is_left_for_master(conn):
