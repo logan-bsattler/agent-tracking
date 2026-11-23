@@ -2330,7 +2330,7 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
     if unclassified:
         # Same choices coord_assign_meeting takes: a client key, Internal, or skip.
         opts = "".join(f'<option value="{esc(c)}">{esc(c)}</option>'
-                       for c in [*(choices or hours.CLIENTS), meetings.INTERNAL]) + '<option value="skip">Skip</option>'
+                       for c in dict.fromkeys([*(choices or hours.CLIENTS), meetings.INTERNAL])) + '<option value="skip">Skip</option>'
         back = f"/hours?{qs}" if qs else "/hours"
 
         # One form for the whole table: rows left at "client…" stay unclassified.

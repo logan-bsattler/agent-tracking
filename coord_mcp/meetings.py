@@ -47,7 +47,7 @@ SEED_RULES = (
     [("skip", "Focus time", None), ("skip", "Lunch", None), ("skip_org", "qad.com", None),
      ("domain", "markanthony.com", "MAG"), ("domain", "mabrewing.com", "MAG"),
      ("domain", "iconicwineries.com", "MAG")]
-    + [("subject", c, c) for c in CLIENTS]
+    + [("subject", c, c) for c in CLIENTS if c != INTERNAL]  # "internal" in a subject is no signal
 )
 
 

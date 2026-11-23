@@ -26,7 +26,8 @@ Pipeline lines supersede the project layer as the roll-up.
   client must pass `pipeline_task_id` or `pipeline_proposal {title,
   origin_id?, priority?, note?}`. Children and check-ins inherit. Breaking for
   master once servers restart. Tests enforce it only under marker
-  `pipeline_rule`.
+  `pipeline_rule`. Keys in `NO_LINE` (`Internal`, Logan's own work) bill to
+  no item: exempt from the rule and never listed as unfiled.
 - **View data** `lines()` ranked by priority, overdue, end date, activity;
   `unfiled()` roots with no line.
 - **Backfill** `pipeline backfill dump <client> --out f.csv` -> an

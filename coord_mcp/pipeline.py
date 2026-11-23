@@ -49,6 +49,10 @@ PRIORITIES = ("High", "Medium", "Low")
 PRIORITY_RANK = {"High": 0, "Medium": 1, "Low": 2}
 DONE_STATUS = ("Complete",)
 NOT_CLIENTS = ("Master", "Workflows")
+# Client keys whose work bills to no SharePoint pipeline item: Logan's own
+# work (Ben, 2026-11-23). A root task needs no line and is never "unfiled";
+# one may still name a line or a proposal.
+NO_LINE = ("Internal",)
 WINDOW_DAYS = 60
 UNFILED_DAYS = 30
 CREATE_LEASE = 120
@@ -590,7 +594,7 @@ def check_create(conn: sqlite3.Connection, kind: str, spec: dict[str, Any], assi
                             "item number (the cache refreshes every 30 minutes)")
         return warnings
     inherited = bool(parent_id) or bool(isinstance(spec, dict) and spec.get("checkin_of"))
-    if inherited or not assigned_to or assigned_to in NOT_CLIENTS:
+    if inherited or not assigned_to or assigned_to in NOT_CLIENTS or assigned_to in NO_LINE:
         return warnings
     if _switch(conn, "require_pipeline"):
         raise ValueError(REFUSAL)
@@ -739,7 +743,7 @@ def unfiled(conn: sqlite3.Connection, client: str | None = None, now_ts: int | N
         args.append(client)
     out = []
     for r in conn.execute(q + " ORDER BY created_at DESC", args):
-        if r["assigned_to"] in NOT_CLIENTS or (r["spec"] and '"checkin_of"' in r["spec"]):
+        if r["assigned_to"] in NOT_CLIENTS + NO_LINE or (r["spec"] and '"checkin_of"' in r["spec"]):
             continue
         if resolve(r["id"]):
             continue

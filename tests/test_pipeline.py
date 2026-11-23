@@ -286,6 +286,19 @@ def test_lines_ranked_with_board_work(conn):
     assert len(v["proposals"]) == 1 and v["synced_at"] == NOW
 
 
+@pytest.mark.pipeline_rule
+def test_internal_needs_no_line(conn):
+    """Logan's own work bills to no pipeline item (Ben, 2026-11-23)."""
+    from coord_mcp import hours
+    queue.set_switch(conn, "require_pipeline", True)
+    assert "Internal" in hours.CLIENTS and "internal" in store.client_keys(conn)
+    root = _task(conn, "template work", client="Internal")["task_id"]
+    _task(conn, "named line", client="Internal", item="231")  # a line is still allowed
+    assert pipeline.unfiled(conn) == [] and pipeline.unfiled(conn, "Internal") == []
+    assert not store.is_lead(conn, "Internal")  # its session is a client, not master
+    assert store.get_task(conn, root)["assigned_to"] == "Internal"
+
+
 def test_unfiled_and_set_task(conn):
     pipeline.sync(conn, PAYLOAD, now_ts=NOW)
     bare = _task(conn, "bare root")["task_id"]
