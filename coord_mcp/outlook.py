@@ -12,6 +12,12 @@ autosaves to Drafts. Nothing here sends mail.
   recipients are Outlook's own; the result's to/cc only add to them.
 - New message otherwise: the compose deeplink (to, cc, subject in the URL).
 
+Attachments (result `attachments`, 2026-11-23): the built-in browser pane
+cannot upload a file, so a draft with attachments is typed in Ben's Chrome
+(Claude in Chrome), whose file_upload tool fills Outlook's hidden file input.
+Every file must be on disk, or the draft is refused; one over UPLOAD_MAX is
+listed for Ben to attach by hand.
+
     python -m coord_mcp.outlook <task_id>        # URL, then the body
     python -m coord_mcp.outlook <task_id> --json # the same as one object
 """
@@ -35,6 +41,13 @@ TYPING = ("Typing: click the body editor, press ctrl+Home so the caret sits on t
           "the greeting must come before the signature line. One Outlook draft per task: if this "
           "task (or the email it answers) is already in Drafts, open that draft instead of a new one.")
 MAIL = "https://outlook.office.com/mail/"
+# Claude in Chrome's file_upload takes at most 10 MB per call; master sends
+# one file per call, so this is the cap per file.
+UPLOAD_MAX = 10 * 1024 * 1024
+ATTACHING = ("Attachments: do this draft in Chrome (Claude in Chrome), not the Claude browser. After the body, "
+             "find Outlook's file input (find \"file\" or read_page; never click Attach, it opens a picker "
+             "you cannot see), then file_upload one path per call. Wait until each shows in the attachment "
+             "list, and until Outlook autosaves, then screenshot.")
 _PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd)\s*:\s*)+", re.I)
 
 
@@ -99,7 +112,11 @@ def draft(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
     require_approved(conn, task_id, "Draft in Outlook")
     from .holds import require_ruled
     require_ruled(conn, task_id, "Draft in Outlook")  # a reply on a master default waits for Ben's answer
-    return draft_from_result(r["id"], r["assigned_to"], r["title"], res)
+    d = draft_from_result(r["id"], r["assigned_to"], r["title"], res)
+    gone = [a["path"] for a in d["attachments"] if not a["exists"]]
+    if gone:  # a draft that silently drops its attachment is worse than none
+        raise ValueError(f"task {task_id}: attachment not on disk: {'; '.join(gone)}")
+    return d
 
 
 def draft_from_result(task_id: str, client: str | None, title: str, res: dict[str, Any]) -> dict[str, Any]:
@@ -111,6 +128,12 @@ def draft_from_result(task_id: str, client: str | None, title: str, res: dict[st
     exists = path.is_file()
     body = body_text(path.read_text(encoding="utf-8", errors="replace")) if exists else ""
     reply_from = (res.get("reply_from") or "").strip()
+    attachments = []
+    for a in res.get("attachments") or []:
+        ap = _resolve(str(Path(a).expanduser()), client, DOCS_ROOT)
+        size = ap.stat().st_size if ap.is_file() else None
+        attachments.append({"path": str(ap), "exists": size is not None, "size": size,
+                            "too_big": size is not None and size > UPLOAD_MAX})
     return {
         "task_id": task_id, "client": client, "title": title,
         "to": list(res.get("to") or []), "cc": list(res.get("cc") or []),
@@ -118,7 +141,7 @@ def draft_from_result(task_id: str, client: str | None, title: str, res: dict[st
         "reply_all": bool(reply_from), "reply_from": reply_from or None,
         "reply_date": res.get("reply_date"),
         "search": search_query(reply_from, res["subject"]) if reply_from else None,
-        "body_path": str(path), "exists": exists, "body": body,
+        "body_path": str(path), "exists": exists, "body": body, "attachments": attachments,
         # The compose deeplink stays even for a reply all: it is the fallback
         # when the original cannot be found, and Ben's own-browser link.
         "url": compose_url(res.get("to") or [], res.get("cc"), res["subject"]),
@@ -162,7 +185,12 @@ def main(argv: list[str] | None = None) -> int:
     if d["in_reply_to"]:
         print(f"In reply to: {d['in_reply_to']}")
     print(f"Body: {d['body_path']}" + ("" if d["exists"] else "  (NOT ON DISK)"))
+    for a in d["attachments"]:
+        mb = f"{a['size'] / 1048576:.1f} MB"
+        print(f"Attach: {a['path']}  ({mb}" + (", over 10 MB: Ben attaches it by hand)" if a["too_big"] else ")"))
     print(TYPING)
+    if d["attachments"]:
+        print(ATTACHING)
     print("-" * 40)
     print(d["body"], end="")
     return 0

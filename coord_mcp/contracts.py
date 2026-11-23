@@ -141,6 +141,10 @@ CONTRACTS: dict[str, dict[str, dict[str, Any]]] = {
         # Without reply_from the draft is a new message to `to` and `cc`.
         "reply_from": {"type": "str", "max": 120},
         "reply_date": {"type": "str", "max": 40},
+        # Files to attach, one full path each (2026-11-23). Optional and
+        # additive. A deliverable goes as its promoted copy in
+        # <client>/deliverables/. Master uploads them in Chrome (outlook.py).
+        "attachments": {"type": "list", "max": 10, "items": {"type": "str", "max": 400}},
         "summary": {"type": "str", "max": 300, "required": True},
         "follow_ups": _FOLLOW_UPS,
     },

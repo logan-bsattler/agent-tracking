@@ -284,3 +284,55 @@ def test_drafted_card_offers_a_retype_never_as_the_primary(conn, tmp_path):
     store.record_decision(conn, f"{tid} drafted to Outlook Drafts", "done", task_id=tid)
     page = report.drafts_page(store.draft_replies(conn))
     assert "Draft again" in page and "class=primary" not in page  # two presses, two drafts
+
+
+def _attach_task(conn, tmp_path, attachments):
+    f = tmp_path / "body.md"
+    f.write_text("Hi,\n\nAttached.\n\nThanks!\n", encoding="utf-8")
+    tid = store.create_task(conn, "draft_reply", "Send the plan", {"q": "x"}, assigned_to="Moog")["task_id"]
+    store.get_task(conn, tid, reader="Moog")
+    store.complete_task(conn, tid, {"done": True, "to": ["a@moog.com"], "subject": "Plan", "body_path": str(f),
+                                    "attachments": attachments, "summary": "Sends the plan."})
+    return tid
+
+
+def test_attachments_optional_in_contract():
+    assert "attachments?" in contracts.expected_shape("draft_reply")
+    with pytest.raises(contracts.ValidationError):
+        contracts.validate("draft_reply", {"done": True, "to": ["a@x.com"], "subject": "s", "summary": "x",
+                                           "body_path": "p", "attachments": "one.pdf"})
+
+
+def test_draft_lists_attachments_and_says_chrome(conn, tmp_path, capsys):
+    pdf = tmp_path / "plan-v1.pdf"
+    pdf.write_bytes(b"%PDF-1.4 x")
+    tid = _attach_task(conn, tmp_path, [str(pdf)])
+    assert outlook.draft(conn, tid)["attachments"] == [
+        {"path": str(pdf), "exists": True, "size": 10, "too_big": False}]
+    store.queue_operator_prompt(conn, "draft", task_id=tid)
+    text = conn.execute("SELECT text FROM operator_prompts WHERE task_id=?", (tid,)).fetchone()["text"]
+    assert "1 attachment(s): do it in Chrome" in text
+    assert str(pdf) in [f["path"] for f in store.task_files(conn, tid)]  # the page can open it
+
+
+def test_draft_without_attachments_has_none(conn, tmp_path):
+    tid, _ = _draft_task(conn, tmp_path)
+    assert outlook.draft(conn, tid)["attachments"] == []
+
+
+def test_draft_refuses_missing_attachment(conn, tmp_path):
+    tid = _attach_task(conn, tmp_path, [str(tmp_path / "gone.pdf")])
+    with pytest.raises(ValueError, match="attachment not on disk"):
+        outlook.draft(conn, tid)
+    d = outlook.draft_from_result(tid, "Moog", "t", {"done": True, "to": ["a@x.com"], "subject": "s",
+                                                     "body_path": str(tmp_path / "body.md"),
+                                                     "attachments": [str(tmp_path / "gone.pdf")]})
+    assert d["attachments"][0]["exists"] is False  # the page still shows it, marked
+
+
+def test_big_attachment_flagged(conn, tmp_path, monkeypatch):
+    big = tmp_path / "big.xlsx"
+    big.write_bytes(b"x" * 20)
+    monkeypatch.setattr(outlook, "UPLOAD_MAX", 10)
+    tid = _attach_task(conn, tmp_path, [str(big)])
+    assert outlook.draft(conn, tid)["attachments"][0]["too_big"]

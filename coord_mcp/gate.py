@@ -74,8 +74,9 @@ def _files(row: sqlite3.Row) -> list[Path]:
     """What the review judged, on disk: the body, or the files the code changed."""
     from .store import DOCS_ROOT, _resolve
     res = json.loads(row["result"] or "{}")
-    if row["kind"] == "draft_reply":
-        return [Path(res["body_path"]).expanduser()] if res.get("body_path") else []
+    if row["kind"] == "draft_reply":  # the body and what it attaches
+        body = [Path(res["body_path"]).expanduser()] if res.get("body_path") else []
+        return body + [_resolve(a, row["assigned_to"], DOCS_ROOT) for a in res.get("attachments") or []]
     return [_resolve(f["path"], row["assigned_to"], DOCS_ROOT)
             for f in res.get("files_changed") or [] if isinstance(f, dict) and f.get("path")]
 

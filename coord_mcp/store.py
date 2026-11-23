@@ -1754,9 +1754,9 @@ def review_owed(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | None
     else:
         dtype = GATED_DOD[r["kind"]]
         dod = spec.get("dod_path") or _dod_checklist(client, dtype)
-        under = ([result.get("body_path")] if r["kind"] == "draft_reply"
+        under = ([result.get("body_path"), *(result.get("attachments") or [])] if r["kind"] == "draft_reply"
                  else [f.get("path") for f in result.get("files_changed") or [] if isinstance(f, dict)])
-        fields = ('["to", "cc", "subject", "body_path", "summary"]' if r["kind"] == "draft_reply"
+        fields = ('["to", "cc", "subject", "body_path", "attachments", "summary"]' if r["kind"] == "draft_reply"
                   else '["summary", "files_changed", "tests", "notes"]')
     brief = REVIEW_BRIEF.format(parent=task_id, kind=r["kind"], fields=fields, client=client or "the client")
     return {"kind": "dod_review", "title": f"DoD review: {r['title']}"[:80], "assigned_to": client,
@@ -2603,6 +2603,8 @@ def queue_operator_prompt(conn: sqlite3.Connection, action: str, task_id: str | 
         d = _draft(conn, task_id or "")  # refuses anything but a finished draft_reply
         text = OPERATOR_ACTIONS["draft"].format(task_id=d["task_id"], client=d["client"] or "unassigned",
                                                 subject=d["subject"][:120], how=DRAFT_HOW[d["reply_all"]])
+        if d["attachments"]:  # the Claude browser cannot upload; Chrome can
+            text += f" It has {len(d['attachments'])} attachment(s): do it in Chrome, as the output says."
     elif action == "redispatch":
         task = next((d for d in parked_tasks(conn) if d["id"] == task_id), None)
         if task is None:

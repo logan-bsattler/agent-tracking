@@ -1645,6 +1645,10 @@ def _draft_envelope(dr: dict[str, Any], body_link: str) -> str:
         env["reply all to"] = " · ".join(x for x in (dr["reply_from"], dr["reply_date"]) if x)
         env["find it with"] = dr["search"]
     kv = "".join(f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in env.items())
+    for a in dr.get("attachments") or []:
+        note = "" if a["exists"] else " (not on disk)"
+        note += " (over 10 MB: attach by hand)" if a.get("too_big") else ""
+        kv += f"<dt>attach</dt><dd>{file_link(dr['task_id'], a['path'], a['exists'], Path(a['path']).name)}{esc(note)}</dd>"
     body = (f'<pre class="draft-body">{esc(dr["body"])}</pre>' if dr["exists"]
             else '<p class="empty">Body file is not on disk; nothing to draft.</p>')
     return f'<dl class="kv">{kv}<dt>body</dt><dd>{body_link}</dd></dl>{body}'

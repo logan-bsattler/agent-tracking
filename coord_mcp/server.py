@@ -208,6 +208,7 @@ class FileDraftInput(Strict):
             "The draft_reply result, exactly as coord_complete_task takes it: done (true), to, cc?, "
             "subject, body_path (the body file, already written), summary, and for a reply to an email "
             "thread reply_from (sender of the message answered) and reply_date (when it was sent); "
+            "attachments? (full paths; a deliverable as its promoted copy in <client>/deliverables/); "
             "follow_ups? e.g. [{who: 'Ben', what: 'Review and draft to <name>'}]"
         ),
     )
