@@ -10,6 +10,26 @@ import type { Register, SessionContextUsage, SessionRateLimit } from 'claude-cod
 // in: a teammate's typed result, the lead's decision record, a park.
 const EXEMPT = new Set(['coord_complete_task', 'coord_record_decision', 'coord_park_task'])
 
+// The block tells a session to park, tell the master, then clear itself. Those
+// last two steps need send_message and clear_session "self", and both are
+// deferred, so loading them needs ToolSearch. Blocking any of the three left an
+// over-limit session (LNK, 2026-11-23) unable to clear, and the master kept
+// sending it tasks. ToolSearch passes only for a select: of these tools.
+const ESCAPE = new Set(['send_message', 'SendMessage', 'clear_session'])
+const ESCAPE_TOOLS = new Set([...EXEMPT, ...ESCAPE])
+
+function escapes(bare: string, e: Record<string, unknown>): boolean {
+  if (bare === 'clear_session') return String(e.session_id ?? '') === 'self'
+  if (ESCAPE.has(bare)) return true
+  if (bare === 'ToolSearch') {
+    const q = String(e.query ?? '').trim()
+    if (!q.startsWith('select:')) return false
+    const names = q.slice(7).split(',').map(n => n.trim().split('__').pop() ?? '').filter(Boolean)
+    return names.length > 0 && names.every(n => ESCAPE_TOOLS.has(n))
+  }
+  return false
+}
+
 // coord takes a few seconds to answer initialize, so a session's first turn often
 // sees it as "still connecting". Agents read that as "down" and open coord.db
 // directly, which skips every contract the server enforces. Refuse the read and
@@ -172,8 +192,11 @@ export const register: Register = on => {
     calls += 1
     if (a.level === 'block') {
       const bare = String(e.tool).split('__').pop() ?? ''
+      if (escapes(bare, e as Record<string, unknown>)) return next(e)
       if (!EXEMPT.has(bare)) {
         return { deny: banner('BLOCKED BY THE USAGE GUARD', a.reasons) +
+          '\nStill allowed: coord_park_task, coord_complete_task, coord_record_decision, ' +
+          'send_message, clear_session "self", and ToolSearch "select:" of those.' +
           '\nPause the guard for 30 minutes with: python -m coord_mcp.guard pause 30' }
       }
       const ran = await next(e)

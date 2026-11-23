@@ -275,6 +275,30 @@ def test_other_coord_tools_still_blocked(conn, tmp_path, monkeypatch, capsys):
         assert "BLOCKED BY THE USAGE GUARD" in err
 
 
+def test_blocked_session_can_still_clear_itself(conn, tmp_path, monkeypatch, capsys):
+    t = _transcript(tmp_path, 350_000)
+    allowed = [
+        ("mcp__ccd_session_mgmt__clear_session", {"session_id": "self"}),
+        ("mcp__ccd_session_mgmt__send_message", {"session_id": "x", "message": "parked"}),
+        ("SendMessage", {"to": "x", "message": "parked"}),
+        ("ToolSearch", {"query": "select:mcp__ccd_session_mgmt__clear_session,mcp__ccd_session_mgmt__send_message"}),
+        ("ToolSearch", {"query": "select:mcp__coord__coord_park_task"}),
+    ]
+    for name, inp in allowed:
+        code, _, err = _run_hook(monkeypatch, capsys, "pretooluse",
+                                 {"transcript_path": t, "tool_name": name, "tool_input": inp})
+        assert code == 0 and err == "", name
+    refused = [
+        ("mcp__ccd_session_mgmt__clear_session", {"session_id": "local_other"}),
+        ("ToolSearch", {"query": "select:mcp__coord__coord_get_task"}),
+        ("ToolSearch", {"query": "clear session"}),
+    ]
+    for name, inp in refused:
+        code, _, _ = _run_hook(monkeypatch, capsys, "pretooluse",
+                               {"transcript_path": t, "tool_name": name, "tool_input": inp})
+        assert code == 2, (name, inp)
+
+
 def test_exempt_tool_does_not_bypass_prompt_block(conn, tmp_path, monkeypatch, capsys):
     code, _, err = _run_hook(monkeypatch, capsys, "userpromptsubmit",
                              {"transcript_path": _transcript(tmp_path, 350_000),

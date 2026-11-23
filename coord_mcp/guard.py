@@ -67,6 +67,27 @@ QUOTA_STALE_S = int(os.environ.get("COORD_QUOTA_STALE", "600"))
 # and a block that stops it doing so throws the work away.
 BLOCK_EXEMPT_TOOLS = frozenset({"coord_complete_task", "coord_record_decision", "coord_park_task"})
 
+# The block tells a session to park, tell the master, then clear itself. Those
+# steps need send_message and clear_session "self", both deferred, so loading
+# them needs ToolSearch. Blocking them left an over-limit session (LNK,
+# 2026-11-23) unable to clear while the master kept sending it tasks.
+BLOCK_ESCAPE_TOOLS = frozenset({"send_message", "SendMessage", "clear_session"})
+
+
+def escapes(tool: str, tool_input: dict[str, Any]) -> bool:
+    """True when a blocked session may still make this call to get itself cleared."""
+    if tool == "clear_session":
+        return str(tool_input.get("session_id") or "") == "self"
+    if tool in BLOCK_ESCAPE_TOOLS:
+        return True
+    if tool == "ToolSearch":
+        q = str(tool_input.get("query") or "").strip()
+        if not q.startswith("select:"):
+            return False
+        names = [n.strip().rsplit("__", 1)[-1] for n in q[7:].split(",") if n.strip()]
+        return bool(names) and all(n in BLOCK_EXEMPT_TOOLS | BLOCK_ESCAPE_TOOLS for n in names)
+    return False
+
 PAUSE_FILE = Path(os.environ.get("COORD_DB", Path.home() / ".coord" / "coord.db")).expanduser().parent / "guard-pause"
 
 
@@ -321,6 +342,8 @@ def hook(event: str) -> int:
         return 0  # the guard must never break a session by itself
     if a["level"] == "block":
         tool = (payload.get("tool_name") or "").rsplit("__", 1)[-1]
+        if event == "PreToolUse" and escapes(tool, payload.get("tool_input") or {}):
+            return 0
         if event == "PreToolUse" and tool in BLOCK_EXEMPT_TOOLS:
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext":
                 _banner("BLOCKED -- THIS WRITE IS YOUR LAST ACTION", a["reasons"]) +
