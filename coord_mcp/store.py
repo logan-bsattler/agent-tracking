@@ -2921,7 +2921,7 @@ MINDER_IDS = 5                                        # ids listed per condition
 # defaults": the work goes out now; only its outward steps wait, and
 # holds.pending_gate enforces that, not dispatch). LIKE is case-insensitive.
 NOT_HOLD_PREFIXES = ("Workflow engine:", "Engine drafted reply", "Proceed on master default",
-                    "Ben-direct hand-back", "VPN watch:", "Upkeep:")
+                    "Ben-direct hand-back", "VPN watch:", "Upkeep:", "Auto-task:")
 
 
 _DISPATCH_STMT = re.compile(r"^\s*(desk:\s*)?(dispatch|re-?dispatch|send)\b", re.I)
@@ -3088,6 +3088,12 @@ def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     undelivered = [i for i in undelivered if i not in named]
     unread = [i for i in unread if i not in named]
     loose = [i for i in loose if i not in named]
+    # Loose ends the board will task itself (autotask.py, switch auto_task_loose)
+    # are not master's to be woken for.
+    if loose and queue.switch(conn, "auto_task_loose"):
+        from . import autotask
+        mine = autotask.taken_ids(conn, now_ts)
+        loose = [i for i in loose if i not in mine]
     return {"ben_direct": owed_direct, "holds": owed_holds, "parked": parked, "upkeep": upkeep.flagged(conn), "stalled": stalled, "undelivered": undelivered,
             "idle": idle, "unread": unread, "loose": loose,
             "failed": failed, "intents": intents, "unreviewed": unreviewed,
@@ -3256,7 +3262,8 @@ def minder_check(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[st
     state = minder_state(conn, now_ts, owed)
     if not any(owed.values()):
         return {"fired": False, "reason": "nothing owed", "owed": owed, **state}
-    if state["next_eligible"] > now_ts and not _new_direct(conn, owed):
+    from . import autotask
+    if state["next_eligible"] > now_ts and not _new_direct(conn, owed) and not autotask.fast_wake(conn, owed, now_ts):
         return {"fired": False, "reason": "rate limit", "owed": owed, **state}
     if queued_operator_prompts(conn):
         return {"fired": False, "reason": "a prompt is already queued", "owed": owed, **state}

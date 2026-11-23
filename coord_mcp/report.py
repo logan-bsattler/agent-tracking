@@ -2633,6 +2633,14 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                             engine.run(conn)
                     except Exception:
                         loop_error(connect, "engine")
+                    # Board auto-tasking (autotask.py): client loose ends become
+                    # child tasks, one undelivered per client at a time. Behind
+                    # switch auto_task_loose (off); never a dispatch.
+                    try:
+                        from . import autotask
+                        autotask.run_loose(conn)
+                    except Exception:
+                        loop_error(connect, "autotask")
                     # Check-in auto-approval (checkin_auto.py): inactive until
                     # the review gate starts; behind switch auto_checkin. Only
                     # the approval is automatic, never the check-in.

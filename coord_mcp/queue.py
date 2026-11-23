@@ -458,6 +458,10 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
 #                   logs what it would end to ~/.coord/reaper.log.      (off)
 #   idle_reaper_keep_rc  the reaper leaves sessions with Remote Control
 #                   on (ending one turns RC off).                        (on)
+#   auto_task_loose the dashboard tasks client loose ends itself, one
+#                   undelivered task per client at a time (autotask.py). (off)
+#   minder_fast_wake the minder wakes master at once for a new intent or
+#                   after its handoff (self-clear), past the rate limit. (off)
 
 REASONS = ("send", "approve", "scope", "access", "judgement")
 SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_wide": True,
@@ -500,7 +504,12 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             "hold_lift": True,
             # a request_changes review opens the next round, or hands Ben the
             # chain after REVIEW_ROUNDS (store.next_round)
-            "auto_revise": True}
+            "auto_revise": True,
+            # board auto-tasking (coord_mcp/autotask.py, 2026-11-23): the dashboard
+            # tasks client loose ends itself; the minder skips its rate limit for
+            # a new intent or master's handoff. Off until Ben reviews the dry run
+            # (python -m coord_mcp.autotask dry-run).
+            "auto_task_loose": False, "minder_fast_wake": False}
 
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).
@@ -510,7 +519,9 @@ SETTINGS = {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0,
             "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0,
             # upkeep.py: VPN probe interval; a fresh session's Messages ceiling
             # (thousands of tokens); quiet this long before a code restart
-            "vpn_interval_minutes": 3.0, "clear_max_messages_k": 40.0, "restart_idle_minutes": 2.0}
+            "vpn_interval_minutes": 3.0, "clear_max_messages_k": 40.0, "restart_idle_minutes": 2.0,
+            # auto_task_loose tops a client up to this many undelivered tasks
+            "auto_task_buffer": 1.0}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (

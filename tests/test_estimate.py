@@ -83,7 +83,8 @@ def test_defaults():
     assert {k: v for k, v in queue.SETTINGS.items()
             if k not in ("vpn_interval_minutes", "clear_max_messages_k", "restart_idle_minutes")} == {
         "estimate_max_ratio": 1.5, "estimate_max_high": 24.0, "auto_checkin_hours": 4.0,
-                              "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0}
+                              "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0,
+                              "auto_task_buffer": 1.0}
 
 
 @pytest.mark.parametrize("low,high,ok", [
