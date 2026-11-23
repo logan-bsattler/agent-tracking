@@ -1359,7 +1359,7 @@ THEME_JS = """<script>
 </script>"""
 
 # Nav links in the order every page shows them; the current page is the filled tab.
-NAV = (("/", "Usage"), ("/board", "Board"), ("/pipeline", "Pipeline"), ("/clients", "Clients"), ("/queue", "Queue"), ("/hours", "Hours"), ("/drafts", "Drafts"),
+NAV = (("/", "Usage"), ("/board", "Board"), ("/pipeline", "Pipeline"), ("/clients", "Clients"), ("/queue", "Queue"), ("/hours", "Hours"), ("/team-time", "Team Time"), ("/drafts", "Drafts"),
        ("/deliverables", "Deliverables"), ("/intents", "Intents"), ("/commitments", "Commitments"),
        ("/workflows", "Workflows"))
 
@@ -2350,6 +2350,67 @@ def hours_page(rows: list[dict[str, Any]], start: str, end: str, client: str | N
     return page("Hours", "Hours", title, caveat, f'{kpi}{loose}{table}{"".join(per)}{pushed}', actions=form)
 
 
+def _th(h: float) -> str:
+    return f"{h:g}" if h else '<span class="muted">·</span>'
+
+
+def team_time_page(data: dict[str, Any], period: str | None) -> str:
+    """Ben's team's GTK hours for one period: charge code x person, then each
+    person's rows by day. Read-only; the data comes from /team-time/import."""
+    from . import team_time
+    known = team_time.periods(data)
+    sub = ('Read-only copy of GlobalToolkit timesheets, posted by the pull script in Ben&rsquo;s GTK tab. '
+           'Each pull replaces its period. Nothing here writes to GTK.')
+    if not known:
+        return page("Team Time", "Team Time", "Team Time", sub,
+                    '<p class="empty">No periods imported yet. Run gtk-pull.js in the GTK tab.</p>')
+    period = period if period in known else known[0]
+    e = data["periods"][period]
+    opts = "".join(f'<option{" selected" if k == period else ""}>{esc(k)}</option>' for k in known)
+    form = (f'<form class="filter" method="get" action="/team-time"><label>Period ending '
+            f'<select name="period" onchange="this.form.submit()">{opts}</select></label>'
+            f'<button>Show</button><a class="btn" href="/team-time.csv?period={quote(period)}">CSV</a></form>')
+    people = e["people"]
+    codes = sorted({r["charge_code"] for p in people for r in p["rows"]})
+    grid = {(r_code, p["name"]): sum(r["total"] for r in p["rows"] if r["charge_code"] == r_code)
+            for p in people for r_code in codes}
+    head = "".join(f'<th class="n">{esc(p["name"])}</th>' for p in people)
+    lines = []
+    for c in codes:
+        cells = "".join(f'<td class="n">{_th(grid[(c, p["name"])])}</td>' for p in people)
+        lines.append(f'<tr><td>{esc(c)}</td>{cells}<td class="n"><b>{_th(sum(grid[(c, p["name"])] for p in people))}</b></td></tr>')
+    tot = {p["name"]: sum(r["total"] for r in p["rows"]) for p in people}
+    col = "".join(f'<td class="n" data-person="{esc(p["name"])}"><b>{tot[p["name"]]:g}</b></td>' for p in people)
+    lines.append(f'<tr><td><b>Total</b></td>{col}<td class="n"><b>{sum(tot.values()):g}</b></td></tr>')
+    gtk = "".join(f'<td class="n">{p["total"]:g}' + (' <span class="muted">≠</span>' if abs(p["total"] - tot[p["name"]]) > 0.001 else "")
+                  + '</td>' for p in people)
+    lines.append(f'<tr><td class="muted">GTK sheet total</td>{gtk}<td></td></tr>')
+    status = "".join(f'<td class="n muted">{esc(p["status"] or "no sheet")}</td>' for p in people)
+    lines.append(f'<tr><td class="muted">Status</td>{status}<td></td></tr>')
+    table = (f'<div class="card"><h2>Hours by charge code</h2><div class="wrap"><table><tr><th>Charge code</th>{head}'
+             f'<th class="n">All</th></tr>{"".join(lines)}</table></div></div>')
+    days = [d for d in e["days"] if any(d in r["hours"] for p in people for r in p["rows"])]
+    per = []
+    for p in people:
+        if not p["rows"]:
+            per.append(f'<details class="card"><summary><b>{esc(p["name"])}</b> · 0h</summary>'
+                       f'<p class="empty">No timesheet for this period.</p></details>')
+            continue
+        dh = "".join(f'<th class="n">{esc(d)}</th>' for d in days)
+        trs = "".join(f'<tr><td>{esc(r["charge_code"])}</td><td>{esc(r["phase"])}</td><td>{esc(r["description"])}</td>'
+                      + "".join(f'<td class="n">{_th(r["hours"].get(d, 0))}</td>' for d in days)
+                      + f'<td class="n">{_th(r["ppa"])}</td><td class="n"><b>{r["total"]:g}</b></td></tr>'
+                      for r in p["rows"])
+        per.append(f'<details class="card"><summary><b>{esc(p["name"])}</b> · {tot[p["name"]]:g}h'
+                   f' <span class="muted">{esc(p["status"] or "")}</span></summary><div class="wrap"><table>'
+                   f'<tr><th>Charge code</th><th>Phase</th><th>Description</th>{dh}<th class="n">PPA</th>'
+                   f'<th class="n">Total</th></tr>{trs}</table></div></details>')
+    pulled = e.get("pulled_at") or e.get("imported_at") or "unknown"
+    sub += f' Last pulled {esc(pulled)} (imported {esc(e.get("imported_at", ""))}).'
+    return page("Team Time", "Team Time", f"Team Time, period ending {period}", sub,
+                f'{table}{"".join(per)}', actions=form)
+
+
 def billing_period(today=None):
     """Billing runs in half-months: the 1st to the 15th, the 16th to month end."""
     import calendar
@@ -2652,9 +2713,12 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             self.end_headers()
             self.wfile.write(body)
 
-        def _json(self, code: int, obj: Any) -> None:
+        def _json(self, code: int, obj: Any, cors: str | None = None) -> None:
             body = json.dumps(obj).encode("utf-8")
             self.send_response(code)
+            if cors:
+                self.send_header("Access-Control-Allow-Origin", cors)
+                self.send_header("Vary", "Origin")
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
@@ -2670,9 +2734,58 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 return True
             return self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site")
 
+        def do_OPTIONS(self):  # noqa: N802
+            """CORS preflight, only for the GTK import. Chrome's Private Network
+            Access asks a public page's request to localhost for the extra
+            Allow-Private-Network header."""
+            from . import team_time
+            path = self.path.partition("?")[0].rstrip("/")
+            origin = self.headers.get("Origin") or ""
+            if path != "/team-time/import" or origin not in team_time.ALLOWED_ORIGINS:
+                self.send_error(403, "cross-origin request refused")
+                return
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "POST")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Vary", "Origin")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _team_time_import(self) -> None:
+            """POST /team-time/import: one GTK period's rows, replacing that
+            period. From the GTK page (CORS), or no browser at all."""
+            from . import team_time
+            origin = self.headers.get("Origin")
+            if origin and origin not in team_time.ALLOWED_ORIGINS:
+                self.send_error(403, "cross-origin request refused")
+                return
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > team_time.MAX_BODY:
+                self._json(413, {"ok": False, "error": "body too large"}, origin)
+                return
+            try:
+                payload = json.loads(self.rfile.read(n).decode("utf-8") or "null")
+                conn = connect()
+                try:
+                    target = team_time.path_for(conn)
+                finally:
+                    conn.close()
+                e = team_time.save(target, payload)
+            except (ValueError, UnicodeDecodeError) as err:  # JSONDecodeError is a ValueError
+                self._json(400, {"ok": False, "error": str(err)}, origin)
+                return
+            self._json(200, {"ok": True, "period": e["period"], "people": len(e["people"]),
+                             "rows": sum(len(p["rows"]) for p in e["people"])}, origin)
+
         def do_POST(self):  # noqa: N802
             from urllib.parse import parse_qs
             path = self.path.partition("?")[0].rstrip("/")
+            if path == "/team-time/import":
+                self._team_time_import()
+                return
             if self._foreign():
                 self.send_error(403, "cross-origin request refused")
                 return
@@ -3145,6 +3258,19 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 else:
                     self._type, self._disp = "application/octet-stream", f.name
                 return f.read_bytes()
+            if path in ("/team-time", "/team-time.csv"):
+                from . import team_time
+                data = team_time.load(team_time.path_for(conn))
+                period = (self._query.get("period") or [""])[0].strip() or None
+                if path == "/team-time.csv":
+                    known = team_time.periods(data)
+                    period = period if period in known else (known[0] if known else None)
+                    if period is None:
+                        return None
+                    self._type = "text/csv; charset=utf-8"
+                    self._disp = f"team-time-{team_time.period_date(period).isoformat()}.csv"
+                    return team_time.to_csv(data["periods"][period]).encode("utf-8")
+                return team_time_page(data, period).encode("utf-8")
             if path in ("/hours", "/hours.csv"):
                 start, end, client = hours_range(self._query)
                 rows = hours.breakdown(conn, start, end, client)
