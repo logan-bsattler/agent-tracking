@@ -1806,6 +1806,24 @@ def _named_files(result: dict[str, Any], client: str | None, root: Path) -> list
     return [_resolve(p, client, root) for item in raw for p in _split_paths(item)]
 
 
+_DRAFT_TITLE = re.compile(r"(<title[^>]*>)(.*?)(</title>)", re.I | re.S)
+_DRAFT_WORD = re.compile(r"^\s*DRAFT\s*[-:–—|]\s*|\s*[-:–—|]\s*DRAFT\s*$|^\s*DRAFT\s*$")
+_DRAFT_ELEM = re.compile(r"<(\w+)\b[^>]*\bclass=[\"'][^\"']*(?<![\w-])draft(?![\w-])[^\"']*[\"'][^>]*>.*?</\1\s*>",
+                         re.I | re.S)
+_EMPTIED_P = re.compile(r"[ \t]*<p\b[^>]*>\s*\x00\s*</p>[ \t]*\r?\n?", re.I)
+
+
+def strip_draft_marks(html: str) -> str:
+    """The client copy of a DRAFT page: 'DRAFT - ' (or ' - DRAFT') off its
+    <title>, every element with class 'draft' (the badge) removed, and a <p>
+    left empty by that removal dropped. The rest of the page is unchanged."""
+    out = _DRAFT_TITLE.sub(lambda m: m.group(1) + _DRAFT_WORD.sub("", m.group(2)) + m.group(3), html, count=1)
+    if out == html and not _DRAFT_ELEM.search(html):
+        return html
+    out = _DRAFT_ELEM.sub("\x00", out)
+    return _EMPTIED_P.sub("", out).replace("\x00", "")
+
+
 def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None,
             path: str | None = None, by: str = "Ben promoted it from /deliverables") -> dict[str, Any]:
     """Copy an approved deliverable into <client>/deliverables as <name>-vN.
@@ -1870,6 +1888,14 @@ def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None,
         v += 1
     dest = out_dir / f"{stem}-v{v}{src.suffix}"
     shutil.copy2(src, dest)
+    if src.suffix.lower() in (".html", ".htm"):
+        # The client copy carries no DRAFT marker (DoD 6.6): the filename loses
+        # it above; the page's <title> and its DRAFT badge lose it here.
+        text = src.read_text(encoding="utf-8")
+        clean = strip_draft_marks(text)
+        if clean != text:
+            dest.write_text(clean, encoding="utf-8")
+            shutil.copystat(src, dest)
     book_dest = out_dir / f"{stem}-v{v}{book.suffix}" if book else None
     if book:
         shutil.copy2(book, book_dest)

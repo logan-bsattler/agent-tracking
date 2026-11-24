@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -109,6 +110,33 @@ def test_promote_copies_a_new_version_and_never_overwrites(conn, tmp_path):
     final = [d for d in store.deliverables(conn, root=tmp_path)["files"] if d["stage"] == "final"]
     assert [(d["name"], d["version"]) for d in final] == [("sizing-v2.html", 2), ("sizing-v1.html", 1)]
     assert store.deliverable_path(conn, tid, str(out), root=tmp_path) == out
+
+
+DRAFT_PAGE = ("<html><head><title>DRAFT - Agenda</title><style>.draft { color:red; }</style></head>\n"
+              "<body>\n<p><span class=\"draft\">DRAFT</span></p>\n<h1>Agenda</h1>\n<p></p>\n"
+              "<p>Draft rules <span class=\"tag draft-note\">keep</span></p>\n</body></html>")
+
+
+def test_promote_strips_the_draft_title_and_badge_from_a_page(conn, tmp_path):
+    tid = _deliverable(conn, tmp_path, name="agenda-DRAFT.html", text=DRAFT_PAGE)
+    _review(conn, tid)
+    out = Path(store.promote(conn, tid, root=tmp_path)["dest"])
+    assert out.name == "agenda-v1.html"
+    page = out.read_text(encoding="utf-8")
+    assert "<title>Agenda</title>" in page and ">DRAFT<" not in page
+    assert '<p><span class="draft">' not in page
+    # Everything else stays: the CSS rule, an empty <p> the author wrote, other classes, the word in prose.
+    assert ".draft { color:red; }" in page and "<p></p>" in page and "draft-note" in page and "Draft rules" in page
+    src = tmp_path / "Furlani" / "work" / "agenda-DRAFT.html"
+    assert src.read_text(encoding="utf-8") == DRAFT_PAGE
+    assert store.promote(conn, tid, root=tmp_path)["duplicate"] is True
+
+
+def test_strip_draft_marks_handles_a_trailing_title_and_leaves_clean_pages_alone():
+    assert store.strip_draft_marks("<title>Agenda - DRAFT</title>") == "<title>Agenda</title>"
+    assert store.strip_draft_marks("<title>Draft Agenda</title>") == "<title>Draft Agenda</title>"
+    clean = "<title>Agenda</title><p>No marks</p>"
+    assert store.strip_draft_marks(clean) == clean
 
 
 def test_promote_needs_the_client_folder(conn, tmp_path):
