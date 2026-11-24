@@ -44,3 +44,10 @@ becomes:
 > watch (switch `vpn_watch`) reopens the task once the server answers, and
 > auto-dispatch sends it: no decision or re-dispatch needed. The minder
 > lists it only after 3 reopens (under `upkeep`).
+
+## Dispatch automation (2026-11-24)
+
+Switches `auto_revise`, `auto_queue` (setting `queue_max_context_pct`),
+`auto_task_loose` (now on) and `auto_checkin_task` finish the automation of
+master's rule-following dispatch work. The parent `C:/development/agents/CLAUDE.md`
+"Dispatching" section lists them and what master still owns (judgement only).
