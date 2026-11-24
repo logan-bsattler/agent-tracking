@@ -50,7 +50,7 @@ def test_defaults_are_on_except_precedent(conn):
         "passive_close": False, "require_pipeline": True, "pipeline_create": True,
         "idle_reaper": False, "idle_reaper_keep_rc": True,
         "vpn_watch": True, "auto_redispatch": True, "clear_check": True, "code_restart": True,
-        "auto_review_dispatch": True}
+        "auto_review_dispatch": True, "hold_lift": True}
 
 
 def test_reason_is_an_optional_enum_in_the_contract():

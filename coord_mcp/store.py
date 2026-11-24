@@ -2825,6 +2825,23 @@ NOT_HOLD_PREFIXES = ("Workflow engine:", "Engine drafted reply", "Proceed on mas
                     "Ben-direct hand-back", "VPN watch:", "Upkeep:")
 
 
+_DISPATCH_STMT = re.compile(r"^\s*(desk:\s*)?(dispatch|re-?dispatch|send)\b", re.I)
+
+
+def hold_lifted(conn: sqlite3.Connection, decision_id: str, statement: str | None) -> bool:
+    """The newest decision on an undelivered task does not hold it: it says
+    the hold is lifted or released, or to dispatch the task, or it was
+    superseded or lifted by a later decision citing it (holds.hold_live)."""
+    from . import holds
+    s = statement or ""
+    if holds._LIFT.search(s) or _DISPATCH_STMT.search(s) or not holds.hold_live(conn, decision_id):
+        return True
+    # A ruling that supersedes the hold ("Ben ruled: go ahead") lifts it,
+    # unless it restates a hold of its own.
+    r = conn.execute("SELECT supersedes FROM decisions WHERE id=?", (decision_id,)).fetchone()
+    return bool(r and r["supersedes"]) and not holds.is_hold(s)
+
+
 def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any]]:
     """Undelivered open tasks master is keeping back on purpose: task id -> its
     newest decision.
@@ -2856,6 +2873,8 @@ def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any
                           "GROUP BY client", (now_ts - MINDER_HOLD * 60,)):
         seen[r[0].casefold()] = max(seen.get(r[0].casefold(), 0), r[1])
     out = {}
+    from .queue import switch
+    lift = switch(conn, "hold_lift")
     not_holds = " ".join(f"AND d.statement NOT LIKE '{p}%'" for p in NOT_HOLD_PREFIXES)
     for r in conn.execute(
         f"""SELECT t.id task_id, t.assigned_to, d.id, d.statement, MAX(d.created_at) created_at
@@ -2863,6 +2882,8 @@ def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any
            WHERE t.state='open' AND t.picked_up_at IS NULL AND d.created_at > ? {not_holds}
              AND d.created_at >= COALESCE(t.reopened_at, 0)
            GROUP BY t.id""", (now_ts - MINDER_HOLD * 60,)):
+        if lift and hold_lifted(conn, r["id"], r["statement"]):
+            continue  # the lifting decision makes it dispatchable at once (switch hold_lift)
         last = seen.get((r["assigned_to"] or "").casefold())
         free = (r["assigned_to"] not in busy and last is not None
                 and r["created_at"] < last <= now_ts - MINDER_UNDELIVERED * 60)

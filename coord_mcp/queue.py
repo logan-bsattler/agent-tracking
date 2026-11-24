@@ -494,7 +494,10 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             "vpn_watch": True, "auto_redispatch": True, "clear_check": True, "code_restart": True,
             # a dod_review with no side session of its own (or whose side session wrote
             # the work) goes through a cleared primary (upkeep.reviewable)
-            "auto_review_dispatch": True}
+            "auto_review_dispatch": True,
+            # a decision that lifts a hold (lift/release/dispatch, superseding or
+            # citing it) makes the task dispatchable at once (store.hold_lifted)
+            "hold_lift": True}
 
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).
