@@ -250,3 +250,64 @@ def test_page_renders(conn):
     upkeep.vpn_tick(conn, prober=_probe(False), force=True)
     html = upkeep.page_html(conn)
     assert "Royal" in html and "down" in html
+
+
+# ------------------------------------------------------------ 5. reviews through a cleared primary
+
+def _review(conn, client="Royal", producer_session=None):
+    parent = _task(conn, client, kind="deliverable")
+    conn.execute("UPDATE tasks SET state='done', dispatch_session=? WHERE id=?", (producer_session, parent))
+    rid = store.create_task(conn, "dod_review", "r", {"review_of": parent}, assigned_to=client,
+                            parent_id=parent)["task_id"]
+    conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (now() - OLD, rid))
+    conn.commit()
+    return rid
+
+
+def test_review_without_side_session_clears_primary_then_sends(conn):
+    queue.set_switch(conn, "auto_review_dispatch", True)
+    rid = _review(conn)
+    assert sessions.next_dispatch(conn) is None  # never plain auto-dispatch
+    a = upkeep.claim(conn, "t")
+    assert (a["key"], a["action"], a["session_id"]) == (rid, "get_session", "local_royal")
+    upkeep.report(conn, rid, running="false")
+    a = upkeep.claim(conn, "t")
+    assert a["action"] == "send" and "clear_session" in a["message"] and "review" in a["message"]
+    upkeep.report(conn, rid, status="delivered")
+    t = now() + upkeep.POLL + 1
+    a = upkeep.claim(conn, "t", t)
+    assert a["action"] == "get_session"
+    upkeep.report(conn, rid, running="false", t=t)
+    a = upkeep.claim(conn, "t", t)
+    assert a["action"] == "send" and a["message"].startswith("Do task " + rid)
+    upkeep.report(conn, rid, status="delivered", t=t)
+    assert upkeep._row(conn, rid)["phase"] == "verify"
+    assert conn.execute("SELECT dispatch_session FROM tasks WHERE id=?", (rid,)).fetchone()[0] == "local_royal"
+    assert rid not in store.minder_owed(conn, now() + 3600).get("undelivered", [])
+
+
+def test_review_goes_to_side_session_unless_it_wrote_the_work(conn):
+    queue.set_switch(conn, "auto_review_dispatch", True)
+    sessions.set_session(conn, "Royal", "side", "local_royal2")
+    rid = _review(conn, producer_session="local_royal")
+    d = sessions.next_dispatch(conn)
+    assert (d["task_id"], d["session_id"]) == (rid, "local_royal2")
+    assert upkeep.reviewable(conn) == []
+    conn.execute("UPDATE tasks SET dispatch_session='local_royal2' WHERE id=(SELECT parent_id FROM tasks WHERE id=?)",
+                 (rid,))
+    conn.commit()
+    assert sessions.next_dispatch(conn) is None
+    assert [r["session_id"] for r in upkeep.reviewable(conn)] == ["local_royal"]
+
+
+def test_review_waits_for_busy_primary_and_switch(conn):
+    rid = _review(conn)
+    assert upkeep.reviewable(conn) == []  # switch off (conftest)
+    queue.set_switch(conn, "auto_review_dispatch", True)
+    other = _task(conn)
+    conn.execute("UPDATE tasks SET picked_up_at=? WHERE id=?", (now(), other))
+    conn.commit()
+    assert upkeep.reviewable(conn) == []
+    conn.execute("UPDATE tasks SET state='done' WHERE id=?", (other,))
+    conn.commit()
+    assert [r["task_id"] for r in upkeep.reviewable(conn)] == [rid]

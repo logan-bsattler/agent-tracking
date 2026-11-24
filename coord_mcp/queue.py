@@ -491,7 +491,10 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # VPN failures when the server answers; parked tasks are re-dispatched
             # once their session is idle; a send whose clear did not fire is
             # cleared and re-sent; client sessions on old coord code are restarted
-            "vpn_watch": True, "auto_redispatch": True, "clear_check": True, "code_restart": True}
+            "vpn_watch": True, "auto_redispatch": True, "clear_check": True, "code_restart": True,
+            # a dod_review with no side session of its own (or whose side session wrote
+            # the work) goes through a cleared primary (upkeep.reviewable)
+            "auto_review_dispatch": True}
 
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).

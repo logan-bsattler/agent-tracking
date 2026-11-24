@@ -211,6 +211,9 @@ def next_dispatch(conn: sqlite3.Connection, now_ts: int | None = None,
         if tg is None:
             continue
         role, sid = tg
+        if r["kind"] == "dod_review" and (upkeep.review_session(conn, reg, r["id"], r["assigned_to"])
+                                          or (None, True))[1]:
+            continue  # the side session wrote the work: the primary clears for it (upkeep.reviewable)
         if sid in exclude_sessions or busy.get(sid, set()) - {r["id"]}:
             continue
         return {"task_id": r["id"], "client": r["assigned_to"], "role": role, "session_id": sid,
@@ -248,7 +251,7 @@ def dry_run(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, An
         elif r["id"] in waiting:
             why = "waiting on " + ", ".join(b["id"] for b in waiting[r["id"]])
         elif tg is None:
-            why = ("review with no side session: primary must clear first (master)"
+            why = ("review with no side session: upkeep clears the primary first (switch auto_review_dispatch)"
                    if r["kind"] == "dod_review" and (reg.get(r["assigned_to"].casefold()) or {})
                    else "no session registered for this client (master)")
         elif r["id"] not in paced:

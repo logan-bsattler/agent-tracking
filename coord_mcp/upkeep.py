@@ -75,6 +75,9 @@ ACTIVE = ("idle_check", "send", "verify", "clear", "clear_wait")
 MESSAGE = "Do task {task_id}. Start with coord_get_task."
 CLEAR_MESSAGE = ("master-console upkeep: your context did not clear before task {task_id}. Run "
                  'clear_session "self" now and end the turn without starting work. The task will be sent again.')
+REVIEW_CLEAR_MESSAGE = ("master-console upkeep: a definition-of-done review of work this session did not write "
+                        "comes next (task {task_id}). Run clear_session \"self\" now and end the turn without "
+                        "starting work. The review will be sent once you are idle.")
 DECISION_PREFIXES = ("VPN watch:", "Upkeep:")  # bookkeeping, never a hold (store.NOT_HOLD_PREFIXES)
 
 DDL = """
@@ -394,6 +397,79 @@ def after_send(conn: sqlite3.Connection, task_id: str, session_id: str, client: 
     conn.execute("UPDATE upkeep SET sends = sends + 1 WHERE key=?", (task_id,))
 
 
+# ------------------------------------------------------------ 5. reviews on a cleared session
+
+REVIEW_SETTLE = 60  # a review this fresh: its producer is still ending the turn that finished it
+
+
+def review_session(conn: sqlite3.Connection, reg: dict[str, dict[str, str]], task_id: str,
+                   client: str | None) -> tuple[str, bool] | None:
+    """(session_id, must_clear) for an undelivered dod_review: the side
+    session when there is one that did not produce the work under review,
+    else the primary, cleared first. None: no session registered."""
+    sess = reg.get((client or "").casefold()) or {}
+    r = conn.execute("SELECT p.dispatch_session FROM tasks t LEFT JOIN tasks p ON p.id = t.parent_id "
+                     "WHERE t.id=?", (task_id,)).fetchone()
+    producer = r["dispatch_session"] if r else None
+    if sess.get("side") and sess["side"] != producer:
+        return sess["side"], False
+    if sess.get("primary"):
+        return sess["primary"], True
+    return None
+
+
+def reviewable(conn: sqlite3.Connection, t: int | None = None) -> list[dict[str, Any]]:
+    """Undelivered dod_reviews code dispatches through a cleared session:
+    {task_id, client, session_id}. Under switch auto_review_dispatch. A
+    review with a side session of its own goes by plain auto-dispatch."""
+    from . import sessions, store
+    t = now() if t is None else t
+    ensure_upkeep(conn)
+    if not _on(conn, "auto_review_dispatch"):
+        return []
+    reg = sessions.registry(conn)
+    busy = sessions._busy_sessions(conn, reg, t)
+    keys = {r[0] for r in conn.execute("SELECT key FROM upkeep")}
+    held = store.held_tasks(conn, t)
+    waiting = store.waiting_on(conn)
+    restarting = restarting_sessions(conn)
+    active: dict[str, set[str]] = {}
+    for u in conn.execute("SELECT task_id, session_id FROM upkeep WHERE phase IN (%s)"
+                          % ",".join("?" * len(ACTIVE)), ACTIVE):
+        active.setdefault(u["session_id"], set()).add(u["task_id"])
+    out, used = [], set()
+    for r in conn.execute("""SELECT t.id, t.assigned_to FROM tasks t WHERE t.state='open' AND t.kind='dod_review'
+                               AND t.picked_up_at IS NULL AND t.dispatched_at IS NULL AND t.created_at <= ?
+                               AND NOT EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id)
+                             ORDER BY t.created_at""", (t - REVIEW_SETTLE,)):
+        if r["id"] in keys or r["id"] in held or r["id"] in waiting:
+            continue
+        rs = review_session(conn, reg, r["id"], r["assigned_to"])
+        if rs is None or not rs[1]:
+            continue
+        sid = rs[0]
+        if sid in used or sid in restarting or busy.get(sid, set()) - {r["id"]} or active.get(sid):
+            continue
+        used.add(sid)
+        out.append({"task_id": r["id"], "client": r["assigned_to"], "session_id": sid})
+    return out
+
+
+def plan_reviews(conn: sqlite3.Connection, t: int) -> None:
+    for d in reviewable(conn, t):
+        _put(conn, d["task_id"], "review", d["session_id"], "idle_check", t,
+             task_id=d["task_id"], client=d["client"])
+
+
+def auto_undelivered(conn: sqlite3.Connection, t: int | None = None) -> set[str]:
+    """Undelivered tasks upkeep is sending or will send: the minder leaves them."""
+    ensure_upkeep(conn)
+    ids = {d["task_id"] for d in reviewable(conn, t)}
+    ids |= {r[0] for r in conn.execute("SELECT task_id FROM upkeep WHERE task_id IS NOT NULL AND phase IN (%s)"
+                                       % ",".join("?" * len(ACTIVE)), ACTIVE)}
+    return ids
+
+
 # ------------------------------------------------------------ 4. restart after a coord update
 
 def code_version(root: Path | None = None) -> str:
@@ -522,7 +598,8 @@ def _action(row: dict[str, Any]) -> dict[str, Any]:
         out["action"] = "get_usage"
     else:
         out["action"] = "send"
-        out["message"] = (MESSAGE if row["phase"] == "send" else CLEAR_MESSAGE).format(task_id=row["task_id"])
+        clear = REVIEW_CLEAR_MESSAGE if row["kind"] == "review" and not row["clears"] else CLEAR_MESSAGE
+        out["message"] = (MESSAGE if row["phase"] == "send" else clear).format(task_id=row["task_id"])
     return out
 
 
@@ -536,6 +613,7 @@ def claim(conn: sqlite3.Connection, claimer: str | None = None, t: int | None = 
     ensure_deps(conn)
     ensure_commitments(conn)
     plan_redispatch(conn, t)
+    plan_reviews(conn, t)
     conn.commit()
     q = ",".join("?" * len(ACTIVE))
     conn.execute("BEGIN IMMEDIATE")
@@ -595,7 +673,13 @@ def report(conn: sqlite3.Connection, key: str, *, running: str | None = None, st
             else:
                 if phase == "clear_wait":
                     _set(conn, key, t, clears=row["clears"] + 1)
-                _set(conn, key, t, phase="send", next_at=t, errors=0)
+                    _set(conn, key, t, phase="send", next_at=t, errors=0)
+                elif row["kind"] == "review" and not row["clears"]:
+                    # A review on the producer's session: clear it first (step 1 of
+                    # the clear-and-confirm), then the send and its usage check.
+                    _set(conn, key, t, phase="clear", next_at=t, errors=0)
+                else:
+                    _set(conn, key, t, phase="send", next_at=t, errors=0)
         elif row["deadline"] and t > row["deadline"]:
             _flag(conn, key, t, f"session still running {CLEAR_WAIT_FOR // 60} min after the clear request")
         else:

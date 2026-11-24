@@ -11,6 +11,7 @@ status` show the state. The mod part runs only where `COORD_AUTO_DISPATCH=1`.
 | `auto_redispatch` | A parked task (under 3 parks, no decision since the park) is re-sent: get_session until idle, then the same `Do task` line. |
 | `clear_check` | After every delivered send, get_usage: a Messages category over `clear_max_messages_k` (40k) means the clear did not fire. The session is told to `clear_session "self"`, and once idle the task is sent again. Two clears that do not help: flagged to master. |
 | `code_restart` | Each coord server records the hash of its code. A registered client session on old code, free and quiet for `restart_idle_minutes` (2), gets its claude.exe ended once get_session reads not running; the app restarts it on the new code at its next message. Never Master, the desk, or unregistered sessions. It gets no new dispatch until then. |
+| `auto_review_dispatch` | A `dod_review` (created by the board when a deliverable, or gated CVC code or email, lands done) goes to the client's side session by plain auto-dispatch. With no side session, or when the side session wrote the work, upkeep waits for the primary to be free and idle, asks it to `clear_session "self"`, waits for idle again, sends the review and checks the clear with get_usage. |
 
 What is left to master shows in the minder: `parked` (3+ parks, or a
 decision since the park) and the new `upkeep` (a flag: clear failed twice,

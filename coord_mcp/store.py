@@ -2893,7 +2893,7 @@ def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     # Nor one code sent in the last half hour (sessions.next_dispatch): the
     # mod is delivering it, and master is woken only if that did not take.
     from . import sessions
-    sent = sessions.recently_dispatched(conn, now_ts)
+    sent = sessions.recently_dispatched(conn, now_ts) | upkeep.auto_undelivered(conn, now_ts)
     undelivered = [r["id"] for r in conn.execute(
         """SELECT t.id FROM tasks t
            WHERE t.state='open' AND t.picked_up_at IS NULL AND t.created_at <= ?
