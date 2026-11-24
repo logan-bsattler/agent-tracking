@@ -512,7 +512,11 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             "auto_task_loose": True, "minder_fast_wake": False,
             # a released check-in approval creates its checkin_of code_change
             # (checkin_auto.create_checkin); auto-dispatch sends it
-            "auto_checkin_task": True}
+            "auto_checkin_task": True,
+            # a draft_reply or one-question investigation is sent to its busy
+            # session when get_usage reads under queue_max_context_pct
+            # (upkeep.queueable); never code or a deliverable, never behind a park
+            "auto_queue": True}
 
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).
@@ -524,7 +528,9 @@ SETTINGS = {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0,
             # (thousands of tokens); quiet this long before a code restart
             "vpn_interval_minutes": 3.0, "clear_max_messages_k": 40.0, "restart_idle_minutes": 2.0,
             # auto_task_loose tops a client up to this many undelivered tasks
-            "auto_task_buffer": 1.0}
+            "auto_task_buffer": 1.0,
+            # auto_queue sends a short task to a busy session under this context use
+            "queue_max_context_pct": 50.0}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (

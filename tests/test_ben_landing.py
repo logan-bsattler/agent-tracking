@@ -52,7 +52,7 @@ def test_defaults_are_on_except_precedent(conn):
         "vpn_watch": True, "auto_redispatch": True, "clear_check": True, "code_restart": True,
         "auto_review_dispatch": True, "hold_lift": True, "auto_revise": True,
         "auto_task_loose": True, "minder_fast_wake": False,
-        "auto_checkin_task": True}
+        "auto_checkin_task": True, "auto_queue": True}
 
 
 def test_reason_is_an_optional_enum_in_the_contract():

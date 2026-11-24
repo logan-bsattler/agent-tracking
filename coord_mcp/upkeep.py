@@ -71,7 +71,7 @@ VERIFY_FOR = 180         # give up reading usage after this (unverified, not a f
 CLEAR_WAIT_FOR = 20 * 60  # the session must go idle after the clear request within this
 CLEARS_MAX = 2
 SEND_ERRORS_MAX = 3
-ACTIVE = ("idle_check", "send", "verify", "clear", "clear_wait")
+ACTIVE = ("idle_check", "send", "verify", "clear", "clear_wait", "usage")
 MESSAGE = "Do task {task_id}. Start with coord_get_task."
 CLEAR_MESSAGE = ("master-console upkeep: your context did not clear before task {task_id}. Run "
                  'clear_session "self" now and end the turn without starting work. The task will be sent again.')
@@ -461,6 +461,77 @@ def plan_reviews(conn: sqlite3.Connection, t: int) -> None:
              task_id=d["task_id"], client=d["client"])
 
 
+QUEUE_RECHECK = 600  # a busy session whose context read too full is asked again after this
+
+
+def _one_question(spec: dict[str, Any]) -> bool:
+    """An investigation scoped to one question: a single question/q string."""
+    q = spec.get("question") or spec.get("q")
+    return isinstance(q, str) and bool(q.strip()) and not spec.get("questions")
+
+
+def queueable(conn: sqlite3.Connection, t: int | None = None) -> list[dict[str, Any]]:
+    """Short tasks to queue behind a busy session (switch auto_queue):
+    {task_id, client, session_id}. A draft_reply, or an investigation with
+    one question, whose session is busy with one task that never parked.
+    Upkeep reads that session's context first and sends only under setting
+    queue_max_context_pct. Never a code_change or deliverable."""
+    from . import sessions, store
+    t = now() if t is None else t
+    ensure_upkeep(conn)
+    if not _on(conn, "auto_queue"):
+        return []
+    reg = sessions.registry(conn)
+    busy = sessions._busy_sessions(conn, reg, t)
+    held = store.held_tasks(conn, t)
+    waiting = store.waiting_on(conn)
+    restarting = restarting_sessions(conn)
+    active = {r[0] for r in conn.execute("SELECT session_id FROM upkeep WHERE phase IN (%s)"
+                                         % ",".join("?" * len(ACTIVE)), ACTIVE)}
+    out, used = [], set()
+    for r in conn.execute("""SELECT t.id, t.kind, t.spec, t.assigned_to FROM tasks t WHERE t.state='open'
+                               AND t.kind IN ('draft_reply', 'investigation') AND t.assigned_to IS NOT NULL
+                               AND t.picked_up_at IS NULL AND t.dispatched_at IS NULL AND t.created_at <= ?
+                               AND NOT EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id)
+                             ORDER BY t.created_at""", (t - REVIEW_SETTLE,)):
+        if r["id"] in held or r["id"] in waiting:
+            continue
+        if r["kind"] == "investigation" and not _one_question(json.loads(r["spec"] or "{}")):
+            continue
+        old = _row(conn, r["id"])
+        if old and (old["phase"] in ACTIVE or t - old["updated_at"] < QUEUE_RECHECK):
+            continue
+        tg = sessions.target(reg, r["assigned_to"], r["kind"])
+        if tg is None:
+            continue
+        sid, on = tg[1], busy.get(tg[1], set())
+        if len(on) != 1 or sid in used or sid in restarting or sid in active:
+            continue  # free (auto-dispatch's), already queued behind, or upkeep is on it
+        if conn.execute("SELECT 1 FROM task_parks WHERE task_id=?", (next(iter(on)),)).fetchone():
+            continue  # never behind a task that has parked
+        used.add(sid)
+        out.append({"task_id": r["id"], "client": r["assigned_to"], "session_id": sid})
+    return out
+
+
+def plan_queue(conn: sqlite3.Connection, t: int) -> None:
+    for d in queueable(conn, t):
+        _put(conn, d["task_id"], "queue", d["session_id"], "usage", t, task_id=d["task_id"], client=d["client"])
+
+
+def _usage_pct(usage: dict[str, Any]) -> float | None:
+    """Percent of the context window used, from a get_usage answer; None
+    when the session's context could not be read."""
+    ctx = usage.get("context") if isinstance(usage.get("context"), dict) else usage
+    if not isinstance(ctx, dict) or ctx.get("status") not in (None, "ok"):
+        return None
+    if ctx.get("percentUsed") is not None:
+        return float(ctx["percentUsed"])
+    if ctx.get("tokensUsed") is not None and ctx.get("contextWindow"):
+        return 100.0 * float(ctx["tokensUsed"]) / float(ctx["contextWindow"])
+    return None
+
+
 def auto_undelivered(conn: sqlite3.Connection, t: int | None = None) -> set[str]:
     """Undelivered tasks upkeep is sending or will send: the minder leaves them."""
     ensure_upkeep(conn)
@@ -594,7 +665,7 @@ def _action(row: dict[str, Any]) -> dict[str, Any]:
            "session_id": row["session_id"], "phase": row["phase"]}
     if row["phase"] in ("idle_check", "clear_wait"):
         out["action"] = "get_session"
-    elif row["phase"] == "verify":
+    elif row["phase"] in ("verify", "usage"):
         out["action"] = "get_usage"
     else:
         out["action"] = "send"
@@ -614,6 +685,7 @@ def claim(conn: sqlite3.Connection, claimer: str | None = None, t: int | None = 
     ensure_commitments(conn)
     plan_redispatch(conn, t)
     plan_reviews(conn, t)
+    plan_queue(conn, t)
     conn.commit()
     q = ",".join("?" * len(ACTIVE))
     conn.execute("BEGIN IMMEDIATE")
@@ -623,9 +695,14 @@ def claim(conn: sqlite3.Connection, claimer: str | None = None, t: int | None = 
                               "ORDER BY next_at, created_at", (*ACTIVE, t, t)).fetchall():
             r = dict(r)
             if r["task_id"]:
-                st = conn.execute("SELECT state FROM tasks WHERE id=?", (r["task_id"],)).fetchone()
+                st = conn.execute("SELECT state, picked_up_at, dispatched_at FROM tasks WHERE id=?",
+                                  (r["task_id"],)).fetchone()
                 if st is None or st["state"] != "open":
                     _set(conn, r["key"], t, phase="done", detail=f"task {st['state'] if st else 'gone'}")
+                    continue
+                if r["kind"] == "queue" and r["phase"] in ("usage", "send") and (st["picked_up_at"]
+                                                                                or st["dispatched_at"]):
+                    _set(conn, r["key"], t, phase="done", detail="sent another way first")
                     continue
             picked = r
             conn.execute("UPDATE upkeep SET lease_until=?, claimer=? WHERE key=?",
@@ -691,7 +768,7 @@ def report(conn: sqlite3.Connection, key: str, *, running: str | None = None, st
             if phase == "send":
                 conn.execute("UPDATE tasks SET dispatched_at=?, dispatch_status=?, dispatch_session=? WHERE id=?",
                              (t, status, row["session_id"], row["task_id"]))
-                if status == "delivered" and _on(conn, "clear_check"):
+                if status == "delivered" and _on(conn, "clear_check") and row["kind"] != "queue":
                     _set(conn, key, t, phase="verify", sends=row["sends"] + 1, errors=0,
                          next_at=t + VERIFY_AFTER, deadline=t + VERIFY_FOR)
                 else:
@@ -702,6 +779,13 @@ def report(conn: sqlite3.Connection, key: str, *, running: str | None = None, st
             _flag(conn, key, t, f"send_message failed {SEND_ERRORS_MAX} times: {detail}")
         else:
             _set(conn, key, t, errors=row["errors"] + 1, next_at=t + 120, detail=detail)
+    elif phase == "usage":
+        pct, cap = _usage_pct(usage or {}), _setting(conn, "queue_max_context_pct")
+        if pct is not None and pct < cap:
+            _set(conn, key, t, phase="send", next_at=t, errors=0, detail=f"queued at context {pct:.0f}%")
+        else:
+            why = "context unreadable" if pct is None else f"context {pct:.0f}% >= {cap:g}%"
+            _set(conn, key, t, phase="skipped", detail=f"{why}: waits for the session to free")
     elif phase == "verify":
         k = _usage_messages_k(usage or {})
         limit = _setting(conn, "clear_max_messages_k")

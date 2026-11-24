@@ -311,3 +311,57 @@ def test_review_waits_for_busy_primary_and_switch(conn):
     conn.execute("UPDATE tasks SET state='done' WHERE id=?", (other,))
     conn.commit()
     assert [r["task_id"] for r in upkeep.reviewable(conn)] == [rid]
+
+
+# ------------------------------------------------------------ 6. short tasks queued behind a busy session
+
+def _busy(conn, client="Royal"):
+    tid = _task(conn, client)
+    conn.execute("UPDATE tasks SET picked_up_at=?, dispatch_session='local_royal' WHERE id=?", (now(), tid))
+    conn.commit()
+    return tid
+
+
+def _ctx(pct):
+    return {"context": {"status": "ok", "tokensUsed": pct * 1000, "contextWindow": 100000, "percentUsed": pct}}
+
+
+def test_short_task_queued_to_busy_session_under_half_context(conn):
+    queue.set_switch(conn, "auto_queue", True)
+    _busy(conn)
+    draft = _task(conn, kind="draft_reply")
+    _task(conn, kind="investigation")  # spec {"q": "x"}: one question, but only one queues per session
+    a = upkeep.claim(conn, "t")
+    assert (a["key"], a["action"], a["session_id"]) == (draft, "get_usage", "local_royal")
+    upkeep.report(conn, draft, usage=_ctx(30))
+    a = upkeep.claim(conn, "t")
+    assert a["action"] == "send" and a["message"].startswith("Do task " + draft)
+    upkeep.report(conn, draft, status="queued")
+    assert upkeep._row(conn, draft)["phase"] == "done"
+    assert conn.execute("SELECT dispatch_session FROM tasks WHERE id=?", (draft,)).fetchone()[0] == "local_royal"
+
+
+def test_queue_waits_when_context_full_and_never_code_or_behind_a_park(conn):
+    queue.set_switch(conn, "auto_queue", True)
+    busy = _busy(conn)
+    _task(conn, kind="code_change")
+    _task(conn, kind="deliverable")
+    assert upkeep.queueable(conn) == []
+    draft = _task(conn, kind="draft_reply")
+    a = upkeep.claim(conn, "t")
+    upkeep.report(conn, draft, usage=_ctx(70))
+    assert upkeep._row(conn, draft)["phase"] == "skipped"
+    assert upkeep.queueable(conn) == []  # asked again only after QUEUE_RECHECK
+    assert [d["task_id"] for d in upkeep.queueable(conn, now() + upkeep.QUEUE_RECHECK + 1)] == [draft]
+    store.park_task(conn, busy, "context", "next")
+    assert upkeep.queueable(conn, now() + upkeep.QUEUE_RECHECK + 1) == []
+    queue.set_switch(conn, "auto_queue", False)
+    assert upkeep.queueable(conn, now() + 9999) == []
+
+
+def test_multi_question_investigation_is_not_queued(conn):
+    queue.set_switch(conn, "auto_queue", True)
+    _busy(conn)
+    tid = store.create_task(conn, "investigation", "t", {"questions": ["a", "b"]}, assigned_to="Royal")["task_id"]
+    conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (now() - OLD, tid))
+    assert upkeep.queueable(conn) == []
