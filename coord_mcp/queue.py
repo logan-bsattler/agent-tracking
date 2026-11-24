@@ -497,7 +497,10 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             "auto_review_dispatch": True,
             # a decision that lifts a hold (lift/release/dispatch, superseding or
             # citing it) makes the task dispatchable at once (store.hold_lifted)
-            "hold_lift": True}
+            "hold_lift": True,
+            # a request_changes review opens the next round, or hands Ben the
+            # chain after REVIEW_ROUNDS (store.next_round)
+            "auto_revise": True}
 
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).

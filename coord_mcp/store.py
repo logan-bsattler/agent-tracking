@@ -473,6 +473,13 @@ def _complete(conn: sqlite3.Connection, task_id: str, row: sqlite3.Row, validate
     if state == "done":
         # Not echoed to the producer: the review is another session's job.
         create_review(conn, task_id)
+        if row["kind"] == "dod_review":
+            try:
+                with savepoint(conn, "next_round"):
+                    if nxt := next_round(conn, task_id):
+                        out["next_round"] = nxt
+            except Exception as e:  # noqa: BLE001 - the verdict stands whatever the next round does
+                out["next_round_error"] = str(e)[:200]
         if row["kind"] == "draft_reply" and (aside := set_aside_revised(conn, task_id)):
             out["set_aside"] = aside
     return out
@@ -1774,6 +1781,98 @@ def create_review(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | No
         return None
     return create_task(conn, owed["kind"], owed["title"], owed["spec"], assigned_to=owed["assigned_to"],
                        parent_id=owed["parent_id"])
+
+
+_REVISE_DROP = ("checkin_of", "created_by", "follow_up", "findings", "revises", "notes", "from",
+                "instructions", "review_of")
+
+
+def next_round(conn: sqlite3.Connection, review_id: str) -> dict[str, Any] | None:
+    """A dod_review that requests changes opens the next round (switch
+    auto_revise): a task of the reviewed work's kind, parent = that work, the
+    findings in its spec, and each client loose end of the review resolved
+    with it. An open revision of the same work takes the findings instead.
+    Past REVIEW_ROUNDS request_changes in the chain there is no new round:
+    one Ben item (accept as is, revise once more, or rework the spec).
+    A direct ask's review is direct.autotask's. Returns what it did, or None."""
+    from . import direct, queue
+    if not queue.switch(conn, "auto_revise"):
+        return None
+    rv = conn.execute("SELECT * FROM tasks WHERE id=?", (review_id,)).fetchone()
+    if rv is None or rv["kind"] != "dod_review" or rv["state"] != "done" or not rv["parent_id"]:
+        return None
+    result = json.loads(rv["result"] or "{}")
+    if result.get("verdict") != "request_changes" or direct.is_direct(conn, review_id):
+        return None
+    base = conn.execute("SELECT * FROM tasks WHERE id=?", (rv["parent_id"],)).fetchone()
+    if base is None or base["kind"] not in ("deliverable", *GATED_DOD):
+        return None
+    clients = client_keys(conn)
+    fus = [f for f in conn.execute("SELECT id, who, what FROM follow_ups WHERE task_id=? AND state='open' "
+                                   "ORDER BY idx, rowid", (review_id,))
+           if (f["who"] or "").strip().casefold() in clients]
+    findings = [f["what"] for f in fus] or [
+        f"{x.get('criterion')}: {x.get('note')}" for x in result.get("findings") or [] if isinstance(x, dict)]
+    name = base["title"].removeprefix("Revise: ")
+    if review_rounds(conn, base["id"]) >= REVIEW_ROUNDS:
+        lin = _same_kind_chain(conn, base["id"])
+        reviews = [r for (r,) in conn.execute(
+            "SELECT id FROM tasks WHERE kind='dod_review' AND state='done' AND parent_id IN "
+            f"({','.join('?' * len(lin))}) ORDER BY completed_at", lin)]
+        d = record_decision(conn, f"Two rounds, then Ben: {name} ({base['id']}) gets no third round; "
+                                  f"reviews {', '.join(reviews)}"[:300],
+                            because=f"{REVIEW_ROUNDS} request_changes rounds reached (parent CLAUDE.md, "
+                                    "Two rounds, then Ben)", task_id=review_id)
+        for f in fus:
+            resolve_follow_up(conn, f["id"], decision_id=d["decision_id"])
+        idx = conn.execute("SELECT COALESCE(MAX(idx), -1) + 1 FROM follow_ups WHERE task_id=?",
+                           (review_id,)).fetchone()[0]
+        fid = _id()
+        what = (f"Two rounds done on {name} ({base['id']}; reviews {', '.join(reviews)}): revise once more, "
+                f"accept as is, or rework the spec. Findings: {'; '.join(findings)}")[:300]
+        conn.execute("INSERT INTO follow_ups(id, task_id, idx, who, what, state, created_at) "
+                     "VALUES (?,?,?,'Ben',?,'open',?)", (fid, review_id, idx, what, now()))
+        return {"round_cap": True, "ben_item": fid, "decision_id": d["decision_id"]}
+    live = (open_revision(conn, base["id"]) if base["kind"] == "deliverable" else
+            (r["id"] if (r := conn.execute("SELECT id FROM tasks WHERE parent_id=? AND kind=? AND state='open' "
+                                           "ORDER BY created_at LIMIT 1", (base["id"], base["kind"])).fetchone())
+             else None))
+    if live:
+        record_decision(conn, f"Findings of review {review_id} folded into open revision {live}: "
+                              + "; ".join(findings)[:1500],
+                        because="one live revision per work item (MAG audit 2026-11-17)", task_id=live)
+        for f in fus:
+            resolve_follow_up(conn, f["id"], task_id=live)
+        return {"task_id": live, "folded": True}
+    spec = {k: v for k, v in json.loads(base["spec"] or "{}").items() if k not in _REVISE_DROP}
+    spec.update({"findings": findings[:20], "created_by": f"board (auto): next round after review {review_id}",
+                 "instructions": f"Revise task {base['id']}'s work to meet every finding of review {review_id}. "
+                                 "Write in work/, never deliverables/."})
+    if base["kind"] == "deliverable":
+        spec["revises"] = base["id"]
+        from .direct import version_notes
+        if notes := version_notes(conn, base["id"]):
+            spec["notes"] = notes[:5]
+    new = create_task(conn, base["kind"], f"Revise: {name}"[:80], spec, assigned_to=base["assigned_to"],
+                      parent_id=base["id"])
+    tid = new["task_id"]
+    for f in fus:
+        resolve_follow_up(conn, f["id"], task_id=tid)
+    record_decision(conn, f"Next round: {base['kind']} {tid} revises {base['id']} per review {review_id}",
+                    because="request_changes opens the next round (switch auto_revise)", task_id=tid)
+    return {"task_id": tid, "kind": base["kind"], "follow_ups": [f["id"] for f in fus]}
+
+
+def _same_kind_chain(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    """task_id and every task of its kind above it in the parent chain."""
+    out, tid = [], task_id
+    kind = conn.execute("SELECT kind FROM tasks WHERE id=?", (task_id,)).fetchone()["kind"]
+    while tid and tid not in out:
+        out.append(tid)
+        up = conn.execute("SELECT t.parent_id, p.kind FROM tasks t LEFT JOIN tasks p ON p.id = t.parent_id "
+                          "WHERE t.id=?", (tid,)).fetchone()
+        tid = up["parent_id"] if up and up["kind"] == kind else None
+    return out
 
 
 def _stage(conn: sqlite3.Connection, task_id: str, kind: str, path: Path) -> dict[str, Any]:
