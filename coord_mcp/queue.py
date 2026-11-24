@@ -507,9 +507,9 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             "auto_revise": True,
             # board auto-tasking (coord_mcp/autotask.py, 2026-11-23): the dashboard
             # tasks client loose ends itself; the minder skips its rate limit for
-            # a new intent or master's handoff. Off until Ben reviews the dry run
-            # (python -m coord_mcp.autotask dry-run).
-            "auto_task_loose": False, "minder_fast_wake": False}
+            # a new intent or master's handoff. Auto-tasking on since 2026-11-24
+            # (dispatch automation, step 5); fast wake off until Ben reviews it.
+            "auto_task_loose": True, "minder_fast_wake": False}
 
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).

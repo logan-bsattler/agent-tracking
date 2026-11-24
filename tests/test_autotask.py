@@ -35,11 +35,11 @@ def _open_fus(conn, tid):
     return [r["id"] for r in conn.execute("SELECT id FROM follow_ups WHERE task_id=? AND state='open'", (tid,))]
 
 
-def test_off_by_default():
+def test_shipped_defaults():
     # conftest zeroes SWITCHES for every test, so read the shipped defaults.
     from pathlib import Path
     src = Path(queue.__file__).read_text(encoding="utf-8")
-    assert '"auto_task_loose": False, "minder_fast_wake": False' in src
+    assert '"auto_task_loose": True, "minder_fast_wake": False' in src
 
 
 def test_a_client_loose_end_becomes_one_child_task(conn):

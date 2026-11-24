@@ -3,8 +3,8 @@
 Master is the only thing that turned client loose ends into tasks, and it
 wakes only on the minder, triage or Ben. On 2026-11-23 that left 184 client
 loose ends untasked (168 MAG) while both MAG sessions sat idle. Two
-behaviours, each behind a switch in `python -m coord_mcp.queue switch`, both
-off until Ben turns them on:
+behaviours, each behind a switch in `python -m coord_mcp.queue switch`
+(auto_task_loose on since 2026-11-24, minder_fast_wake off):
 
 auto_task_loose
     The dashboard loop (after the workflow engine) turns client loose ends
