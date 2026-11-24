@@ -509,7 +509,10 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # tasks client loose ends itself; the minder skips its rate limit for
             # a new intent or master's handoff. Auto-tasking on since 2026-11-24
             # (dispatch automation, step 5); fast wake off until Ben reviews it.
-            "auto_task_loose": True, "minder_fast_wake": False}
+            "auto_task_loose": True, "minder_fast_wake": False,
+            # a released check-in approval creates its checkin_of code_change
+            # (checkin_auto.create_checkin); auto-dispatch sends it
+            "auto_checkin_task": True}
 
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).

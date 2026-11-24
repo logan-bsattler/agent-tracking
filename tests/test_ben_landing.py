@@ -51,7 +51,8 @@ def test_defaults_are_on_except_precedent(conn):
         "idle_reaper": False, "idle_reaper_keep_rc": True,
         "vpn_watch": True, "auto_redispatch": True, "clear_check": True, "code_restart": True,
         "auto_review_dispatch": True, "hold_lift": True, "auto_revise": True,
-        "auto_task_loose": True, "minder_fast_wake": False}
+        "auto_task_loose": True, "minder_fast_wake": False,
+        "auto_checkin_task": True}
 
 
 def test_reason_is_an_optional_enum_in_the_contract():

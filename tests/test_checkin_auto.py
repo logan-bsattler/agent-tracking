@@ -228,3 +228,18 @@ def test_definitions_put_checkin_ok_on_code_with_ben_fallback():
     bad = {**defs.get("A3")}
     bad["steps"] = [dict(s, fallback="ben") if s["key"] == "fix" else s for s in bad["steps"]]
     assert any("fallback" in e for e in defs.validate(bad))
+
+
+def test_release_creates_the_checkin_task(conn, tmp_path):
+    queue.set_switch(conn, "auto_checkin_task", True)
+    code, _, rid = _ready(conn, tmp_path)
+    a = checkin_auto.run(conn, t=now())[0] and checkin_auto.row(conn, code)
+    [out] = checkin_auto.run(conn, t=a["veto_by"] + 1)
+    t = conn.execute("SELECT * FROM tasks WHERE id=?", (out["checkin_task"],)).fetchone()
+    assert t["kind"] == "code_change" and t["parent_id"] == code and t["assigned_to"] == "Royal"
+    spec = __import__("json").loads(t["spec"])
+    assert spec["checkin_of"] == code and spec["cvc"] is True
+    fu = conn.execute("SELECT state, resolved_by FROM follow_ups WHERE id=?", (out["follow_up"],)).fetchone()
+    assert (fu["state"], fu["resolved_by"]) == ("tasked", t["id"])
+    with pytest.raises(ValueError, match="already has its check-in task"):
+        checkin_auto.veto(conn, code)
