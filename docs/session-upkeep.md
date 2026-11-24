@@ -17,7 +17,7 @@ decision since the park) and the new `upkeep` (a flag: clear failed twice,
 sends failing, VPN reopen loop). `python -m coord_mcp.upkeep drop <key>`
 forgets a row once handled.
 
-## Master manual changes (apply to `C:\development\agents\CLAUDE.md` once this is merged and the dashboard and mod run it)
+## Master manual changes (applied to `C:\development\agents\CLAUDE.md` on 2026-11-24; take effect once this is merged and the dashboard and mod run it)
 
 **When a client parks**: add at the top:
 
