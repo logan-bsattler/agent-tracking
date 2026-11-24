@@ -1361,7 +1361,7 @@ THEME_JS = """<script>
 # Nav links in the order every page shows them; the current page is the filled tab.
 NAV = (("/", "Usage"), ("/board", "Board"), ("/pipeline", "Pipeline"), ("/clients", "Clients"), ("/queue", "Queue"), ("/hours", "Hours"), ("/team-time", "Team Time"), ("/drafts", "Drafts"),
        ("/deliverables", "Deliverables"), ("/intents", "Intents"), ("/commitments", "Commitments"),
-       ("/workflows", "Workflows"))
+       ("/workflows", "Workflows"), ("/upkeep", "Upkeep"))
 
 SEEN_BOX = ('<span class="seenbox"><span id="newcount" class="age"></span>'
             '<button id="seen" type="button">Mark seen</button></span>')
@@ -2659,6 +2659,16 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                             reaper.tick(conn)
                     except Exception:
                         loop_error(connect, "reaper")
+                    # Session upkeep (upkeep.py): the VPN probe and the
+                    # restart plan for sessions on old coord code. Not under
+                    # pytest: it opens sockets and lists processes.
+                    try:
+                        import sys as _sys
+                        if "pytest" not in _sys.modules:
+                            from . import upkeep
+                            upkeep.tick(conn)
+                    except Exception:
+                        loop_error(connect, "upkeep")
                 finally:
                     conn.close()
             except Exception:  # a locked db or a vanished file: the next pass gets it
@@ -2996,6 +3006,25 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     taker = (form.get("taker") or ["master"])[0]
                     self._json(200, {"prompt": store.take_operator_prompt(conn, taker)})
                     return
+                if path == "/api/upkeep/claim":  # the mod's tick: one upkeep app call (upkeep.py)
+                    from . import upkeep
+                    self._json(200, {"upkeep": upkeep.claim(conn, (form.get("claimer") or [""])[0])})
+                    return
+                if path == "/api/upkeep/report":  # the mod's answer for that call
+                    from . import upkeep
+                    one = lambda k: (form.get(k) or [""])[0].strip()  # noqa: E731
+                    try:
+                        usage = json.loads(one("usage")) if one("usage") else None
+                    except ValueError:
+                        usage = None
+                    try:
+                        r = upkeep.report(conn, one("key"), running=one("running") or None,
+                                          status=one("status") or None, usage=usage, detail=one("detail") or None)
+                    except ValueError as e:
+                        self._json(400, {"ok": False, "error": str(e)})
+                        return
+                    self._json(200, r)
+                    return
                 if path == "/api/dispatch/claim":  # the mod's tick: one task to send, under a lease
                     from . import sessions
                     self._json(200, {"dispatch": sessions.claim(conn, (form.get("claimer") or [""])[0])})
@@ -3161,6 +3190,11 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v["pipeline_strip"] = pipeline_page.board_strip(conn)
                 client = (self._query.get("client") or [""])[0].strip() or None
                 return board_page(v, client=client).encode("utf-8")
+            if path == "/upkeep":
+                from . import upkeep
+                return page("Upkeep", "coord upkeep", "Session upkeep",
+                            "VPN watch, parked re-dispatch, clear checks, restarts after a coord update",
+                            upkeep.page_html(conn), refresh=60).encode("utf-8")
             if path == "/pipeline":
                 from . import pipeline, pipeline_page
                 client = (self._query.get("client") or [""])[0].strip() or None

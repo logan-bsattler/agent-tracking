@@ -196,6 +196,14 @@ def next_dispatch(conn: sqlite3.Connection, now_ts: int | None = None,
     held = store.held_tasks(conn, t)
     waiting = store.waiting_on(conn)
     busy = _busy_sessions(conn, reg, t)
+    # A session waiting on its restart after a coord update gets nothing new
+    # until it has restarted (upkeep.py); nor one with an upkeep send in flight.
+    from . import upkeep
+    upkeep.ensure_upkeep(conn)
+    exclude_sessions = set(exclude_sessions) | upkeep.restarting_sessions(conn)
+    for u in conn.execute("SELECT task_id, session_id FROM upkeep WHERE task_id IS NOT NULL AND phase IN (%s)"
+                          % ",".join("?" * len(upkeep.ACTIVE)), upkeep.ACTIVE):
+        busy.setdefault(u["session_id"], set()).add(u["task_id"])
     for r in _candidates(conn, t):
         if r["id"] in held or r["id"] in waiting:
             continue
@@ -253,7 +261,8 @@ def dry_run(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[str, An
     for r in conn.execute("SELECT t.id, t.kind, t.assigned_to FROM tasks t WHERE t.state='open' "
                           "AND t.picked_up_at IS NULL AND EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id=t.id)"):
         left.append({"task_id": r["id"], "client": r["assigned_to"], "kind": r["kind"],
-                     "why": "parked: master confirms the clear and the decisions first"})
+                     "why": "parked: upkeep re-dispatches it once the session is idle "
+                            "(python -m coord_mcp.upkeep status), else master"})
     return {"sends": sends, "left": left}
 
 
@@ -469,6 +478,9 @@ def dispatch_sent(conn: sqlite3.Connection, task_id: str, status: str, detail: s
     else:
         conn.execute("UPDATE tasks SET dispatched_at=?, dispatch_status=?, dispatch_session=? WHERE id=?",
                      (t, status, a["session_id"], task_id))
+        # Did the session's clear fire? (upkeep.py, switch clear_check)
+        from . import upkeep
+        upkeep.after_send(conn, task_id, a["session_id"], None, status, t)
     return {"ok": True, "task_id": task_id, "status": status, "attempt_id": a["id"]}
 
 

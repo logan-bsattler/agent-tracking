@@ -2822,7 +2822,7 @@ MINDER_IDS = 5                                        # ids listed per condition
 # defaults": the work goes out now; only its outward steps wait, and
 # holds.pending_gate enforces that, not dispatch). LIKE is case-insensitive.
 NOT_HOLD_PREFIXES = ("Workflow engine:", "Engine drafted reply", "Proceed on master default",
-                    "Ben-direct hand-back")
+                    "Ben-direct hand-back", "VPN watch:", "Upkeep:")
 
 
 def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any]]:
@@ -2844,6 +2844,8 @@ def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any
     Bookkeeping decisions (NOT_HOLD_PREFIXES) never count: an engine-created
     task is dispatched like master's own.
     """
+    from .db import ensure_dispatch
+    ensure_dispatch(conn)  # tasks.reopened_at
     busy = {r[0] for r in conn.execute(
         """SELECT DISTINCT t.assigned_to FROM tasks t WHERE t.state='open' AND t.assigned_to IS NOT NULL
              AND (t.picked_up_at IS NOT NULL OR EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id))""")}
@@ -2859,6 +2861,7 @@ def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any
         f"""SELECT t.id task_id, t.assigned_to, d.id, d.statement, MAX(d.created_at) created_at
            FROM tasks t JOIN decisions d ON d.task_id = t.id
            WHERE t.state='open' AND t.picked_up_at IS NULL AND d.created_at > ? {not_holds}
+             AND d.created_at >= COALESCE(t.reopened_at, 0)
            GROUP BY t.id""", (now_ts - MINDER_HOLD * 60,)):
         last = seen.get((r["assigned_to"] or "").casefold())
         free = (r["assigned_to"] not in busy and last is not None
@@ -2877,7 +2880,12 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
 
 
 def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
-    parked = [d["id"] for d in parked_tasks(conn) if d["parked_at"] <= now_ts - MINDER_PARKED * 60]
+    # Parked tasks and VPN failures that upkeep handles in code (upkeep.py)
+    # are not master's; what it gives up on is listed under "upkeep".
+    from . import upkeep
+    auto = upkeep.auto_parked(conn, now_ts) | upkeep.vpn_waiting_failed(conn)
+    parked = [d["id"] for d in parked_tasks(conn) if d["parked_at"] <= now_ts - MINDER_PARKED * 60
+              and d["id"] not in auto]
     # A held task is not owed (held_tasks()), nor one with a wait on the board
     # that still holds (task_deps): its blocker going done is the signal.
     held = held_tasks(conn, now_ts)
@@ -2920,7 +2928,7 @@ def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
         """SELECT t.id FROM tasks t
            WHERE t.state='failed' AND t.completed_at <= ?
              AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.task_id = t.id AND d.created_at >= t.completed_at)
-           ORDER BY t.completed_at""", (now_ts - MINDER_FAILED * 60,))]
+           ORDER BY t.completed_at""", (now_ts - MINDER_FAILED * 60,)) if r["id"] not in auto]
     intents = [r["id"] for r in conn.execute(
         "SELECT id FROM intents WHERE state='open' AND created_at <= ? ORDER BY created_at",
         (now_ts - MINDER_INTENTS * 60,))]
@@ -2960,7 +2968,7 @@ def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     undelivered = [i for i in undelivered if i not in named]
     unread = [i for i in unread if i not in named]
     loose = [i for i in loose if i not in named]
-    return {"ben_direct": owed_direct, "holds": owed_holds, "parked": parked, "stalled": stalled, "undelivered": undelivered,
+    return {"ben_direct": owed_direct, "holds": owed_holds, "parked": parked, "upkeep": upkeep.flagged(conn), "stalled": stalled, "undelivered": undelivered,
             "idle": idle, "unread": unread, "loose": loose,
             "failed": failed, "intents": intents, "unreviewed": unreviewed,
             "undrafted": undrafted, "pipeline": pipeline, "commitments": owed_commitments,
@@ -2969,7 +2977,10 @@ def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
 
 _MINDER_LABELS = (("ben_direct", "Ben's direct asks (top priority: dispatch, read and hand back, task the loose end)"),
                   ("holds", "holds behind Ben with a default (supersede, task it)"),
+                  # With switch auto_redispatch on, only 3+ parks (split the spec) or
+                  # a decision since the park are listed here (upkeep.py).
                   ("parked", "parked awaiting re-dispatch"),
+                  ("upkeep", "upkeep gave up (docs/session-upkeep.md)"),
                   ("stalled", "picked up but the client session went silent (get_session; if idle, re-dispatch)"),
                   ("undelivered", "never delivered"),
                   ("idle", "free client sessions beside owed work 15+ min (dispatch, or record why it waits)"),

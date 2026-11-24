@@ -486,14 +486,22 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             "require_pipeline": True, "pipeline_create": True,
             # the idle-session reaper (coord_mcp/reaper.py, Ben 2026-11-20): off is a
             # dry run that only logs; keep_rc leaves sessions with Remote Control on
-            "idle_reaper": False, "idle_reaper_keep_rc": True}
+            "idle_reaper": False, "idle_reaper_keep_rc": True,
+            # session upkeep (coord_mcp/upkeep.py, 2026-11-24): the VPN watch reopens
+            # VPN failures when the server answers; parked tasks are re-dispatched
+            # once their session is idle; a send whose clear did not fire is
+            # cleared and re-sent; client sessions on old coord code are restarted
+            "vpn_watch": True, "auto_redispatch": True, "clear_check": True, "code_restart": True}
 
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).
 SETTINGS = {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0,
             "auto_checkin_hours": 4.0,  # the check-in veto window, business hours
             # the idle-session reaper (reaper.py): idle this long, checked this often
-            "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0}
+            "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0,
+            # upkeep.py: VPN probe interval; a fresh session's Messages ceiling
+            # (thousands of tokens); quiet this long before a code restart
+            "vpn_interval_minutes": 3.0, "clear_max_messages_k": 40.0, "restart_idle_minutes": 2.0}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (
