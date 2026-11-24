@@ -8,6 +8,8 @@ export type Question = {
   task_id: string | null  // null: board-wide, ref is q<id>
   path: string | null     // the document behind it
   question: string
+  question_labeled?: string  // question with each id's label beside it (lookup.label_question)
+  ref_label?: string         // what the answer lands on: "task: <title>", "loose end: <text>"
   options: string[]
   prompts: string[]
   recommended: number | null
