@@ -83,6 +83,16 @@ _NO_WINDOW = 0x08000000
 def ensure_procs(conn: sqlite3.Connection) -> None:
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_procs'").fetchone() is None:
         conn.executescript(PROCS_DDL)
+    # The code each server runs (upkeep.py, restart after a coord update).
+    # Added by name, so a server on older code still inserts its row.
+    have = {r[1] for r in conn.execute("PRAGMA table_info(session_procs)")}
+    for col in ("code_version TEXT", "code_root TEXT"):
+        if col.split()[0] not in have:
+            try:
+                conn.execute(f"ALTER TABLE session_procs ADD COLUMN {col}")
+            except sqlite3.OperationalError as e:  # another process added it first
+                if "duplicate column" not in str(e):
+                    raise
 
 
 def record_self(conn: sqlite3.Connection | None = None, env: dict[str, str] | None = None) -> dict[str, Any] | None:
@@ -100,6 +110,9 @@ def record_self(conn: sqlite3.Connection | None = None, env: dict[str, str] | No
         claude_pid = None
     row = {"server_pid": os.getpid(), "parent_pid": os.getppid(), "claude_pid": claude_pid,
            "host_session_id": host, "cli_session_id": cli, "cwd": os.getcwd(), "started_at": now()}
+    from . import upkeep
+    root = Path(upkeep.__file__).resolve().parent
+    row["code_root"], row["code_version"] = str(root), upkeep.code_version(root)
     own = conn is None
     if own:
         from .db import connect
@@ -107,8 +120,8 @@ def record_self(conn: sqlite3.Connection | None = None, env: dict[str, str] | No
     try:
         ensure_procs(conn)
         conn.execute("INSERT OR REPLACE INTO session_procs(server_pid, parent_pid, claude_pid, host_session_id, "
-                     "cli_session_id, cwd, started_at) VALUES (:server_pid,:parent_pid,:claude_pid,"
-                     ":host_session_id,:cli_session_id,:cwd,:started_at)", row)
+                     "cli_session_id, cwd, started_at, code_version, code_root) VALUES (:server_pid,:parent_pid,"
+                     ":claude_pid,:host_session_id,:cli_session_id,:cwd,:started_at,:code_version,:code_root)", row)
         conn.commit()
     finally:
         if own:

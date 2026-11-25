@@ -159,6 +159,7 @@ function start($: EngineInterface): Promise<void> {
         await health($)
         if (wakeTo) await wake($)
         if (autoDispatch) await dispatch($)
+        if (autoDispatch) await upkeep($)
         if (autoNotes) await pipelineNote($)
         await readyToast($)
         if (isMaster && !isDesk) {
@@ -271,6 +272,56 @@ async function dispatch($: EngineInterface): Promise<void> {
     })
   } catch { /* the lease lapses; the board retries after its wait */ }
   if (status === 'error') $.ui.toast(`Auto-dispatch of ${d.task_id} to ${d.client} failed: ${said.slice(0, 160)}`)
+}
+
+// Session upkeep (2026-11-24, coord_mcp/upkeep.py). The board keeps the
+// state for parked re-dispatch, the check that a session's clear fired, and
+// restarts after a coord update; it leases one row a tick and names the app
+// call it needs: get_session (is the session idle?), send (the Do task line,
+// or the clear request), get_usage (did the clear fire?). This makes the call
+// and reports what came back. Runs with auto-dispatch; the board's switches
+// (vpn_watch, auto_redispatch, clear_check, code_restart) decide the rest.
+async function upkeep($: EngineInterface): Promise<void> {
+  type Up = { key: string; action: 'get_session' | 'send' | 'get_usage'; session_id: string; task_id: string | null;
+    client: string | null; message?: string }
+  let u: Up | null = null
+  try {
+    const r = await $.http.fetch(`${DASH}/api/upkeep/claim`, {
+      method: 'POST', headers: FORM, body: `claimer=${isDesk ? 'desk' : 'master'}`,
+    })
+    if (!r.ok) return
+    u = (JSON.parse(r.text) as { upkeep: Up | null }).upkeep
+  } catch { return /* dashboard down, or an older board without upkeep */ }
+  if (!u) return
+  const text = (res: { content: { text?: string }[] }) => res.content.map(b => ('text' in b ? b.text : '') ?? '').join(' ')
+  let body = `key=${encodeURIComponent(u.key)}`
+  let said = ''
+  try {
+    if (u.action === 'get_session') {
+      const res = await $.mcp.call('ccd_session_mgmt', 'get_session', { session_id: u.session_id })
+      said = text(res)
+      const m = res.isError ? null : said.match(/"isRunning"\s*:\s*(true|false)/)
+      body += `&running=${m ? m[1] : ''}`
+    } else if (u.action === 'get_usage') {
+      const res = await $.mcp.call('ccd_session_mgmt', 'get_usage', { session_id: u.session_id })
+      said = text(res)
+      const i = said.indexOf('{')
+      body += `&usage=${encodeURIComponent(!res.isError && i >= 0 ? said.slice(i) : '')}`
+    } else {
+      const res = await $.mcp.call('ccd_session_mgmt', 'send_message', { session_id: u.session_id, message: u.message ?? '' })
+      said = text(res)
+      const m = res.isError ? null : said.match(/delivered|queued/)
+      body += `&status=${m ? m[0] : 'error'}`
+    }
+  } catch (err) {
+    said = String(err)
+    body += u.action === 'send' ? '&status=error' : ''
+  }
+  try {
+    await $.http.fetch(`${DASH}/api/upkeep/report`, {
+      method: 'POST', headers: FORM, body: `${body}&detail=${encodeURIComponent(said.slice(0, 300))}`,
+    })
+  } catch { /* the lease lapses; the board offers the row again */ }
 }
 
 // Ben's direct asks, handed back (2026-11-16, coord_mcp/direct.py). When a

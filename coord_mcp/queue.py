@@ -458,6 +458,10 @@ def check_grouped(follow_ups: list[dict[str, Any]], client: str | None) -> None:
 #                   logs what it would end to ~/.coord/reaper.log.      (off)
 #   idle_reaper_keep_rc  the reaper leaves sessions with Remote Control
 #                   on (ending one turns RC off).                        (on)
+#   auto_task_loose the dashboard tasks client loose ends itself, one
+#                   undelivered task per client at a time (autotask.py). (off)
+#   minder_fast_wake the minder wakes master at once for a new intent or
+#                   after its handoff (self-clear), past the rate limit. (off)
 
 REASONS = ("send", "approve", "scope", "access", "judgement")
 SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_wide": True,
@@ -486,14 +490,47 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             "require_pipeline": True, "pipeline_create": True,
             # the idle-session reaper (coord_mcp/reaper.py, Ben 2026-11-20): off is a
             # dry run that only logs; keep_rc leaves sessions with Remote Control on
-            "idle_reaper": False, "idle_reaper_keep_rc": True}
+            "idle_reaper": False, "idle_reaper_keep_rc": True,
+            # session upkeep (coord_mcp/upkeep.py, 2026-11-24): the VPN watch reopens
+            # VPN failures when the server answers; parked tasks are re-dispatched
+            # once their session is idle; a send whose clear did not fire is
+            # cleared and re-sent; client sessions on old coord code are restarted
+            "vpn_watch": True, "auto_redispatch": True, "clear_check": True, "code_restart": True,
+            # a dod_review with no side session of its own (or whose side session wrote
+            # the work) goes through a cleared primary (upkeep.reviewable)
+            "auto_review_dispatch": True,
+            # a decision that lifts a hold (lift/release/dispatch, superseding or
+            # citing it) makes the task dispatchable at once (store.hold_lifted)
+            "hold_lift": True,
+            # a request_changes review opens the next round, or hands Ben the
+            # chain after REVIEW_ROUNDS (store.next_round)
+            "auto_revise": True,
+            # board auto-tasking (coord_mcp/autotask.py, 2026-11-23): the dashboard
+            # tasks client loose ends itself; the minder skips its rate limit for
+            # a new intent or master's handoff. Auto-tasking on since 2026-11-24
+            # (dispatch automation, step 5); fast wake off until Ben reviews it.
+            "auto_task_loose": True, "minder_fast_wake": False,
+            # a released check-in approval creates its checkin_of code_change
+            # (checkin_auto.create_checkin); auto-dispatch sends it
+            "auto_checkin_task": True,
+            # a draft_reply or one-question investigation is sent to its busy
+            # session when get_usage reads under queue_max_context_pct
+            # (upkeep.queueable); never code or a deliverable, never behind a park
+            "auto_queue": True}
 
 # Numbers behind the switches, as working defaults Ben may change (meta
 # `setting:<name>`, `python -m coord_mcp.queue setting <name> <value>`).
 SETTINGS = {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0,
             "auto_checkin_hours": 4.0,  # the check-in veto window, business hours
             # the idle-session reaper (reaper.py): idle this long, checked this often
-            "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0}
+            "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0,
+            # upkeep.py: VPN probe interval; a fresh session's Messages ceiling
+            # (thousands of tokens); quiet this long before a code restart
+            "vpn_interval_minutes": 3.0, "clear_max_messages_k": 40.0, "restart_idle_minutes": 2.0,
+            # auto_task_loose tops a client up to this many undelivered tasks
+            "auto_task_buffer": 1.0,
+            # auto_queue sends a short task to a busy session under this context use
+            "queue_max_context_pct": 50.0}
 GROUP_DAYS = 7
 TAGS_DDL = """
 CREATE TABLE IF NOT EXISTS follow_up_tags (

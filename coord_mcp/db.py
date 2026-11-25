@@ -438,7 +438,9 @@ CREATE TABLE IF NOT EXISTS dispatch_attempts (
 CREATE INDEX IF NOT EXISTS dispatch_attempts_task ON dispatch_attempts(task_id, created_at);
 CREATE INDEX IF NOT EXISTS dispatch_attempts_session ON dispatch_attempts(session_id, created_at);
 """
-_DISPATCH_COLS = ("dispatched_at INTEGER", "dispatch_status TEXT", "dispatch_session TEXT")
+# reopened_at: the VPN watch reopened a failed task (upkeep.py); decisions
+# before it are no hold.
+_DISPATCH_COLS = ("dispatched_at INTEGER", "dispatch_status TEXT", "dispatch_session TEXT", "reopened_at INTEGER")
 
 
 def ensure_dispatch(conn: sqlite3.Connection) -> None:

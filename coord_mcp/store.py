@@ -473,6 +473,13 @@ def _complete(conn: sqlite3.Connection, task_id: str, row: sqlite3.Row, validate
     if state == "done":
         # Not echoed to the producer: the review is another session's job.
         create_review(conn, task_id)
+        if row["kind"] == "dod_review":
+            try:
+                with savepoint(conn, "next_round"):
+                    if nxt := next_round(conn, task_id):
+                        out["next_round"] = nxt
+            except Exception as e:  # noqa: BLE001 - the verdict stands whatever the next round does
+                out["next_round_error"] = str(e)[:200]
         if row["kind"] == "draft_reply" and (aside := set_aside_revised(conn, task_id)):
             out["set_aside"] = aside
     return out
@@ -1776,6 +1783,98 @@ def create_review(conn: sqlite3.Connection, task_id: str) -> dict[str, Any] | No
                        parent_id=owed["parent_id"])
 
 
+_REVISE_DROP = ("checkin_of", "created_by", "follow_up", "findings", "revises", "notes", "from",
+                "instructions", "review_of")
+
+
+def next_round(conn: sqlite3.Connection, review_id: str) -> dict[str, Any] | None:
+    """A dod_review that requests changes opens the next round (switch
+    auto_revise): a task of the reviewed work's kind, parent = that work, the
+    findings in its spec, and each client loose end of the review resolved
+    with it. An open revision of the same work takes the findings instead.
+    Past REVIEW_ROUNDS request_changes in the chain there is no new round:
+    one Ben item (accept as is, revise once more, or rework the spec).
+    A direct ask's review is direct.autotask's. Returns what it did, or None."""
+    from . import direct, queue
+    if not queue.switch(conn, "auto_revise"):
+        return None
+    rv = conn.execute("SELECT * FROM tasks WHERE id=?", (review_id,)).fetchone()
+    if rv is None or rv["kind"] != "dod_review" or rv["state"] != "done" or not rv["parent_id"]:
+        return None
+    result = json.loads(rv["result"] or "{}")
+    if result.get("verdict") != "request_changes" or direct.is_direct(conn, review_id):
+        return None
+    base = conn.execute("SELECT * FROM tasks WHERE id=?", (rv["parent_id"],)).fetchone()
+    if base is None or base["kind"] not in ("deliverable", *GATED_DOD):
+        return None
+    clients = client_keys(conn)
+    fus = [f for f in conn.execute("SELECT id, who, what FROM follow_ups WHERE task_id=? AND state='open' "
+                                   "ORDER BY idx, rowid", (review_id,))
+           if (f["who"] or "").strip().casefold() in clients]
+    findings = [f["what"] for f in fus] or [
+        f"{x.get('criterion')}: {x.get('note')}" for x in result.get("findings") or [] if isinstance(x, dict)]
+    name = base["title"].removeprefix("Revise: ")
+    if review_rounds(conn, base["id"]) >= REVIEW_ROUNDS:
+        lin = _same_kind_chain(conn, base["id"])
+        reviews = [r for (r,) in conn.execute(
+            "SELECT id FROM tasks WHERE kind='dod_review' AND state='done' AND parent_id IN "
+            f"({','.join('?' * len(lin))}) ORDER BY completed_at", lin)]
+        d = record_decision(conn, f"Two rounds, then Ben: {name} ({base['id']}) gets no third round; "
+                                  f"reviews {', '.join(reviews)}"[:300],
+                            because=f"{REVIEW_ROUNDS} request_changes rounds reached (parent CLAUDE.md, "
+                                    "Two rounds, then Ben)", task_id=review_id)
+        for f in fus:
+            resolve_follow_up(conn, f["id"], decision_id=d["decision_id"])
+        idx = conn.execute("SELECT COALESCE(MAX(idx), -1) + 1 FROM follow_ups WHERE task_id=?",
+                           (review_id,)).fetchone()[0]
+        fid = _id()
+        what = (f"Two rounds done on {name} ({base['id']}; reviews {', '.join(reviews)}): revise once more, "
+                f"accept as is, or rework the spec. Findings: {'; '.join(findings)}")[:300]
+        conn.execute("INSERT INTO follow_ups(id, task_id, idx, who, what, state, created_at) "
+                     "VALUES (?,?,?,'Ben',?,'open',?)", (fid, review_id, idx, what, now()))
+        return {"round_cap": True, "ben_item": fid, "decision_id": d["decision_id"]}
+    live = (open_revision(conn, base["id"]) if base["kind"] == "deliverable" else
+            (r["id"] if (r := conn.execute("SELECT id FROM tasks WHERE parent_id=? AND kind=? AND state='open' "
+                                           "ORDER BY created_at LIMIT 1", (base["id"], base["kind"])).fetchone())
+             else None))
+    if live:
+        record_decision(conn, f"Findings of review {review_id} folded into open revision {live}: "
+                              + "; ".join(findings)[:1500],
+                        because="one live revision per work item (MAG audit 2026-11-17)", task_id=live)
+        for f in fus:
+            resolve_follow_up(conn, f["id"], task_id=live)
+        return {"task_id": live, "folded": True}
+    spec = {k: v for k, v in json.loads(base["spec"] or "{}").items() if k not in _REVISE_DROP}
+    spec.update({"findings": findings[:20], "created_by": f"board (auto): next round after review {review_id}",
+                 "instructions": f"Revise task {base['id']}'s work to meet every finding of review {review_id}. "
+                                 "Write in work/, never deliverables/."})
+    if base["kind"] == "deliverable":
+        spec["revises"] = base["id"]
+        from .direct import version_notes
+        if notes := version_notes(conn, base["id"]):
+            spec["notes"] = notes[:5]
+    new = create_task(conn, base["kind"], f"Revise: {name}"[:80], spec, assigned_to=base["assigned_to"],
+                      parent_id=base["id"])
+    tid = new["task_id"]
+    for f in fus:
+        resolve_follow_up(conn, f["id"], task_id=tid)
+    record_decision(conn, f"Next round: {base['kind']} {tid} revises {base['id']} per review {review_id}",
+                    because="request_changes opens the next round (switch auto_revise)", task_id=tid)
+    return {"task_id": tid, "kind": base["kind"], "follow_ups": [f["id"] for f in fus]}
+
+
+def _same_kind_chain(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    """task_id and every task of its kind above it in the parent chain."""
+    out, tid = [], task_id
+    kind = conn.execute("SELECT kind FROM tasks WHERE id=?", (task_id,)).fetchone()["kind"]
+    while tid and tid not in out:
+        out.append(tid)
+        up = conn.execute("SELECT t.parent_id, p.kind FROM tasks t LEFT JOIN tasks p ON p.id = t.parent_id "
+                          "WHERE t.id=?", (tid,)).fetchone()
+        tid = up["parent_id"] if up and up["kind"] == kind else None
+    return out
+
+
 def _stage(conn: sqlite3.Connection, task_id: str, kind: str, path: Path) -> dict[str, Any]:
     if kind != "deliverable":
         from . import gate
@@ -1804,6 +1903,24 @@ def _named_files(result: dict[str, Any], client: str | None, root: Path) -> list
     """Every file a deliverable result names: its path, then its files."""
     raw = [result.get("path") or ""] + [f for f in result.get("files") or [] if isinstance(f, str)]
     return [_resolve(p, client, root) for item in raw for p in _split_paths(item)]
+
+
+_DRAFT_TITLE = re.compile(r"(<title[^>]*>)(.*?)(</title>)", re.I | re.S)
+_DRAFT_WORD = re.compile(r"^\s*DRAFT\s*[-:–—|]\s*|\s*[-:–—|]\s*DRAFT\s*$|^\s*DRAFT\s*$")
+_DRAFT_ELEM = re.compile(r"<(\w+)\b[^>]*\bclass=[\"'][^\"']*(?<![\w-])draft(?![\w-])[^\"']*[\"'][^>]*>.*?</\1\s*>",
+                         re.I | re.S)
+_EMPTIED_P = re.compile(r"[ \t]*<p\b[^>]*>\s*\x00\s*</p>[ \t]*\r?\n?", re.I)
+
+
+def strip_draft_marks(html: str) -> str:
+    """The client copy of a DRAFT page: 'DRAFT - ' (or ' - DRAFT') off its
+    <title>, every element with class 'draft' (the badge) removed, and a <p>
+    left empty by that removal dropped. The rest of the page is unchanged."""
+    out = _DRAFT_TITLE.sub(lambda m: m.group(1) + _DRAFT_WORD.sub("", m.group(2)) + m.group(3), html, count=1)
+    if out == html and not _DRAFT_ELEM.search(html):
+        return html
+    out = _DRAFT_ELEM.sub("\x00", out)
+    return _EMPTIED_P.sub("", out).replace("\x00", "")
 
 
 def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None,
@@ -1870,6 +1987,14 @@ def promote(conn: sqlite3.Connection, task_id: str, root: Path | None = None,
         v += 1
     dest = out_dir / f"{stem}-v{v}{src.suffix}"
     shutil.copy2(src, dest)
+    if src.suffix.lower() in (".html", ".htm"):
+        # The client copy carries no DRAFT marker (DoD 6.6): the filename loses
+        # it above; the page's <title> and its DRAFT badge lose it here.
+        text = src.read_text(encoding="utf-8")
+        clean = strip_draft_marks(text)
+        if clean != text:
+            dest.write_text(clean, encoding="utf-8")
+            shutil.copystat(src, dest)
     book_dest = out_dir / f"{stem}-v{v}{book.suffix}" if book else None
     if book:
         shutil.copy2(book, book_dest)
@@ -2796,7 +2921,24 @@ MINDER_IDS = 5                                        # ids listed per condition
 # defaults": the work goes out now; only its outward steps wait, and
 # holds.pending_gate enforces that, not dispatch). LIKE is case-insensitive.
 NOT_HOLD_PREFIXES = ("Workflow engine:", "Engine drafted reply", "Proceed on master default",
-                    "Ben-direct hand-back")
+                    "Ben-direct hand-back", "VPN watch:", "Upkeep:", "Auto-task:")
+
+
+_DISPATCH_STMT = re.compile(r"^\s*(desk:\s*)?(dispatch|re-?dispatch|send)\b", re.I)
+
+
+def hold_lifted(conn: sqlite3.Connection, decision_id: str, statement: str | None) -> bool:
+    """The newest decision on an undelivered task does not hold it: it says
+    the hold is lifted or released, or to dispatch the task, or it was
+    superseded or lifted by a later decision citing it (holds.hold_live)."""
+    from . import holds
+    s = statement or ""
+    if holds._LIFT.search(s) or _DISPATCH_STMT.search(s) or not holds.hold_live(conn, decision_id):
+        return True
+    # A ruling that supersedes the hold ("Ben ruled: go ahead") lifts it,
+    # unless it restates a hold of its own.
+    r = conn.execute("SELECT supersedes FROM decisions WHERE id=?", (decision_id,)).fetchone()
+    return bool(r and r["supersedes"]) and not holds.is_hold(s)
 
 
 def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any]]:
@@ -2818,6 +2960,8 @@ def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any
     Bookkeeping decisions (NOT_HOLD_PREFIXES) never count: an engine-created
     task is dispatched like master's own.
     """
+    from .db import ensure_dispatch
+    ensure_dispatch(conn)  # tasks.reopened_at
     busy = {r[0] for r in conn.execute(
         """SELECT DISTINCT t.assigned_to FROM tasks t WHERE t.state='open' AND t.assigned_to IS NOT NULL
              AND (t.picked_up_at IS NOT NULL OR EXISTS (SELECT 1 FROM task_parks p WHERE p.task_id = t.id))""")}
@@ -2828,12 +2972,17 @@ def held_tasks(conn: sqlite3.Connection, now_ts: int) -> dict[str, dict[str, Any
                           "GROUP BY client", (now_ts - MINDER_HOLD * 60,)):
         seen[r[0].casefold()] = max(seen.get(r[0].casefold(), 0), r[1])
     out = {}
+    from .queue import switch
+    lift = switch(conn, "hold_lift")
     not_holds = " ".join(f"AND d.statement NOT LIKE '{p}%'" for p in NOT_HOLD_PREFIXES)
     for r in conn.execute(
         f"""SELECT t.id task_id, t.assigned_to, d.id, d.statement, MAX(d.created_at) created_at
            FROM tasks t JOIN decisions d ON d.task_id = t.id
            WHERE t.state='open' AND t.picked_up_at IS NULL AND d.created_at > ? {not_holds}
+             AND d.created_at >= COALESCE(t.reopened_at, 0)
            GROUP BY t.id""", (now_ts - MINDER_HOLD * 60,)):
+        if lift and hold_lifted(conn, r["id"], r["statement"]):
+            continue  # the lifting decision makes it dispatchable at once (switch hold_lift)
         last = seen.get((r["assigned_to"] or "").casefold())
         free = (r["assigned_to"] not in busy and last is not None
                 and r["created_at"] < last <= now_ts - MINDER_UNDELIVERED * 60)
@@ -2851,7 +3000,12 @@ def minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
 
 
 def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
-    parked = [d["id"] for d in parked_tasks(conn) if d["parked_at"] <= now_ts - MINDER_PARKED * 60]
+    # Parked tasks and VPN failures that upkeep handles in code (upkeep.py)
+    # are not master's; what it gives up on is listed under "upkeep".
+    from . import upkeep
+    auto = upkeep.auto_parked(conn, now_ts) | upkeep.vpn_waiting_failed(conn)
+    parked = [d["id"] for d in parked_tasks(conn) if d["parked_at"] <= now_ts - MINDER_PARKED * 60
+              and d["id"] not in auto]
     # A held task is not owed (held_tasks()), nor one with a wait on the board
     # that still holds (task_deps): its blocker going done is the signal.
     held = held_tasks(conn, now_ts)
@@ -2859,7 +3013,7 @@ def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     # Nor one code sent in the last half hour (sessions.next_dispatch): the
     # mod is delivering it, and master is woken only if that did not take.
     from . import sessions
-    sent = sessions.recently_dispatched(conn, now_ts)
+    sent = sessions.recently_dispatched(conn, now_ts) | upkeep.auto_undelivered(conn, now_ts)
     undelivered = [r["id"] for r in conn.execute(
         """SELECT t.id FROM tasks t
            WHERE t.state='open' AND t.picked_up_at IS NULL AND t.created_at <= ?
@@ -2894,7 +3048,7 @@ def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
         """SELECT t.id FROM tasks t
            WHERE t.state='failed' AND t.completed_at <= ?
              AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.task_id = t.id AND d.created_at >= t.completed_at)
-           ORDER BY t.completed_at""", (now_ts - MINDER_FAILED * 60,))]
+           ORDER BY t.completed_at""", (now_ts - MINDER_FAILED * 60,)) if r["id"] not in auto]
     intents = [r["id"] for r in conn.execute(
         "SELECT id FROM intents WHERE state='open' AND created_at <= ? ORDER BY created_at",
         (now_ts - MINDER_INTENTS * 60,))]
@@ -2934,7 +3088,13 @@ def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
     undelivered = [i for i in undelivered if i not in named]
     unread = [i for i in unread if i not in named]
     loose = [i for i in loose if i not in named]
-    return {"ben_direct": owed_direct, "holds": owed_holds, "parked": parked, "stalled": stalled, "undelivered": undelivered,
+    # Loose ends the board will task itself (autotask.py, switch auto_task_loose)
+    # are not master's to be woken for.
+    if loose and queue.switch(conn, "auto_task_loose"):
+        from . import autotask
+        mine = autotask.taken_ids(conn, now_ts)
+        loose = [i for i in loose if i not in mine]
+    return {"ben_direct": owed_direct, "holds": owed_holds, "parked": parked, "upkeep": upkeep.flagged(conn), "stalled": stalled, "undelivered": undelivered,
             "idle": idle, "unread": unread, "loose": loose,
             "failed": failed, "intents": intents, "unreviewed": unreviewed,
             "undrafted": undrafted, "pipeline": pipeline, "commitments": owed_commitments,
@@ -2943,11 +3103,14 @@ def _minder_owed(conn: sqlite3.Connection, now_ts: int) -> dict[str, list[str]]:
 
 _MINDER_LABELS = (("ben_direct", "Ben's direct asks (top priority: dispatch, read and hand back, task the loose end)"),
                   ("holds", "holds behind Ben with a default (supersede, task it)"),
+                  # With switch auto_redispatch on, only 3+ parks (split the spec) or
+                  # a decision since the park are listed here (upkeep.py).
                   ("parked", "parked awaiting re-dispatch"),
+                  ("upkeep", "upkeep gave up (docs/session-upkeep.md)"),
                   ("stalled", "picked up but the client session went silent (get_session; if idle, re-dispatch)"),
                   ("undelivered", "never delivered"),
                   ("idle", "free client sessions beside owed work 15+ min (dispatch, or record why it waits)"),
-                  ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids)"),
+                  ("unread", "result unread"), ("loose", "client loose ends untasked (follow-up ids; each client on its own: a busy or stuck session holds only its own client, so task the rest now)"),
                   ("failed", "failed with no decision"), ("intents", "open intents"),
                   ("unreviewed", "client deliverables with no dod_review (CVC code, emails)"),
                   ("undrafted", "finished drafts not yet in Outlook (draft each, never send)"),
@@ -3099,7 +3262,8 @@ def minder_check(conn: sqlite3.Connection, now_ts: int | None = None) -> dict[st
     state = minder_state(conn, now_ts, owed)
     if not any(owed.values()):
         return {"fired": False, "reason": "nothing owed", "owed": owed, **state}
-    if state["next_eligible"] > now_ts and not _new_direct(conn, owed):
+    from . import autotask
+    if state["next_eligible"] > now_ts and not _new_direct(conn, owed) and not autotask.fast_wake(conn, owed, now_ts):
         return {"fired": False, "reason": "rate limit", "owed": owed, **state}
     if queued_operator_prompts(conn):
         return {"fired": False, "reason": "a prompt is already queued", "owed": owed, **state}

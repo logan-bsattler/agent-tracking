@@ -245,16 +245,44 @@ def release(conn: sqlite3.Connection, a: dict[str, Any], t: int) -> dict[str, An
         conn.execute("UPDATE checkin_auto SET state='lapsed', ended_by=?, ended_at=? WHERE task_id=?",
                      (dec["decision_id"], t, a["task_id"]))
         return {"task_id": a["task_id"], "action": "lapsed", "why": why, "ben_items": back}
-    client = conn.execute("SELECT assigned_to FROM tasks WHERE id=?", (a["task_id"],)).fetchone()["assigned_to"]
+    from . import queue
+    code = conn.execute("SELECT assigned_to, title, spec FROM tasks WHERE id=?", (a["task_id"],)).fetchone()
+    client = code["assigned_to"]
+    auto = bool(client) and queue.switch(conn, "auto_checkin_task")
     dec = store.record_decision(
-        conn, f"{RELEASED} {a['task_id']}: veto window passed; master creates the check-in (checkin_of)",
+        conn, f"{RELEASED} {a['task_id']}: veto window passed; "
+              + ("the board creates the check-in (checkin_of)" if auto
+                 else "master creates the check-in (checkin_of)"),
         f"approval {a['decision_id']} stood its window; " + WHY, a["task_id"])
     fid = _add_follow_up(conn, a["task_id"], client or "master",
                          f"Check in {a['task_id']} as its own code_change (spec checkin_of {a['task_id']}); "
                          f"approved by decision {a['decision_id']}")
     conn.execute("UPDATE checkin_auto SET state='released', ended_by=?, ended_at=? WHERE task_id=?",
                  (dec["decision_id"], t, a["task_id"]))
-    return {"task_id": a["task_id"], "action": "released", "decision_id": dec["decision_id"], "follow_up": fid}
+    out = {"task_id": a["task_id"], "action": "released", "decision_id": dec["decision_id"], "follow_up": fid}
+    if auto:
+        try:
+            with store.savepoint(conn, "checkin_task"):
+                out["checkin_task"] = create_checkin(conn, a, code, fid)
+        except Exception as e:  # noqa: BLE001 - the loose end stays for master
+            out["checkin_error"] = str(e)[:200]
+    return out
+
+
+def create_checkin(conn: sqlite3.Connection, a: dict[str, Any], code: sqlite3.Row, fid: str) -> str:
+    """The check-in code_change for a released approval (switch
+    auto_checkin_task): parent = the code, its loose end resolved with it.
+    Auto-dispatch sends it to the client's primary once that is free."""
+    from . import store
+    spec = {k: v for k, v in json.loads(code["spec"] or "{}").items() if "cvc" in k or "ticket" in k}
+    spec.update({"checkin_of": a["task_id"], "cvc": True,
+                 "created_by": f"board (auto): check-in released by decision {a['decision_id']}",
+                 "instructions": f"Check in task {a['task_id']}'s code exactly as reviewed and approved "
+                                 f"(review {a['review_id']}). Do not change the files first. Return compile."})
+    tid = store.create_task(conn, "code_change", f"Check in: {code['title']}"[:80], spec,
+                            assigned_to=code["assigned_to"], parent_id=a["task_id"])["task_id"]
+    store.resolve_follow_up(conn, fid, task_id=tid)
+    return tid
 
 
 def candidates(conn: sqlite3.Connection) -> list[str]:

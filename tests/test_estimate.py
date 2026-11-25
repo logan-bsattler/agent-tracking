@@ -80,8 +80,11 @@ def test_only_the_approval_closes(conn):
 
 def test_defaults():
     assert queue.SWITCHES["auto_estimate"] is True
-    assert queue.SETTINGS == {"estimate_max_ratio": 1.5, "estimate_max_high": 24.0, "auto_checkin_hours": 4.0,
-                              "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0}
+    assert {k: v for k, v in queue.SETTINGS.items()
+            if k not in ("vpn_interval_minutes", "clear_max_messages_k", "restart_idle_minutes")} == {
+        "estimate_max_ratio": 1.5, "estimate_max_high": 24.0, "auto_checkin_hours": 4.0,
+                              "idle_reaper_minutes": 15.0, "idle_reaper_interval": 5.0,
+                              "auto_task_buffer": 1.0, "queue_max_context_pct": 50.0}
 
 
 @pytest.mark.parametrize("low,high,ok", [

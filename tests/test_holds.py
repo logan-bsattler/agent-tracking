@@ -225,3 +225,33 @@ def test_the_prescribed_proceed_statement_is_never_a_hold(conn, monkeypatch):
                  f"Revise {work} once more, waiting on nothing (master default; Ben may override); {ben} stays open"):
         assert not holds.is_hold(stmt)
         holds.check_new_hold(conn, stmt, "master default; Ben may override", t)
+
+
+# ---- hold_lift: the lifting decision makes the task dispatchable at once
+
+def _held(conn, tid):
+    return tid in store.held_tasks(conn, now())
+
+
+def test_lifting_decision_frees_a_held_task(conn):
+    queue.set_switch(conn, "hold_lift", True)
+    tid = store.create_task(conn, "investigation", "t", {"q": "x"}, assigned_to="Royal")["task_id"]
+    h = store.record_decision(conn, "Hold this until the refresh lands", task_id=tid)["decision_id"]
+    assert _held(conn, tid)
+    store.record_decision(conn, f"Hold {h} lifted: refresh landed", task_id=tid)
+    assert not _held(conn, tid)
+
+
+def test_superseding_or_dispatch_decision_lifts_and_switch_off_keeps_old_rule(conn):
+    tid = store.create_task(conn, "investigation", "t", {"q": "x"}, assigned_to="Royal")["task_id"]
+    h = store.record_decision(conn, "Hold until Ben rules", task_id=tid)["decision_id"]
+    store.record_decision(conn, "Ben ruled: go ahead", supersedes=h)
+    assert _held(conn, tid)  # switch off (conftest): any decision is a hold, as before
+    queue.set_switch(conn, "hold_lift", True)
+    assert not _held(conn, tid)
+    t2 = store.create_task(conn, "investigation", "t2", {"q": "x"}, assigned_to="Royal")["task_id"]
+    store.record_decision(conn, "Keep this back for now", task_id=t2)
+    conn.execute("UPDATE decisions SET created_at = created_at - 5 WHERE task_id=?", (t2,))  # same-second tie
+    assert _held(conn, t2)
+    store.record_decision(conn, f"Desk: dispatch task {t2} (Royal), per decision abc", task_id=t2)
+    assert not _held(conn, t2)

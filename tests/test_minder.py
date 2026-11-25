@@ -230,7 +230,7 @@ def test_client_loose_end_fires_after_threshold_only(conn):
     assert _fires(conn, store.MINDER_LOOSE - 1)["reason"] == "nothing owed"
     r = _fires(conn, store.MINDER_LOOSE + 1)
     assert r["fired"] and r["owed"]["loose"] == [fid]
-    assert f"1 client loose ends untasked (follow-up ids) ({fid})" in _text(conn)
+    assert f"1 client loose ends untasked (follow-up ids; each client on its own: a busy or stuck session holds only its own client, so task the rest now) ({fid})" in _text(conn)
 
 
 def test_loose_ends_for_ben_or_master_or_tasked_are_not_the_minders(conn):

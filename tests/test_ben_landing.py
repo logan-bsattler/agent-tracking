@@ -48,7 +48,11 @@ def test_defaults_are_on_except_precedent(conn):
         "hold_rule": True, "hold_apply": False, "case_checks": True, "defer_return": True,
         "workflow_propose": True, "auto_promote": True, "auto_estimate": True, "auto_checkin": True,
         "passive_close": False, "require_pipeline": True, "pipeline_create": True,
-        "idle_reaper": False, "idle_reaper_keep_rc": True}
+        "idle_reaper": False, "idle_reaper_keep_rc": True,
+        "vpn_watch": True, "auto_redispatch": True, "clear_check": True, "code_restart": True,
+        "auto_review_dispatch": True, "hold_lift": True, "auto_revise": True,
+        "auto_task_loose": True, "minder_fast_wake": False,
+        "auto_checkin_task": True, "auto_queue": True}
 
 
 def test_reason_is_an_optional_enum_in_the_contract():
