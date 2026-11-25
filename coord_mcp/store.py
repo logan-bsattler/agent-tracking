@@ -2405,6 +2405,9 @@ def task_detail(conn: sqlite3.Connection, task_id: str, root: Path | None = None
     d["deps"] = task_deps(conn, task_id)
     from . import gate
     d["review"] = gate.stage(conn, task_id)
+    # Where its Outlook draft stands (drafted, set aside), for the draft card's stepper.
+    d["outlook_mark"] = (outlook_marks(conn).get(task_id, {}).get("mark")
+                         if d["kind"] == "draft_reply" else None)
     from . import lookup
     d["where"] = lookup.status_for_task(conn, task_id)
     d["id_labels"] = lookup.labels(conn, [i for i in lookup.ids_in(

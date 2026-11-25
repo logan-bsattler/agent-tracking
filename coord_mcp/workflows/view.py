@@ -89,7 +89,10 @@ def overview(conn: sqlite3.Connection, t: int | None = None) -> dict[str, Any]:
         d = defs.get(c["workflow"])
         st = next((s for s in (d or {}).get("steps") or [] if s["key"] == c["step"]), None)
         lim = sla.status(c, t)
-        open_cases.append({**c, "step_name": st["name"] if st else (c["step"] or "—"),
+        steps = [{"key": s["key"], "name": s.get("name") or s["key"], "who": s.get("who"),
+                  "means": defs.means(s), "optional": bool(s.get("optional"))}
+                 for s in (d or {}).get("steps") or []]
+        open_cases.append({**c, "step_name": st["name"] if st else (c["step"] or "—"), "steps": steps,
                            "age_h": round((t - (c["step_at"] or c["created_at"])) / 3600, 1),
                            "ben_touches": ben[c["id"]],
                            "limit_h": round(lim["limit"] / 3600, 1) if lim else None,
@@ -112,6 +115,21 @@ def _hours(h: float | None) -> str:
     if h is None:
         return "—"
     return f"{h:.0f} h" if h < 48 else f"{h / 24:.0f} d"
+
+
+def _case_line(c: dict[str, Any]) -> str:
+    """The case as a compact stepper: where it is in its workflow and who it
+    waits on, red when past its step limit. Text when the step is unknown."""
+    from ..report import _case_nodes, esc, stepper
+    if not c.get("steps") or c["step"] not in {s["key"] for s in c["steps"]}:
+        return f'at <b>{esc(c["step_name"])}</b>, waits on <b>{esc(c["waits_on"] or "—")}</b>'
+    nodes, _ = _case_nodes({"steps": c["steps"], "step": c["step"], "case_at": c["step"],
+                            "case_state": "open", "waits_on": c["waits_on"]})
+    if c.get("over_h"):
+        for n in nodes:
+            if n["state"] == "cur":
+                n["tone"] = "fail"
+    return stepper(nodes, compact=True)
 
 
 def render(v: dict[str, Any], wf: str | None = None, waits: str | None = None) -> str:
@@ -165,8 +183,8 @@ def render(v: dict[str, Any], wf: str | None = None, waits: str | None = None) -
     for code in [c for c in CATALOG if c in groups] + ([""] if "" in groups else []):
         items = "".join(
             f'<li data-since="{int(c["step_at"] or c["created_at"])}"><b>{esc(c["client"] or "—")}</b> · '
-            f'{_task_link(c["root_task_id"], c["title"])} · at <b>{esc(c["step_name"])}</b> '
-            f'{_hours(c["age_h"])}, waits on <b>{esc(c["waits_on"] or "—")}</b>'
+            f'{_task_link(c["root_task_id"], c["title"])} · {_case_line(c)} '
+            f'<span class="muted">{_hours(c["age_h"])} at this step</span>'
             + (f' <b class="over" style="color:#c0392b">over limit by {_hours(c["over_h"])}</b>'
                f' <span class="muted">(limit {_hours(c["limit_h"])} business)</span>' if c.get("over_h") else "")
             + (f' <span class="muted">{c["ben_touches"]} Ben loose end(s)</span>' if c["ben_touches"] else "")

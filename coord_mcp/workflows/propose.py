@@ -723,6 +723,34 @@ def commit_note(files: list[str]) -> str:
             "from agent-tracking: git add coord_mcp/workflows/defs and commit, then pull --rebase and push.")
 
 
+def _diff_steppers(cur: dict[str, Any] | None, new: dict[str, Any]) -> str:
+    """The definition as steppers: for a change, today's steps above the
+    proposed ones, with removed, new and changed steps marked; for a new
+    workflow, its steps alone. A reworded means line is not a change."""
+    from ..report import _WHO_LABEL, esc, stepper
+
+    def nodes(steps: list[dict[str, Any]], diff: Any) -> list[dict[str, Any]]:
+        out = []
+        for s in steps:
+            who = _WHO_LABEL.get(s.get("who") or "", s.get("who") or "")
+            out.append({"name": s.get("name") or s["key"], "who": who, "state": "plan",
+                        "ben": s.get("who") == "ben", "opt": bool(s.get("optional")), "diff": diff(s),
+                        "tip": f'{who}: {defs.means(s)}' + (" (only when needed)" if s.get("optional") else "")})
+        return out
+
+    strip = lambda s: {k: v for k, v in s.items() if k != "means"}  # noqa: E731
+    new_steps = new.get("steps") or []
+    if cur is None:
+        return stepper(nodes(new_steps, lambda s: None))
+    old = {s["key"]: s for s in cur.get("steps") or []}
+    keys = {s["key"] for s in new_steps}
+    before = stepper(nodes(cur.get("steps") or [], lambda s: None if s["key"] in keys else "del"))
+    after = stepper(nodes(new_steps, lambda s: "add" if s["key"] not in old
+                          else "chg" if strip(old[s["key"]]) != strip(s) else None))
+    return (f'<p class="wf-label">Today</p>{before}<p class="wf-label">Proposed</p>{after}'
+            f'<p class="muted" style="font-size:12px">Hover a step for what it means. {esc("Details per step below.")}</p>')
+
+
 def render(conn: sqlite3.Connection, pid: str | None) -> str | None:
     """/workflows/proposed and /workflows/proposed/<id>."""
     from ..report import _task_link, esc, page
@@ -755,8 +783,10 @@ def render(conn: sqlite3.Connection, pid: str | None) -> str | None:
         f'<td>{esc(", ".join(s.get("kinds") or []))}</td><td>{esc(json.dumps(s.get("sla") or {}))}</td>'
         f'<td>{"optional" if s.get("optional") else ""}</td><td>'
         + ("<b>new</b>" if cur is not None and s["key"] not in cur_keys
-           else "<b>changed</b>" if cur is not None and cur_keys.get(s["key"]) != s else "")
+           else "<b>changed</b>" if cur is not None
+           and _no_means({"steps": [cur_keys[s["key"]]]}) != _no_means({"steps": [s]}) else "")
         + "</td></tr>" for s in d["steps"])
+    picture = _diff_steppers(cur, d)
     ex = "".join(f"<li>{_task_link(e)}</li>" if re.fullmatch(r"[0-9a-f]{12}", e) else f"<li><code>{esc(e)}</code></li>"
                  for e in p["examples"])
     why = "".join(f"<li>{esc(w)}</li>" for w in p["why"])
@@ -772,7 +802,7 @@ def render(conn: sqlite3.Connection, pid: str | None) -> str | None:
             + ("A new workflow lands with the engine off." if p["kind"] == "new"
                else f"Changes {esc(p['code'])}; its engine setting is kept and added steps never spawn.")
             + '</p></div>'
-            f'<div class="card"><h2>Steps</h2><div class="wrap"><table><tr><th>Key</th><th>Name</th><th>Who</th>'
+            f'<div class="card"><h2>Steps</h2>{picture}<div class="wrap"><table><tr><th>Key</th><th>Name</th><th>Who</th>'
             f'<th>Kinds</th><th>Limit</th><th></th><th></th></tr>{steps}</table></div></div>'
             f'<div class="card"><h2>Examples</h2><ul>{ex}</ul></div>'
             f'<div class="card"><h2>Definition</h2><pre style="white-space:pre-wrap;font-size:12px">'

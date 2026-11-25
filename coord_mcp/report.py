@@ -119,6 +119,26 @@ td.n,th.n { text-align:right; font-variant-numeric:tabular-nums; white-space:now
 .wf-all { font-size:12px; color:var(--ink2); margin-top:4px; }
 .wf-all summary { cursor:pointer; color:var(--muted); }
 .wf-all ol { margin:4px 0 0; padding-left:20px; } .wf-all li { margin:2px 0; }
+.wf-node.warn { --c:var(--serious); } .wf-node.fail { --c:var(--critical); }
+.wf-node.warn .wf-status, .wf-node.fail .wf-status { font-weight:600; }
+.wf-node.add .wf-dot { border-color:var(--good); } .wf-node.chg .wf-dot { border-color:var(--warn); }
+.wf-node.del { opacity:.55; } .wf-node.del .wf-name { text-decoration:line-through; }
+.wf-diff { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; margin-top:2px; }
+.wf-node.add .wf-diff { color:var(--good); } .wf-node.chg .wf-diff { color:var(--s4); } .wf-node.del .wf-diff { color:var(--critical); }
+.wf-label { font-size:12px; color:var(--muted); margin:10px 0 0; }
+/* Compact: dots only, for a row in a list. Names are in the hover; the
+   step a thing is at is named once beside the dots. */
+.wf-line { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; vertical-align:middle; }
+.wf-steps.compact { margin:0; gap:0; flex-wrap:nowrap; display:inline-flex; align-items:center; }
+.wf-steps.compact .wf-node { width:18px; }
+.wf-steps.compact .wf-node + .wf-node { margin-left:6px; }
+.wf-steps.compact .wf-node + .wf-node::before { top:5px; right:calc(50% + 6px); width:calc(100% - 6px); }
+.wf-steps.compact .wf-dot { width:12px; height:12px; font-size:0; border-width:2px; }
+.wf-steps.compact .wf-node.cur .wf-dot { box-shadow:0 0 0 3px color-mix(in srgb, var(--c) 22%, transparent); }
+.wf-steps.compact .wf-name, .wf-steps.compact .wf-who, .wf-steps.compact .wf-status,
+.wf-steps.compact .wf-this { display:none; }
+.wf-at { font-size:12px; color:var(--ink2); } .wf-at b { color:var(--ink); }
+.wf-at .tag { color:var(--c, var(--s1)); font-weight:600; }
 #tip { position:fixed; pointer-events:none; background:var(--ink); color:var(--page); padding:6px 9px;
   border-radius:6px; font-size:12px; display:none; z-index:9; white-space:pre; }
 .hit { opacity:0; }
@@ -1538,35 +1558,82 @@ _WHO_LABEL = {"agent": "agent", "code": "board", "ben": "Ben"}
 _WAITS_LABEL = {"ben": "Ben", "agent": "agent", "master": "master"}
 
 
-def workflow_stepper(w: dict[str, Any]) -> str:
-    """The case's steps as a row of nodes: done steps filled, the step the
-    case is at highlighted with what it waits on, later steps muted, and
-    Ben's steps in their own colour. Each node carries what the step means
-    in practice (hover), and the step the case is at says it in a caption."""
+def stepper(nodes: list[dict[str, Any]], compact: bool = False) -> str:
+    """A row of step nodes, the one picture for anything that moves through
+    steps: a workflow case, a deliverable, a draft, a proposed definition.
+
+    Each node: name, who (label), state (done, cur, todo or plan), and
+    optionally ben, opt (dashed), tip (hover), status (the current node's
+    pill), tone (warn or fail colours it), this ("this task"), diff (add,
+    chg or del). Compact draws dots only, for a row in a list, and names
+    the current node once beside them."""
+    items = []
+    for i, n in enumerate(nodes):
+        state = n.get("state") or "todo"
+        cls = (f"wf-node {state}" + (" ben" if n.get("ben") else "") + (" opt" if n.get("opt") else "")
+               + (f' {n["tone"]}' if n.get("tone") else "") + (f' {n["diff"]}' if n.get("diff") else ""))
+        mark = "✓" if state == "done" else str(i + 1)
+        sub = []
+        if n.get("status"):
+            sub.append(f'<span class="wf-status">{esc(n["status"])}</span>')
+        if n.get("this"):
+            sub.append('<span class="wf-this">this task</span>')
+        if n.get("diff"):
+            sub.append(f'<span class="wf-diff">{ {"add": "new", "chg": "changed", "del": "removed"}[n["diff"]] }</span>')
+        tip = n.get("tip") or n["name"]
+        items.append(
+            f'<li class="{cls}" title="{esc(tip)}"><span class="wf-dot" aria-hidden="true">{mark}</span>'
+            f'<span class="wf-name">{esc(n["name"])}</span><span class="wf-who">{esc(n.get("who") or "")}</span>'
+            + "".join(sub) + "</li>")
+    ol = f'<ol class="wf-steps{" compact" if compact else ""}">' + "".join(items) + "</ol>"
+    if not compact:
+        return ol
+    cur = next((n for n in nodes if n.get("state") == "cur"), None)
+    at = ""
+    if cur:
+        tone = {"fail": "st-failed", "warn": "st-changes"}.get(cur.get("tone") or "", "")
+        status = (f' · <span class="{tone}">{esc(cur["status"])}</span>' if tone else f' · {esc(cur["status"])}'
+                  ) if cur.get("status") else ""
+        at = f'<span class="wf-at"><b>{esc(cur["name"])}</b>{status}</span>'
+    elif nodes and all(n.get("state") == "done" for n in nodes):
+        at = '<span class="wf-at muted">all steps done</span>'
+    return f'<span class="wf-line">{ol}{at}</span>'
+
+
+def _case_nodes(w: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    """A case's steps as stepper nodes, and the index of the step it is at
+    (len(steps) once done, -1 when unknown)."""
     steps = w["steps"]
     keys = [s["key"] for s in steps]
     at = w["case_at"] if w["case_at"] in keys else w["step"] if w["step"] in keys else None
     done_case = w["case_state"] != "open"
     cur = len(steps) if w["case_state"] == "done" else keys.index(at) if at else -1
-    items = []
+    nodes = []
     for i, s in enumerate(steps):
         state = "done" if i < cur else "cur" if i == cur and not done_case else "todo"
-        cls = f"wf-node {state}" + (" ben" if s.get("who") == "ben" else "") + (" opt" if s.get("optional") else "")
-        mark = "✓" if state == "done" else str(i + 1)
         who = _WHO_LABEL.get(s.get("who") or "", s.get("who") or "")
-        sub = []
+        status = ""
         if state == "cur":
-            sub.append(f'<span class="wf-status">waiting on {esc(_WAITS_LABEL.get(w["waits_on"], w["waits_on"]))}</span>'
-                       if w["waits_on"] else '<span class="wf-status">now</span>')
-        if s["key"] == w["step"] and s["key"] != at:
-            sub.append('<span class="wf-this">this task</span>')
+            status = (f'waiting on {_WAITS_LABEL.get(w["waits_on"], w["waits_on"])}' if w["waits_on"] else "now")
         means = s.get("means") or ""
-        tip = f'{who}: {means}' + (" (only when needed)" if s.get("optional") else "")
-        items.append(
-            f'<li class="{cls}" title="{esc(tip)}"><span class="wf-dot" aria-hidden="true">{mark}</span>'
-            f'<span class="wf-name">{esc(s["name"])}</span><span class="wf-who">{esc(who)}</span>'
-            + "".join(sub) + "</li>")
-    out = '<ol class="wf-steps">' + "".join(items) + "</ol>"
+        nodes.append({"name": s["name"], "who": who, "state": state, "ben": s.get("who") == "ben",
+                      "opt": bool(s.get("optional")), "status": status,
+                      "this": s["key"] == w["step"] and s["key"] != at,
+                      "tip": f'{who}: {means}' + (" (only when needed)" if s.get("optional") else "")})
+    return nodes, cur
+
+
+def workflow_stepper(w: dict[str, Any], compact: bool = False) -> str:
+    """The case's steps as a row of nodes: done steps filled, the step the
+    case is at highlighted with what it waits on, later steps muted, and
+    Ben's steps in their own colour. Each node carries what the step means
+    in practice (hover), and the step the case is at says it in a caption."""
+    steps = w["steps"]
+    nodes, cur = _case_nodes(w)
+    done_case = w["case_state"] != "open"
+    if compact:
+        return stepper(nodes, compact=True)
+    out = stepper(nodes)
     if done_case:
         out += f'<div class="muted">case {esc(w["case_state"])}</div>'
     elif 0 <= cur < len(steps):
@@ -1578,6 +1645,78 @@ def workflow_stepper(w: dict[str, Any]) -> str:
         + (", only when needed" if s.get("optional") else "") + f')</span> {esc(s.get("means") or "")}</li>'
         for s in steps) + "</ol></details>")
     return out
+
+
+def _nodes_at(steps: list[tuple[str, str, str]], cur: int, status: str = "", tone: str = "") -> list[dict[str, Any]]:
+    """Fixed (name, who, what it means) steps as stepper nodes, at index cur."""
+    return [{"name": name, "who": _WHO_LABEL.get(who, who), "ben": who == "ben",
+             "state": "done" if i < cur else "cur" if i == cur else "todo",
+             "status": status if i == cur else "", "tone": tone if i == cur else "",
+             "tip": f'{_WHO_LABEL.get(who, who)}: {means}'} for i, (name, who, means) in enumerate(steps)]
+
+
+_REVIEW_TONE = {"changes": "warn", "stale": "warn", "escalated": "fail"}
+_DELIVERABLE_STEPS = [
+    ("Written", "agent", "The client agent writes the file in work/ and checks it against the checklist."),
+    ("Review", "agent", "A dod_review by a session that did not write it judges every checklist item."),
+    ("Promote", "code", "Once a review approves it, the board copies it to the client's deliverables folder."),
+    ("Send", "ben", "Ben sends it, usually in a draft reply that points at the promoted copy."),
+]
+_CODE_STEPS = [
+    ("Written", "agent", "The client agent builds and dev-compiles the change; nothing is checked in."),
+    ("Review", "agent", "A dod_review against the cvc-code checklist."),
+    ("Check in", "agent", "After approval and the veto window, a checkin_of task checks it into CVC."),
+]
+
+
+def deliverable_stepper(d: dict[str, Any], compact: bool = True) -> str:
+    """Where a file stands on its way to the client: written, reviewed,
+    promoted, sent. Gated CVC code stops at check-in. Empty for a file no
+    review applies to (a data pull, ungated code): its label says enough."""
+    stage, n = d["stage"], d.get("reviews") or 0
+    if d["kind"] == "deliverable" or stage == "final":
+        steps = _DELIVERABLE_STEPS
+        rounds = f" · {n} review{'s' if n != 1 else ''}" if n else ""
+        at = {"review": (1, "awaiting review" + rounds), "changes": (1, "changes requested" + rounds),
+              "stale": (1, "changed since approval"), "escalated": (1, "escalated to Ben"),
+              "approved": (2, "ready to promote"), "promoted": (3, "promoted; waiting on Ben"),
+              "final": (3, f'final v{d.get("version")}; waiting on Ben')}.get(stage)
+    elif d["kind"] == "code_change" and stage != "draft":
+        steps = _CODE_STEPS
+        at = {"review": (1, "awaiting review"), "changes": (1, "changes requested"),
+              "stale": (1, "changed since approval"), "escalated": (1, "escalated to Ben"),
+              "approved": (2, "approved")}.get(stage)
+    else:
+        return ""
+    if at is None:
+        return ""
+    return stepper(_nodes_at(steps, at[0], at[1], _REVIEW_TONE.get(stage, "")), compact=compact)
+
+
+_DRAFT_STEPS = [
+    ("Written", "agent", "The client agent writes the reply body to a file; nothing sends."),
+    ("Review", "agent", "A dod_review against the client-email checklist; no Outlook until it approves."),
+    ("Into Outlook", "master", "Master types it into Outlook on the web; it autosaves to Ben's Drafts."),
+    ("Ben sends", "ben", "Ben reads it in Drafts, edits if needed and presses Send himself."),
+]
+
+
+def draft_stepper(state: str, review: dict[str, Any] | None, compact: bool = False) -> str:
+    """A reply's way out: written, reviewed (only when the email gate covers
+    it), typed into Outlook, sent by Ben. state is draft_replies' own:
+    waiting, review, queued, missing, drafted or set_aside."""
+    steps = _DRAFT_STEPS if review else [s for s in _DRAFT_STEPS if s[0] != "Review"]
+    i = {s[0]: k for k, s in enumerate(steps)}
+    stage = (review or {}).get("stage", "")
+    at = {"missing": (0, "body missing", "fail"),
+          "review": (i.get("Review", 0), store.STAGES.get(stage, "awaiting review"), _REVIEW_TONE.get(stage, "")),
+          "waiting": (i["Into Outlook"], "to go through", ""),
+          "queued": (i["Into Outlook"], "queued for master", ""),
+          "set_aside": (i["Into Outlook"], "set aside", "warn"),
+          "drafted": (i["Ben sends"], "in Drafts; waiting on Ben", "")}.get(state)
+    if at is None:
+        return ""
+    return stepper(_nodes_at(steps, *at), compact=compact)
 
 
 def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False) -> str:
@@ -1716,7 +1855,11 @@ def _draft_card(d: dict[str, Any], queued: bool) -> str:
     rev = d.get("review")
     if rev and rev["stage"] != "approved":  # the gate: no Outlook until a dod_review approves it
         btns, sent = "", f'<b class="st-{esc(rev["stage"])}">{esc(store.STAGES[rev["stage"]])}: no Draft in Outlook until a dod_review approves it</b>'
-    return (f'<div class="card go draft"><h2>Draft reply</h2>{_draft_envelope(dr, body_link)}'
+    mark = d.get("outlook_mark")
+    state = ("drafted" if mark == "drafted" else "queued" if queued else "set_aside" if mark == store.SET_ASIDE
+             else "missing" if not dr["exists"] else "review" if rev and rev["stage"] != "approved" else "waiting")
+    steps = draft_stepper(state, rev and {**rev})
+    return (f'<div class="card go draft"><h2>Draft reply</h2>{steps}{_draft_envelope(dr, body_link)}'
             f'<div class="btns">{btns}{sent}{_compose_link(dr)}</div></div>')
 
 
@@ -1836,7 +1979,8 @@ def deliverables_page(v: dict[str, Any]) -> str:
             stage += f' v{d["version"]}'
         elif d["reviews"]:
             stage += f' · {d["reviews"]} review{"s" if d["reviews"] > 1 else ""}'
-        name += f' <span class="state st-{esc(d["stage"])}">{esc(stage)}</span>'
+        line = deliverable_stepper(d)
+        name += (f' {line}' if line else f' <span class="state st-{esc(d["stage"])}">{esc(stage)}</span>')
         if d["stage"] == "approved" and d["exists"] and d["kind"] == "deliverable":
             name += (f'<form method="post" action="/api/promote" class="act" style="display:inline">'
                      f'<input type="hidden" name="task" value="{esc(d["task_id"])}">'
@@ -1959,7 +2103,7 @@ def drafts_page(v: dict[str, Any]) -> str:
                   f'<span class="order first" title="since the work on it began; the result has no reply_date">'
                   f'open {wait}</span> · ')
         head = (f'<h2>{esc(d["client"])}: {esc(d["subject"][:90])}{pos}</h2>'
-                f'<div class="muted">{badge[d["state"]].format(esc(d["review"]["label"]) if d["review"] else "")} · {late}{waited}{when_sent}written '
+                f'<div class="muted">{draft_stepper(d["state"], d["review"], compact=True) or badge[d["state"]].format(esc(d["review"]["label"]) if d["review"] else "")} · {late}{waited}{when_sent}written '
                 f'{_age(d["completed_at"], t)} · <a class="drill" href="/board/task/{esc(d["task_id"])}">'
                 f'{esc(d["title"][:60])}</a> <code>{esc(d["task_id"][:8])}</code></div>')
         cards.append(f'<div class="card lane draft" id="d-{esc(d["task_id"])}" '

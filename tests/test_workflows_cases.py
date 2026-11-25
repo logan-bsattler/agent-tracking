@@ -160,6 +160,6 @@ def test_workflows_page_shows_open_cases_and_per_workflow_rows(db):
     c3 = next(r for r in v["workflows"] if r["workflow"] == "C3")
     assert c3["median_cycle_h"] is not None
     html = view.render(v)
-    assert "AMEX" in html and "waits on <b>ben</b>" in html and "keeper" not in html
+    assert "AMEX" in html and "waiting on Ben" in html and "wf-steps compact" in html and "keeper" not in html
     assert '<a class="tab" href="/workflows">Workflows</a>' in report.board_page(store.operator_view(c))
     assert "AMEX" not in view.render(v, waits="master")
