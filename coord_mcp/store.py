@@ -167,6 +167,7 @@ def create_task(
     from . import pipeline
     line_warnings = pipeline.check_create(conn, kind, spec, assigned_to, parent_id, pipeline_task_id,
                                           pipeline_proposal)  # every chain names its line
+    priority.check_create(conn, spec, assigned_to, parent_id)  # and every root its priority (P2)
     check_one_revision(conn, kind, spec, parent_id)
     if kind == "draft_reply" and isinstance(spec, dict) and not spec.get("duplicate_ok"):
         if same := same_email_draft(conn, assigned_to, spec.get("subject"), spec.get("to"), parent_id):
@@ -1054,11 +1055,13 @@ _TEAMS_ENUMS = {
     "ask": ("decision", "status", "work"),
 }
 _COMMITMENT_HANDLING = (
-    "create a commitment (python -m coord_mcp.commitments add <client> --to <to> --what <what> --due <due or "
-    "due_text> --said <said> --source {src} --ref <msg> --intent <intent id>) and link it to its work (commitments "
-    "link): a task to that client that does the work (or the prep he needs), with due and to in the spec, so its "
-    "result hands Ben the finished piece as a loose end; or the open task or loose end that already covers it. "
-    "If no agent work is in it (a call, a meeting), link nothing: the commitment is the reminder. If the context "
+    "create a commitment linked at birth (rule C1): python -m coord_mcp.commitments add <client> --to <to> "
+    "--what <what> --due <due or due_text> --said <said> --source {src} --ref <msg> --intent <intent id>, plus "
+    "--task <id> for a task to that client that does the work (or the prep he needs; create it first, due and "
+    "to in the spec, so its result hands Ben the finished piece), or the open task that already covers it; or "
+    "--ben when no agent work is in it (a call, a meeting, his own send), which puts a dated item in his queue. "
+    "add refuses neither. A day before it is due the board gives Ben an item only Done, Re-date or Drop on the "
+    "commitment closes (rule C2). If the context "
     "names a commitment id, it re-dates that one (commitments set --due) instead of adding a row. Check open "
     "commitments (commitments list <client> --state live) for the same promise first."
 )
@@ -2577,6 +2580,8 @@ def resolve_follow_up(
         left = conn.execute("SELECT COUNT(*) n FROM follow_ups WHERE state='open'").fetchone()["n"]
         return {"ok": True, "follow_up_id": follow_up_id, "state": "open", "resolved_by": None,
                 "loose_ends_left": left}
+    from . import commitments
+    commitments.check_resolve(conn, follow_up_id)  # rule C2: only the commitment closes Ben's item
     if defer and (task_id or not decision_id):
         raise ValueError("defer needs decision_id (the decision naming what it waits on) and no task_id")
     if return_on not in (None, "") and not defer:

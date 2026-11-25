@@ -4,9 +4,9 @@ Phase one: the dashboard (/commitments), the minder, Ben's queue order and
 this CLI. No MCP tool reads or writes commitments yet, so an agent sees no
 difference; master uses the CLI, as it does for projects.
 
-    python -m coord_mcp.commitments add <client> --to WHO --what WHAT [--due TEXT] [--said ISO]
-                                        [--to-email E] [--source teams|email|meeting|manual] [--ref R]
-                                        [--intent I] [--task T] [--follow-up F] [--project P] [--none]
+    python -m coord_mcp.commitments add <client> --to WHO --what WHAT (--task T | --ben) [--due TEXT]
+                                        [--said ISO] [--to-email E] [--source teams|email|meeting|manual]
+                                        [--ref R] [--intent I] [--follow-up F] [--project P] [--none]
     python -m coord_mcp.commitments set <id> [--due TEXT] [--said ISO] [--decision D]
                                         [--to WHO] [--to-email E] [--what WHAT]
     python -m coord_mcp.commitments link <id> [--task T] [--follow-up F]
@@ -17,6 +17,18 @@ difference; master uses the CLI, as it does for projects.
 --due takes the words used ("Friday", "tomorrow", "end of week", "next
 week") or an ISO date, resolved against --said (default now) in Ben's time
 zone (COORD_TZ, else this machine's). No date words means an inferred date.
+
+Rules C1 and C2 (Ben, 2026-11-25):
+
+- C1, linked at birth. `add` refuses a commitment with neither --task (the
+  task that does the work) nor --ben (Ben's own work). --ben opens Ben's
+  item at once (see C2).
+- C2, Ben's item. One working day before the due date, `sweep` opens one
+  loose end for Ben: "<what> to <who>, due <date>: Done, Re-date or Drop".
+  Its due date is the commitment's, so it sorts first in his queue. Only
+  the commitment closes it: `close`, a re-date with `set` (which then needs
+  --decision) or the /commitments buttons. Any other resolve is refused.
+  The minder no longer lists slipped commitments: the item is the chase.
 """
 
 from __future__ import annotations
@@ -50,7 +62,7 @@ WHAT_MAX = 200
 LINE_MAX = 200
 FIELDS = ("id", "client", "project_id", "by_who", "to_who", "to_email", "what", "due_at", "due_basis",
           "due_text", "source", "source_ref", "source_at", "intent_id", "task_id", "follow_up_id", "state",
-          "slipped_at", "due_history", "close_decision_id", "created_at", "closed_at")
+          "slipped_at", "due_history", "close_decision_id", "created_at", "closed_at", "ben_item_id")
 
 DAYS = {"monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1, "wednesday": 2, "wed": 2,
         "thursday": 3, "thu": 3, "thur": 3, "thurs": 3, "friday": 4, "fri": 4,
@@ -195,12 +207,19 @@ def add(conn: sqlite3.Connection, client: str, to_who: str, what: str, due: str 
         said_at: Any = None, *, no_date: bool = False, to_email: str | None = None, source: str = "manual",
         source_ref: str | None = None, intent_id: str | None = None, task_id: str | None = None,
         follow_up_id: str | None = None, project_id: str | None = None, by_who: str = DEFAULT_BY,
-        tz: Any = None, now_ts: int | None = None) -> dict[str, Any]:
+        tz: Any = None, now_ts: int | None = None, ben: bool = False) -> dict[str, Any]:
     """A new open commitment. `due` is the words used (or an ISO date);
     `no_date` marks a standing promise that never slips. Refuses a second
     live commitment with the same client, recipient and what: re-date that
-    one instead (set)."""
+    one instead (set).
+
+    Rule C1: linked at birth to `task_id` (the work), or `ben` (Ben's own
+    work), which opens his item at once. A loose end alone is not a link."""
     ensure_commitments(conn)
+    if not task_id and not ben and _link_required():
+        raise ValueError(LINK_REFUSAL)
+    if ben and not task_id and not intent_id:
+        raise ValueError("--ben needs --intent (or --task): Ben's item hangs on the intent the promise came from")
     client, to_who = (client or "").strip() or "internal", _text("to", to_who, LINE_MAX)
     what = _text("what", what, WHAT_MAX)
     if not to_who or not what:
@@ -226,6 +245,8 @@ def add(conn: sqlite3.Connection, client: str, to_who: str, what: str, due: str 
         (cid, client, project_id, (by_who or DEFAULT_BY).strip(), to_who, _text("to_email", to_email, LINE_MAX),
          what, due_at, basis, _text("due_text", due, LINE_MAX), source, _text("ref", source_ref, 1000), said,
          intent_id, task_id, follow_up_id, now_ts or _now()))
+    if ben:
+        _open_item(conn, get(conn, cid), now_ts or _now(), tz)
     return get(conn, cid)
 
 
@@ -250,6 +271,9 @@ def set_(conn: sqlite3.Connection, cid: str, *, due: str | None = None, said_at:
     if due is not None:
         if cur["state"] in CLOSE_STATES:
             raise ValueError(f"commitment {cid} is {cur['state']}; add a new one instead")
+        if _item_open(conn, cur) and not decision_id:
+            raise ValueError(f"commitment {cid} has Ben's item {cur['ben_item_id']} open: re-date it with "
+                             "--decision (the decision that moved the date), which closes the item")
         t = now_ts or _now()
         due_at, basis = resolve_due(due, said_at if said_at is not None else t, tz)
         hist = cur["due_history"] + [{"due_at": cur["due_at"], "due_basis": cur["due_basis"],
@@ -259,7 +283,16 @@ def set_(conn: sqlite3.Connection, cid: str, *, due: str | None = None, said_at:
                     due_history=json.dumps(hist), state="open")
     if not sets:
         return cur
+    if due is not None and cur["ben_item_id"]:
+        sets["ben_item_id"] = None  # the old date's item closes below; a fresh one carries the new date
     conn.execute(f"UPDATE commitments SET {', '.join(k + '=?' for k in sets)} WHERE id=?", (*sets.values(), cid))
+    if due is not None:
+        _resolve_item(conn, cur, decision_id)
+        new = get(conn, cid)
+        t = now_ts or _now()
+        # Ben's own work keeps its item throughout (C1); linked work gets one a working day out (C2).
+        if not new["task_id"] or new["due_at"] <= working_days_after(t, COMING_DUE_WORKING_DAYS, tz):
+            _open_item(conn, new, t, tz)
     return get(conn, cid)
 
 
@@ -297,12 +330,15 @@ def close(conn: sqlite3.Connection, cid: str, state: str, decision_id: str,
         raise ValueError(f"commitment {cid} is already {cur['state']}")
     conn.execute("UPDATE commitments SET state=?, close_decision_id=?, closed_at=? WHERE id=?",
                  (state, decision_id, now_ts or _now(), cid))
+    _resolve_item(conn, cur, decision_id)
     return get(conn, cid)
 
 
-def sweep(conn: sqlite3.Connection, now: int | None = None) -> list[str]:
+def sweep(conn: sqlite3.Connection, now: int | None = None, tz: Any = None) -> list[str]:
     """Open commitments past due become slipped, slipped_at stamped the
-    first time only. Nothing else changes and nothing is sent."""
+    first time only. Then rule C2: every live dated commitment due within
+    COMING_DUE_WORKING_DAYS (or past due) with no open item for Ben gets
+    one. Nothing is sent. Returns the ids that slipped this time."""
     ensure_commitments(conn)
     t = now or _now()
     ids = [r[0] for r in conn.execute(
@@ -310,7 +346,92 @@ def sweep(conn: sqlite3.Connection, now: int | None = None) -> list[str]:
     if ids:
         conn.execute(f"UPDATE commitments SET state='slipped', slipped_at=COALESCE(slipped_at, ?) "
                      f"WHERE id IN ({','.join('?' * len(ids))})", (t, *ids))
+    horizon = working_days_after(t, COMING_DUE_WORKING_DAYS, tz)
+    for r in conn.execute("""SELECT * FROM commitments WHERE state IN ('open','slipped') AND due_at IS NOT NULL
+                             AND due_at <= ? ORDER BY due_at""", (horizon,)).fetchall():
+        c = _row(r)
+        if not _item_open(conn, c):
+            _open_item(conn, c, t, tz)
     return ids
+
+
+# ------------------------------------------------------------ Ben's item (C1, C2)
+
+LINK_REFUSAL = ("a commitment is linked when it is added (rule C1): --task <id> for the task that does the work, "
+                "or --ben when it is Ben's own work (opens his dated item at once). A loose end alone is not a link")
+ITEM_WHAT_MAX = 300
+
+
+def _link_required() -> bool:
+    """Rule C1 is always on; a seam so older tests can add bare rows."""
+    return True
+
+
+def _item_open(conn: sqlite3.Connection, c: dict[str, Any]) -> bool:
+    if not c.get("ben_item_id"):
+        return False
+    r = conn.execute("SELECT state FROM follow_ups WHERE id=?", (c["ben_item_id"],)).fetchone()
+    return bool(r and r["state"] in ("open", "deferred"))
+
+
+def item_text(c: dict[str, Any], tz: Any = None) -> str:
+    """Ben's item: '<what> to <who>, due <date>: Done, Re-date or Drop'."""
+    when = (datetime.fromtimestamp(c["due_at"], _tz(tz)).strftime("%a %Y-%m-%d") if c["due_at"] is not None
+            else "undated")
+    head = f"Commitment {c['id']}: {c['what']}"
+    tail = f" to {c['to_who']}, due {when}: Done, Re-date or Drop (/commitments)"
+    return head[:max(40, ITEM_WHAT_MAX - len(tail))] + tail[:ITEM_WHAT_MAX - 40]
+
+
+def _open_item(conn: sqlite3.Connection, c: dict[str, Any], t: int, tz: Any = None) -> str | None:
+    """One loose end for Ben carrying the commitment's due date, hung on its
+    intent (else its task); its id goes in ben_item_id (and follow_up_id
+    when that is empty). None when it has nowhere to hang."""
+    if c["state"] not in LIVE or (not c["intent_id"] and not c["task_id"]):
+        return None
+    fid = uuid.uuid4().hex[:12]
+    task_id = None if c["intent_id"] else c["task_id"]
+    idx = 0
+    if task_id:
+        idx = conn.execute("SELECT COALESCE(MAX(idx), -1) + 1 FROM follow_ups WHERE task_id=?",
+                           (task_id,)).fetchone()[0]
+    conn.execute(
+        "INSERT INTO follow_ups(id, task_id, idx, who, what, state, created_at, client, intent_id, due_at, ref) "
+        "VALUES (?, ?, ?, 'Ben', ?, 'open', ?, ?, ?, ?, ?)",
+        (fid, task_id, idx, item_text(c, tz), t, c["client"], c["intent_id"], c["due_at"], f"commitment:{c['id']}"))
+    conn.execute("UPDATE commitments SET ben_item_id=?, follow_up_id=COALESCE(follow_up_id, ?) WHERE id=?",
+                 (fid, fid, c["id"]))
+    return fid
+
+
+def _resolve_item(conn: sqlite3.Connection, c: dict[str, Any], decision_id: str | None) -> None:
+    """Close Ben's item behind the decision that closed or re-dated the
+    commitment. Called once the row no longer guards the item."""
+    if decision_id and _item_open(conn, c):
+        from . import store
+        store.resolve_follow_up(conn, c["ben_item_id"], decision_id=decision_id)
+
+
+def locked_items(conn: sqlite3.Connection, ids: Any = None) -> dict[str, str]:
+    """{loose end id: commitment id} for Ben's items of live commitments,
+    which only the commitment closes. `ids` narrows it."""
+    ensure_commitments(conn)
+    out = {r["ben_item_id"]: r["id"] for r in conn.execute(
+        "SELECT id, ben_item_id FROM commitments WHERE state IN ('open','slipped') AND ben_item_id IS NOT NULL")}
+    if ids is not None:
+        want = builtins.set(ids)
+        out = {k: v for k, v in out.items() if k in want}
+    return out
+
+
+def check_resolve(conn: sqlite3.Connection, follow_up_id: str) -> None:
+    """Refuse closing, deferring or rerouting Ben's item of a live commitment."""
+    hit = locked_items(conn, [follow_up_id])
+    if hit:
+        cid = hit[follow_up_id]
+        raise ValueError(f"loose end {follow_up_id} is Ben's item for commitment {cid}: only Done, Re-date or Drop "
+                         f"on the commitment closes it (/commitments, or python -m coord_mcp.commitments close {cid} "
+                         f"done|dropped --decision D, or set {cid} --due ... --decision D)")
 
 
 # ------------------------------------------------------------ reads
@@ -365,9 +486,11 @@ def minder_owed(conn: sqlite3.Connection, now: int, tz: Any = None) -> list[str]
     """Commitment ids master owes a look at, oldest due first:
 
     coming due within COMING_DUE_WORKING_DAYS while the work is not done (or
-    nothing is linked); slipped with no decision since; open UNTRACKED_MINUTES
-    with no task and no loose end. A decision on the linked task, or one
-    naming the commitment, quiets each. Undated ones never show."""
+    nothing is linked); open UNTRACKED_MINUTES with no task and no loose end.
+    A decision on the linked task, or one naming the commitment, quiets each.
+    Undated ones never show. Slipped ones are not listed (rule C2,
+    2026-11-25): Ben's item stays in his queue until the commitment closes
+    or is re-dated, and no decision quiets it."""
     ensure_commitments(conn)
     horizon = working_days_after(now, COMING_DUE_WORKING_DAYS, tz)
     out: list[str] = []
@@ -375,9 +498,7 @@ def minder_owed(conn: sqlite3.Connection, now: int, tz: Any = None) -> list[str]
         "SELECT * FROM commitments WHERE state IN ('open','slipped') AND due_basis != 'none' "
         "ORDER BY due_at, created_at")]
     for c in rows:
-        if c["state"] == "slipped" or (c["due_at"] is not None and c["due_at"] < now):  # swept or not yet
-            if not _spoken_since(conn, c, c["slipped_at"] or c["due_at"]):
-                out.append(c["id"])
+        if c["state"] == "slipped" or (c["due_at"] is not None and c["due_at"] < now):  # Ben's item (C2)
             continue
         if c["due_at"] is not None and now <= c["due_at"] <= horizon:
             work_done = False
@@ -497,7 +618,7 @@ def act(conn: sqlite3.Connection, action: str, cid: str, due_text: str | None = 
 
 
 def _opts(args: list[str]) -> tuple[list[str], dict[str, str]]:
-    flags = {"none"}
+    flags = {"none", "ben"}
     pos, opt, i = [], {}, 0
     while i < len(args):
         a = args[i]
@@ -535,7 +656,7 @@ def main(argv: list[str] | None = None) -> int:
             r: Any = add(conn, pos[0], opt.get("to", ""), opt.get("what", ""), opt.get("due"), opt.get("said"),
                          no_date="none" in opt, to_email=opt.get("to_email"), source=opt.get("source", "manual"),
                          source_ref=opt.get("ref"), intent_id=opt.get("intent"), task_id=opt.get("task"),
-                         follow_up_id=opt.get("follow_up"), project_id=opt.get("project"))
+                         follow_up_id=opt.get("follow_up"), project_id=opt.get("project"), ben="ben" in opt)
         elif cmd == "set":
             r = set_(conn, pos[0], due=opt.get("due"), said_at=opt.get("said"), decision_id=opt.get("decision"),
                      to_who=opt.get("to"), to_email=opt.get("to_email"), what=opt.get("what"))

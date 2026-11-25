@@ -13,6 +13,8 @@ from coord_mcp import queue
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "pipeline_rule: enforce the pipeline-line rule on task creation")
+    config.addinivalue_line("markers", "priority_rule: enforce the priority rule (P2) on task creation")
+    config.addinivalue_line("markers", "commitment_link: enforce rule C1 (a commitment is linked when added)")
     config.addinivalue_line("markers", "ben_checks: run with the Ben-queue landing checks at their real defaults")
 
 
@@ -25,6 +27,14 @@ def _ben_checks_off(request, monkeypatch):
         real = pipeline._switch
         monkeypatch.setattr(pipeline, "_switch",
                             lambda conn, name: False if name == "require_pipeline" else real(conn, name))
+    if request.node.get_closest_marker("priority_rule") is None:
+        # Rule P2 (root client tasks name a priority) likewise: most tests create bare tasks.
+        from coord_mcp import priority
+        monkeypatch.setattr(priority, "_required", lambda conn: False)
+    if request.node.get_closest_marker("commitment_link") is None:
+        # Rule C1 likewise: older tests add bare commitments to test other things.
+        from coord_mcp import commitments
+        monkeypatch.setattr(commitments, "_link_required", lambda: False)
     if request.node.get_closest_marker("ben_checks") is None:
         monkeypatch.setattr(queue, "SWITCHES", {k: False for k in queue.SWITCHES})
     else:

@@ -126,8 +126,9 @@ class CreateTaskInput(Strict):
     priority: Literal["high", "normal", "low"] | None = Field(
         default=None,
         description="Orders undated work: auto-dispatch sends direct asks, then earliest due, then high before "
-                    "normal before low, then oldest. Never beats a due date. Omitted: inherited from the parent "
-                    "chain, else normal. Sets spec.priority.")
+                    "normal before low, then oldest. Never beats a due date. Required on a root client task "
+                    "(high: Ben said urgent or a client waits; low: nice-to-have or internal tooling; else normal). "
+                    "A child or check-in inherits its chain's. Sets spec.priority.")
 
 
 @tool("coord_create_task", title="Create task")
@@ -142,7 +143,8 @@ async def coord_create_task(params: CreateTaskInput) -> str:
     to (the timesheet line): pipeline_task_id, or pipeline_proposal when no
     item exists yet. A child (parent_id) or check-in inherits its chain's
     item. A root client task with neither is refused (switch
-    require_pipeline).
+    require_pipeline). It must also name a priority (switch
+    require_priority); a child or check-in inherits it.
 
     Returns JSON: {task_id, kind, expected_result_shape, pipeline_task_id?,
     pipeline_proposal?, warnings?}

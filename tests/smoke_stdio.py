@@ -64,7 +64,7 @@ async def main() -> int:
         r = await team.call_tool("coord_create_task", {"params": {
             "kind": "data_pull", "title": "Export Q3 usage",
             "spec": {"query": "usage where quarter = 'Q3'", "out": "C:/tmp/q3.csv"},
-            "assigned_to": "puller", "pipeline_task_id": "231",
+            "assigned_to": "puller", "pipeline_task_id": "231", "priority": "normal",
         }})
         created = json.loads(text(r))
         task_id = created["task_id"]
@@ -138,7 +138,12 @@ async def main() -> int:
             "kind": "investigation", "title": "No line", "spec": {"question": "x"}, "assigned_to": "puller"}})
         check("root task with no line refused", "no pipeline item" in text(r), text(r)[:200])
         r = await team.call_tool("coord_create_task", {"params": {
+            "kind": "investigation", "title": "No priority", "spec": {"question": "x"}, "assigned_to": "puller",
+            "pipeline_task_id": "231"}})
+        check("root task with no priority refused (P2)", "no priority" in text(r), text(r)[:200])
+        r = await team.call_tool("coord_create_task", {"params": {
             "kind": "investigation", "title": "On a proposal", "spec": {"question": "x"}, "assigned_to": "puller",
+            "priority": "low",
             "pipeline_proposal": {"title": "Sales Order Change Audit", "origin_id": "DEV-39"}}})
         prop = json.loads(text(r))
         check("root task proceeds on a pipeline proposal",

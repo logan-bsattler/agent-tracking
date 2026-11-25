@@ -264,6 +264,12 @@ def apply(conn: sqlite3.Connection, action: str, ids: list[str],
     if not ids:
         raise ValueError("select at least one item" + (" and type an answer" if action == "answer" else ""))
     note = (note or "").strip()[:300]
+    if action in ("agent", "defer", "drop"):
+        from . import commitments
+        locked = commitments.locked_items(conn, ids)
+        if locked:
+            raise ValueError("Ben's commitment item(s) close only on the commitment (Done, Re-date or Drop on "
+                             "/commitments): " + ", ".join(f"{f} (commitment {c})" for f, c in locked.items()))
     if action == "agent":
         no_client = [i for i in ids if not rows[i]["client"]]
         if no_client:
@@ -500,6 +506,9 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # client task must name a pipeline item or a proposal; the mod
             # creates the SharePoint item for a proposal Ben approved.
             "require_pipeline": True, "pipeline_create": True,
+            # rule P2 (coord_mcp/priority.py, Ben 2026-11-25): a root client
+            # task names its priority; children, check-ins and engine steps inherit
+            "require_priority": True,
             # the idle-session reaper (coord_mcp/reaper.py, Ben 2026-11-20): off is a
             # dry run that only logs; keep_rc leaves sessions with Remote Control on
             "idle_reaper": False, "idle_reaper_keep_rc": True,
@@ -784,8 +793,9 @@ def settle_landing(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
     client = new[0]["client"]
     line = lineage(conn, task_id)
     if switch(conn, "ben_cover"):
+        from . import commitments
         covered = []
-        new_ids = {r["id"] for r in new}
+        new_ids = {r["id"] for r in new} | set(commitments.locked_items(conn))  # C2 items close on their commitment
         for old in _open_for(conn, client):
             if old["id"] in new_ids:
                 continue

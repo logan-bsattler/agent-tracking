@@ -207,16 +207,16 @@ def test_minder_coming_due_ignores_done_work_and_far_dates(conn):
     assert cm.minder_owed(conn, t) == []
 
 
-def test_minder_slipped_fires_until_a_decision_names_it(conn):
+def test_minder_no_longer_lists_slipped_ben_item_does(conn):
+    """Rule C2: a slip is Ben's item, not a minder line a decision quiets."""
     c = cm.add(conn, "MAG", "David", "specs", "x", follow_up_id=None)
     cm.link(conn, c["id"], task_id=_task(conn))
     t = now()
     conn.execute("UPDATE commitments SET due_at=? WHERE id=?", (t - 60, c["id"]))
     store.minder_check(conn, t)
-    assert cm.get(conn, c["id"])["state"] == "slipped"
-    assert cm.minder_owed(conn, t + 60) == [c["id"]]
-    store.record_decision(conn, f"Commitment {c['id']}: asked Ben")
-    assert cm.minder_owed(conn, t + 120) == []
+    got = cm.get(conn, c["id"])
+    assert got["state"] == "slipped" and got["ben_item_id"]
+    assert cm.minder_owed(conn, t + 60) == []
 
 
 def test_minder_untracked_after_thirty_minutes(conn):

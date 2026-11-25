@@ -393,7 +393,8 @@ CREATE TABLE IF NOT EXISTS commitments (
   due_history   TEXT,
   close_decision_id TEXT REFERENCES decisions(id),
   created_at    INTEGER NOT NULL,
-  closed_at     INTEGER
+  closed_at     INTEGER,
+  ben_item_id   TEXT REFERENCES follow_ups(id)
 );
 CREATE INDEX IF NOT EXISTS commitments_open ON commitments(state, due_at);
 CREATE INDEX IF NOT EXISTS commitments_task ON commitments(task_id);
@@ -402,10 +403,17 @@ CREATE INDEX IF NOT EXISTS commitments_task ON commitments(task_id);
 
 def ensure_commitments(conn: sqlite3.Connection) -> None:
     """Create commitments (and projects, which it references) if this file
-    has none yet. One indexed read when it exists, so every reader can call it."""
+    has none yet. Two cheap reads when it exists, so every reader can call it.
+
+    ben_item_id (2026-11-25, rule C2) is additive: Ben's dated item for the
+    commitment, added to an older table on first use."""
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='commitments'").fetchone() is None:
         ensure_projects(conn)
         conn.executescript(COMMITMENTS_DDL)
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(commitments)")}
+    if "ben_item_id" not in cols:
+        conn.execute("ALTER TABLE commitments ADD COLUMN ben_item_id TEXT REFERENCES follow_ups(id)")
 
 
 # Dispatch in code (coord_mcp/sessions.py): which session takes a client's

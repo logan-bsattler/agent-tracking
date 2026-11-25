@@ -16,6 +16,14 @@ level. No priority anywhere means normal.
 
 Set it on create (coord_create_task ``priority``) or later:
 ``python -m coord_mcp.priority set <task id> high`` records a decision.
+
+Rule P2 (Ben, 2026-11-25; switch ``require_priority``): coord_create_task
+refuses a root client task with no priority, as it refuses one with no
+pipeline line. A child (parent_id), a check-in (checkin_of) and Ben's
+direct asks are exempt: they inherit, or go first anyway. high: Ben said it
+is urgent, or a client is waiting. low: nice-to-have or internal tooling.
+Otherwise normal. Rule P1 has no code: a task has a date only when a
+commitment or the request states one.
 """
 
 from __future__ import annotations
@@ -35,6 +43,28 @@ def check(spec: Any) -> None:
     """Refuse a spec whose priority is not one of LEVELS."""
     if isinstance(spec, dict) and "priority" in spec and spec["priority"] not in LEVELS:
         raise ValueError(f"spec.priority must be one of {', '.join(LEVELS)}, not {spec['priority']!r}")
+
+
+REFUSAL = ("no priority: every root client task names one (rule P2, Ben 2026-11-25). priority \"high\" when Ben "
+           "said it is urgent or a client is waiting, \"low\" for a nice-to-have or internal tooling, otherwise "
+           "\"normal\". A child task (parent_id) or check-in inherits its chain's level.")
+
+
+def _required(conn: sqlite3.Connection) -> bool:
+    from . import queue
+    return queue.switch(conn, "require_priority")
+
+
+def check_create(conn: sqlite3.Connection, spec: Any, assigned_to: str | None, parent_id: str | None) -> None:
+    """Refuse a root client task with no priority (switch require_priority)."""
+    from .pipeline import NOT_CLIENTS
+    s = spec if isinstance(spec, dict) else {}
+    if s.get("priority") or parent_id or s.get("checkin_of") or s.get("from") == "ben-direct":
+        return
+    if not assigned_to or assigned_to in NOT_CLIENTS:
+        return
+    if _required(conn):
+        raise ValueError(REFUSAL)
 
 
 def _own(raw: Any) -> str | None:
