@@ -607,13 +607,14 @@ export const register: Register = on => {
             <Button key="ready-done" onPress={() => { void update($, ready, () => null) }}>Dismiss</Button>
           </Box>
         ) : null}
-        {q ? <Text>{q.question}</Text> : null}
+        {q ? <Text>{q.question_labeled || q.question}</Text> : null}
         {q ? (
           <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
             <Text dimColor>
               Answer {q.task_id
                 ? <Link href={`${DASH}/board/task/${q.task_id}`}>{q.ref.slice(0, 12)}</Link>
                 : q.ref}
+              {q.ref_label ? ` (${q.ref_label})` : null}
               {q.path ? ' · ' : null}
               {q.path ? <Link href={`${DASH}/board/question/${q.id}/file`}>{q.path.split(/[\\/]/).pop()}</Link> : null}:
             </Text>

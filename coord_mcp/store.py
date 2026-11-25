@@ -2401,6 +2401,12 @@ def task_detail(conn: sqlite3.Connection, task_id: str, root: Path | None = None
     d["deps"] = task_deps(conn, task_id)
     from . import gate
     d["review"] = gate.stage(conn, task_id)
+    from . import lookup
+    d["where"] = lookup.status_for_task(conn, task_id)
+    d["id_labels"] = lookup.labels(conn, [i for i in lookup.ids_in(
+        json.dumps(d["spec"]), json.dumps(d["result"]), d["question"] and d["question"]["question"],
+        *(x for dec in d["decisions"] for x in (dec["statement"], dec["because"])),
+        *(f["what"] for f in d["follow_ups"]), *(f["resolved_by"] for f in d["follow_ups"])) if i != task_id])
     return d
 
 
@@ -3147,7 +3153,9 @@ def superseded_questions(conn: sqlite3.Connection) -> list[str]:
 
 
 def minder_text(owed: dict[str, list[str]], now_ts: int) -> str:
-    """The prompt for what is owed: a count per condition and up to MINDER_IDS ids each."""
+    """The prompt for what is owed: a count per condition and up to MINDER_IDS ids each.
+    Ids only, never their labels (lookup.annotate): the prompt reaches master
+    as Ben's words, and a title or loose end's text can carry an email's."""
     from datetime import datetime
     parts = []
     for key, label in _MINDER_LABELS:

@@ -761,7 +761,7 @@ def _next_up(rows: list[dict[str, Any]], t: int, q: dict[str, Any] | None = None
         link = (f' <a class="drill" href="/board/task/{esc(tid)}">{esc(tid[:8])}</a>' if tid else "")
         if q.get("path"):  # a board-wide question has no task page; its document is the drill-down
             link += f' <a class="drill" href="{question_doc_href(q)}">{esc(Path(q["path"]).name)}</a>'
-        head = (f'<div class="head"><p class="ask">{esc(q["question"])}{link}</p>'
+        head = (f'<div class="head"><p class="ask">{esc(q.get("question_labeled") or q["question"])}{link}</p>'
                 f'<div class="btns">{_answer_buttons(q, "/board")}</div></div>')
         behind = [d for d in order if not q.get("follow_up_id") or d.get("fid") != q["follow_up_id"]][:3]
     elif rows:
@@ -1361,7 +1361,14 @@ THEME_JS = """<script>
 # Nav links in the order every page shows them; the current page is the filled tab.
 NAV = (("/", "Usage"), ("/board", "Board"), ("/pipeline", "Pipeline"), ("/clients", "Clients"), ("/queue", "Queue"), ("/hours", "Hours"), ("/team-time", "Team Time"), ("/drafts", "Drafts"),
        ("/deliverables", "Deliverables"), ("/intents", "Intents"), ("/commitments", "Commitments"),
-       ("/workflows", "Workflows"), ("/upkeep", "Upkeep"))
+       ("/workflows", "Workflows"), ("/upkeep", "Upkeep"), ("/find", "Find"))
+
+# A board id with its label beside it (lookup.ref), wherever a page shows one.
+ID_CSS = """
+.idlabel { color: var(--muted, #888); font-size: 12px; }
+a.idref { text-decoration: none; }
+.where-line { font-size: 14px; }
+"""
 
 SEEN_BOX = ('<span class="seenbox"><span id="newcount" class="age"></span>'
             '<button id="seen" type="button">Mark seen</button></span>')
@@ -1393,7 +1400,7 @@ def page(current: str, title: str, h1: str, sub: str, body: str, actions: str = 
     btns = f'<div class="btns">{actions}</div>' if actions else ""
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">{meta}'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title>'
-            f'{THEME_HEAD}<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}{CENTER_CSS}{DRAFT_CSS}{POLISH_CSS}</style></head>'
+            f'{THEME_HEAD}<style>{CSS}{BOARD_CSS}{COLLAPSE_CSS}{CENTER_CSS}{DRAFT_CSS}{POLISH_CSS}{ID_CSS}</style></head>'
             f'<body class="wide">{nav}<main>'
             f'<div class="topbar"><div><h1>{h1}</h1><p class="sub">{sub}</p></div>{btns}</div>\n'
             f'{body}\n{COLLAPSE_JS}{SEEN_JS}{THEME_JS}{tail}</main></body></html>')
@@ -1434,20 +1441,23 @@ def file_link(task_id: str, path: str, exists: bool, text: str | None = None) ->
             f'<a class="reveal" {attrs} data-how="reveal" title="Show in folder">{FOLDER_SVG}</a>')
 
 
-def _linker(task_id: str, files: list[dict[str, Any]]):
-    """str -> HTML, with every path in the task's file list linked in place."""
+def _linker(task_id: str, files: list[dict[str, Any]], known: dict[str, Any] | None = None):
+    """str -> HTML, with every path in the task's file list linked in place,
+    and every board id in `known` linked with its label beside it."""
+    from . import lookup
     by_raw = {r: f for f in files for r in f["raw"]}
     if not by_raw:
-        return esc
+        return (lambda s: lookup.html(s, known)) if known else esc
+    plain = (lambda s: lookup.html(s, known)) if known else esc
     pat = re.compile("|".join(re.escape(r) for r in sorted(by_raw, key=len, reverse=True)))
 
     def link(s: Any) -> str:
         s, out, at = str(s), [], 0
         for m in pat.finditer(s):
             f = by_raw[m.group()]
-            out += [esc(s[at:m.start()]), file_link(task_id, f["path"], f["exists"], m.group())]
+            out += [plain(s[at:m.start()]), file_link(task_id, f["path"], f["exists"], m.group())]
             at = m.end()
-        return "".join(out) + esc(s[at:])
+        return "".join(out) + plain(s[at:])
     return link
 
 
@@ -1506,6 +1516,7 @@ def _workflow_kv(w: dict[str, Any] | None, tid: str) -> str:
 
 def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False) -> str:
     """One task in full: what was asked, what came back, and how it got there."""
+    from . import lookup
     if d is None:
         return page("Board", "Coord task", "No such task",
                     f'Nothing on the board has id <code>{esc(task_id)}</code>.', "")
@@ -1529,7 +1540,14 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
         + _workflow_kv(d.get("workflow"), d["id"])
         + "</dl></div>"]
     files = d.get("files") or []
-    link = _linker(d["id"], files)
+    known = d.get("id_labels") or {}
+    link = _linker(d["id"], files, known)
+    w, where = d.get("where"), ""
+    if w:
+        where = (f'<div class="card"><h2>Where it stands</h2><p class="where-line">{esc(w["line"])}</p>'
+                        + (f'<p class="muted">Case: <a class="drill" href="{esc(w["href"])}">{esc(w["title"])}</a> · '
+                           f'<a href="/find?client={quote(w["client"] or "", safe="")}">all {esc(w["client"] or "")} work</a></p>'
+                           if w["kind"] == "case" else "") + '</div>')
     if files:
         items = "".join(
             f'<li>{file_link(d["id"], f["path"], f["exists"], Path(f["path"]).name)}'
@@ -1547,8 +1565,8 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
         for f in d["follow_ups"]:
             if f["state"] == "tasked":
                 how = f'tasked → <a class="drill" href="/board/task/{esc(f["resolved_by"])}">{esc(f["resolved_by"])}</a>'
-            elif f["state"] == "dropped":
-                how = f'dropped (decision <code>{esc(f["resolved_by"])}</code>)'
+            elif f["state"] in ("dropped", "deferred"):
+                how = f'{esc(f["state"])} (decision {lookup.ref(f["resolved_by"] or "", known.get(f["resolved_by"] or ""))})'
             else:
                 how = '<b class="st-failed">open</b>'
             items.append(f'<li><b>{esc(f["who"])}</b>: {link(f["what"])} <span class="muted">— </span>{how}</li>')
@@ -1559,9 +1577,10 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
         cards.append(f'<div class="card"><h2>Park {i} of {len(d["parks"])}</h2>{_val(p, link)}</div>')
     if d["decisions"]:
         items = "".join(
-            f'<li>{esc(x["statement"])}'
-            + (f' <span class="muted">— {esc(x["because"])}</span>' if x["because"] else "")
-            + f' <span class="muted">({when(x["created_at"])})</span></li>' for x in d["decisions"])
+            f'<li id="d-{esc(x["id"])}">{lookup.html(x["statement"], known)}'
+            + (f' <span class="muted">— {lookup.html(x["because"], known)}</span>' if x["because"] else "")
+            + f' <span class="muted">({when(x["created_at"])} · <code>{esc(x["id"])}</code>)</span></li>'
+            for x in d["decisions"])
         cards.append(f'<div class="card"><h2>Decisions</h2><ul class="vals">{items}</ul></div>')
     if d["children"]:
         items = "".join(
@@ -1581,10 +1600,10 @@ def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False)
           + ('<b class="st-done">Sent. Master picks it up when idle.</b>' if queued else
              '<span class="muted">queued for master; runs when master is idle</span>')
           + _next_link(d, queued) + '</div></form>')
-    head = _draft_card(d, queued) + _order_card(d) + _checkin_card(d)
+    head = where + _draft_card(d, queued) + _order_card(d) + _checkin_card(d)
     q = d.get("question")
     if q:
-        head += (f'<div class="card go next"><h2>Master asks</h2><p>{esc(q["question"])}</p>'
+        head += (f'<div class="card go next"><h2>Master asks</h2><p>{lookup.html(q["question"], known)}</p>'
                  f'<div class="btns">{_answer_buttons(q, "/board/task/" + d["id"])}</div>'
                  f'<p class="muted">On <code>{esc(q["ref"])}</code>. A press sends master '
                  f'&quot;Answer on {esc(q["ref"])}: &lt;option&gt;&quot; when it is idle.</p></div>')
@@ -1932,6 +1951,8 @@ def queue_page(v: dict[str, Any], done: str = "", fleet: list[dict[str, Any]] | 
     whatever he typed under each item to master as one prompt. Below, what
     routing moved off his queue this week, so nothing leaves it unseen.
     """
+    from . import lookup
+    known = v.get("id_labels") or {}
     t = v["as_of"]
     sub = (f'{v["total"]} open, grouped by client, the longest-waiting client first. Tick, then act on all '
            'ticked at once. Typed answers go to master in one prompt; nothing here mails a client.')
@@ -1955,7 +1976,7 @@ def queue_page(v: dict[str, Any], done: str = "", fleet: list[dict[str, Any]] | 
                    + ("" if d.get("agent_ok", True) else " · not wired, Send to agent off"))
             rows.append(
                 f'<li data-since="{int(d["created_at"])}"><label><input type="checkbox" name="id" '
-                f'value="{esc(d["id"])}" data-client="{esc(c)}"{noagent}> {esc(d["what"])}</label>{hint}{asked}'
+                f'value="{esc(d["id"])}" data-client="{esc(c)}"{noagent}> {lookup.html(d["what"], known)}</label>{hint}{asked}'
                 f'<div class="muted">{_age(d["created_at"], t)} · {src} '
                 f'<code>{esc(d["id"])}</code></div>'
                 f'<textarea name="a.{esc(d["id"])}" rows="1" maxlength="1000" placeholder="answer (optional)">'
@@ -1981,7 +2002,7 @@ def queue_page(v: dict[str, Any], done: str = "", fleet: list[dict[str, Any]] | 
     if dfr:
         body += ('<div class="card lane" id="deferred"><h2>Deferred, coming back '
                  f'<span class="count">{len(dfr)}</span></h2><ul>' + "".join(
-                     f'<li>{return_chip(d)} {esc(d.get("client") or "unassigned")} · {esc(d["what"][:160])} '
+                     f'<li>{return_chip(d)} {esc(d.get("client") or "unassigned")} · {lookup.html(d["what"][:160], known)} '
                      f'<span class="muted">{_task_link(d["task_id"]) if d["task_id"] else "Ben item"} '
                      f'<code>{esc(d["id"])}</code></span></li>' for d in dfr) + '</ul></div>')
     if v["moved"]:
@@ -2708,6 +2729,7 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
             path = path.rstrip("/")
             self._query = parse_qs(query)
             self._type, self._disp, self._sandbox = "text/html; charset=utf-8", None, False
+            self._redirect = None
             conn = connect()
             try:
                 try:
@@ -2719,6 +2741,12 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 conn.close()
             if body is None:
                 self.send_error(404)
+                return
+            if self._redirect:
+                self.send_response(302)
+                self.send_header("Location", self._redirect)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
                 return
             self.send_response(200)
             self.send_header("Content-Type", self._type)
@@ -3158,9 +3186,10 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
         def _body(self, conn, path):
             if path == "/api/parked":
                 self._type = "application/json"
+                from . import lookup
                 return json.dumps({"parked": store.parked_tasks(conn),
                                    "queued": store.queued_operator_prompts(conn),
-                                   "question": store.current_question(conn),
+                                   "question": lookup.label_question(conn, store.current_question(conn)),
                                    "minder": minder_status(conn),
                                    "actions": {k: v for k, v in store.OPERATOR_ACTIONS.items()
                                                if k in store.PAGE_ACTIONS and k != "redispatch"}}
@@ -3179,7 +3208,8 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v["health"] = store.health(conn)
                 v["parked"] = store.parked_tasks(conn)
                 v["queued"] = store.queued_operator_prompts(conn)
-                v["question"] = store.current_question(conn)
+                from . import lookup
+                v["question"] = lookup.label_question(conn, store.current_question(conn))
                 v["minder"] = minder_status(conn)
                 from . import direct
                 v["ready"] = direct.ready_items(conn)
@@ -3249,10 +3279,30 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                 v = store.deliverables(conn, days=max(1, min(window, 365)), client=client)
                 v["q"] = (self._query.get("q") or [""])[0].strip()
                 return deliverables_page(v).encode("utf-8")
+            if path == "/find":
+                from . import lookup
+                q = (self._query.get("q") or [""])[0].strip()[:200]
+                client = (self._query.get("client") or [""])[0].strip() or None
+                r = lookup.find(conn, q, client)
+                known = lookup.labels(conn, lookup.ids_in(*(n["text"] for n in r["notes"]),
+                                                          *(n.get("because") for n in r["notes"])))
+                return lookup.find_page(r, client_keys(conn), known).encode("utf-8")
+            if m := re.fullmatch(r"/id/([0-9a-zA-Z]{2,12})", path):
+                # Any id, one click: the task page when it is a task, else /find on it.
+                tid = m.group(1).lower()
+                if conn.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():
+                    self._redirect = f"/board/task/{tid}"
+                else:
+                    self._redirect = f"/find?q={tid}"
+                return b""
             if path == "/queue":
-                from . import queue
+                from . import lookup, queue
                 fleet = store.fleet(conn, store.operator_view(conn), hours.CLIENTS)
-                return queue_page(queue.ben_queue(conn), (self._query.get("done") or [""])[0][:200], fleet,
+                bq = queue.ben_queue(conn)
+                bq["id_labels"] = lookup.labels(conn, lookup.ids_in(
+                    *(d["what"] for g in bq["groups"] for d in g["items"]),
+                    *(d["what"] for d in bq.get("deferred", []))))
+                return queue_page(bq, (self._query.get("done") or [""])[0][:200], fleet,
                                   (self._query.get("client") or [""])[0].strip() or None).encode("utf-8")
             if path == "/commitments":
                 from . import commitments
