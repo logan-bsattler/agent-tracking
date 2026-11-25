@@ -9,6 +9,7 @@
     {
       "key": "change",
       "name": "Pipeline change",
+      "means": "A change shows up on a pipeline item; master tasks an investigation.",
       "who": "code",
       "kinds": [],
       "gate": "pipeline intent",
@@ -20,6 +21,7 @@
     {
       "key": "investigate",
       "name": "Investigate",
+      "means": "The client agent finds what has to change.",
       "who": "agent",
       "kinds": [
         "investigation"
@@ -33,6 +35,7 @@
     {
       "key": "fix",
       "name": "Fix",
+      "means": "The client agent builds the fix and dev-compiles it; from review on it follows the FDD-to-production steps.",
       "who": "agent",
       "kinds": [
         "code_change"

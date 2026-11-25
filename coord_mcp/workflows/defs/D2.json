@@ -9,6 +9,7 @@
     {
       "key": "draft",
       "name": "Draft minutes",
+      "means": "The board drafts hours from transcripts and meetings onto /hours.",
       "who": "code",
       "kinds": [],
       "gate": "transcripts and meetings",
@@ -20,6 +21,7 @@
     {
       "key": "edit",
       "name": "Edit and bill",
+      "means": "Ben edits the hours and bills them.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben",

@@ -8,6 +8,7 @@
     {
       "key": "draft",
       "name": "Draft in work/",
+      "means": "The client agent writes the document in work/ (never Markdown).",
       "who": "agent",
       "kinds": [
         "deliverable",
@@ -25,6 +26,7 @@
     {
       "key": "review",
       "name": "Review",
+      "means": "A fresh agent checks it against its checklist, for up to two rounds.",
       "who": "code",
       "kinds": [
         "dod_review"
@@ -38,6 +40,7 @@
     {
       "key": "promote",
       "name": "Promote",
+      "means": "The board copies the approved file to deliverables; if it refuses, Ben clicks Promote.",
       "who": "code",
       "kinds": [],
       "gate": "auto-promoted when the dod_review approves (auto_promote switch); Ben's click on /deliverables if refused",
@@ -49,6 +52,7 @@
     {
       "key": "cover",
       "name": "Covering email",
+      "means": "The client agent drafts the email that sends the promoted copy; nothing is sent.",
       "who": "agent",
       "kinds": [
         "draft_reply"
@@ -62,6 +66,7 @@
     {
       "key": "send",
       "name": "Send",
+      "means": "Ben sends the email; that closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends",

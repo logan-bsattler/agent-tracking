@@ -8,6 +8,7 @@
     {
       "key": "spec_in",
       "name": "Spec in",
+      "means": "A new FDD or requirement arrives; master tasks a sizing.",
       "who": "code",
       "kinds": [],
       "gate": "pipeline item or intent",
@@ -19,6 +20,7 @@
     {
       "key": "sizing",
       "name": "Sizing",
+      "means": "The client agent sizes the work and gives an hours estimate.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -34,6 +36,7 @@
     {
       "key": "estimate_ok",
       "name": "Approve estimate",
+      "means": "The board accepts a tight estimate on its own; a wide one waits for Ben. Status and dates stay his.",
       "who": "ben",
       "kinds": [],
       "gate": "inside the estimate band (high/low <= estimate_max_ratio, high <= estimate_max_high h; switch auto_estimate) code accepts it; else Ben approves. Status and dates stay his",
@@ -49,6 +52,7 @@
     {
       "key": "handoff",
       "name": "Architect handoff",
+      "means": "The client agent lays out the design and build plan.",
       "who": "agent",
       "kinds": [
         "code_change",
@@ -63,6 +67,7 @@
     {
       "key": "design_ruling",
       "name": "Ben rules on the design",
+      "means": "Only if the design has open questions: Ben answers them before the build.",
       "who": "ben",
       "kinds": [],
       "optional": true,
@@ -75,6 +80,7 @@
     {
       "key": "build",
       "name": "Build and dev compile",
+      "means": "The client agent builds the code and dev-compiles it; nothing is checked in yet.",
       "who": "agent",
       "kinds": [
         "code_change"
@@ -105,6 +111,7 @@
     {
       "key": "review",
       "name": "Review",
+      "means": "A fresh agent checks the code against the CVC code checklist.",
       "who": "code",
       "kinds": [
         "dod_review"
@@ -118,6 +125,7 @@
     {
       "key": "checkin_ok",
       "name": "Check-in approval",
+      "means": "The board approves the check-in on its own once the review passes, the files are unchanged and the compile is clean; otherwise Ben approves it.",
       "who": "code",
       "fallback": "ben",
       "kinds": [],
@@ -130,6 +138,7 @@
     {
       "key": "checkin",
       "name": "Check-in",
+      "means": "The client agent checks the approved code into CVC.",
       "who": "agent",
       "kinds": [
         "code_change"
@@ -146,6 +155,7 @@
     {
       "key": "note",
       "name": "Pipeline note",
+      "means": "Master adds a note to the SharePoint pipeline item saying what landed.",
       "who": "code",
       "kinds": [],
       "gate": "pipeline-note claim",
@@ -157,6 +167,7 @@
     {
       "key": "evidence",
       "name": "Test evidence",
+      "means": "The client agent puts together the test evidence.",
       "who": "agent",
       "kinds": [
         "deliverable",
@@ -171,6 +182,7 @@
     {
       "key": "promote",
       "name": "Promote DEVL/TEST/PROD",
+      "means": "Ben asks for the move to TEST and PROD; it is installed there.",
       "who": "ben",
       "kinds": [],
       "gate": "promotion asks are Ben's (A4)",
@@ -183,6 +195,7 @@
     {
       "key": "signoff",
       "name": "UAT sign-off",
+      "means": "The client signs off in UAT and Ben records it; that closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "client signs off; Ben records it",

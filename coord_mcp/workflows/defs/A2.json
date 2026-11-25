@@ -8,6 +8,7 @@
     {
       "key": "ingest",
       "name": "Ingest",
+      "means": "Someone asks Ben for a date; master specs the reply in the same turn.",
       "who": "code",
       "kinds": [],
       "gate": "triage proposes the intent",
@@ -20,6 +21,7 @@
     {
       "key": "draft",
       "name": "Propose date and draft",
+      "means": "The client agent proposes a real date from the board and the plan and drafts the reply within one business day.",
       "who": "agent",
       "kinds": [
         "draft_reply",
@@ -35,6 +37,7 @@
     {
       "key": "confirm",
       "name": "Confirm date",
+      "means": "Ben confirms the date or changes it; it sits at the head of his queue.",
       "who": "ben",
       "kinds": [],
       "gate": "head of Ben's queue",
@@ -47,6 +50,7 @@
     {
       "key": "send",
       "name": "Send",
+      "means": "Ben sends the reply; that closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends",

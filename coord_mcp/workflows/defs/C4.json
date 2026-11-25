@@ -9,6 +9,7 @@
     {
       "key": "brief",
       "name": "Per-meeting brief",
+      "means": "The board builds a brief for each meeting on today's calendar.",
       "who": "code",
       "kinds": [],
       "gate": "calendar imported for the day",
@@ -20,6 +21,7 @@
     {
       "key": "prep",
       "name": "Prep material",
+      "means": "The client agent prepares the material for the meeting.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -36,6 +38,7 @@
     {
       "key": "review",
       "name": "Review",
+      "means": "A fresh agent checks the material against its checklist.",
       "who": "code",
       "kinds": [
         "dod_review"
@@ -49,6 +52,7 @@
     {
       "key": "read",
       "name": "Ben reads it",
+      "means": "Ben reads it before the meeting; that closes the case.",
       "who": "ben",
       "passive": true,
       "kinds": [],

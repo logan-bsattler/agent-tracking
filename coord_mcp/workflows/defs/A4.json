@@ -9,6 +9,7 @@
     {
       "key": "ingest",
       "name": "Ingest",
+      "means": "Someone asks to move code to another environment; master asks the client agent what is ready.",
       "who": "code",
       "kinds": [],
       "gate": "triage proposes the intent",
@@ -20,6 +21,7 @@
     {
       "key": "ready",
       "name": "What is ready",
+      "means": "The client agent lists each CVC ticket and whether it is ready to move.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -34,6 +36,7 @@
     {
       "key": "approve",
       "name": "Approve the moves",
+      "means": "Ben names which tickets to move.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben names the tickets to move",
@@ -45,6 +48,7 @@
     {
       "key": "moves",
       "name": "CVC ticket moves",
+      "means": "The client agent moves only the tickets Ben named, and records the moves.",
       "who": "agent",
       "kinds": [
         "code_change"
@@ -58,6 +62,7 @@
     {
       "key": "qsm",
       "name": "QSM ticket",
+      "means": "Ben submits the QSM ticket to QAD; QAD installs.",
       "who": "ben",
       "kinds": [],
       "gate": "qad-qsm-deployment skill; Ben submits",
@@ -69,6 +74,7 @@
     {
       "key": "confirm",
       "name": "Confirm install",
+      "means": "The client agent checks the install landed in the target environment.",
       "who": "agent",
       "kinds": [
         "investigation"
@@ -82,6 +88,7 @@
     {
       "key": "reply",
       "name": "Reply",
+      "means": "The client agent drafts the reply saying it is installed; nothing is sent.",
       "who": "agent",
       "kinds": [
         "draft_reply"
@@ -115,6 +122,7 @@
     {
       "key": "send",
       "name": "Send",
+      "means": "Ben sends the reply; that closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends",

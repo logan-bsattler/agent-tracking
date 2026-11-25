@@ -9,6 +9,7 @@
     {
       "key": "ingest",
       "name": "Ingest",
+      "means": "An action item comes out of a meeting transcript.",
       "who": "code",
       "kinds": [],
       "gate": "transcript import",
@@ -20,6 +21,7 @@
     {
       "key": "work",
       "name": "Task the action",
+      "means": "The client agent does the action item.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -36,6 +38,7 @@
     {
       "key": "work_ruling",
       "name": "Ben rules on the work",
+      "means": "Only if the work raised a choice: Ben rules on it before any reply goes out.",
       "who": "ben",
       "kinds": [],
       "optional": true,
@@ -49,6 +52,7 @@
     {
       "key": "reply",
       "name": "Reply or deliverable",
+      "means": "The client agent drafts the reply or the deliverable; nothing is sent.",
       "who": "agent",
       "kinds": [
         "draft_reply"
@@ -62,6 +66,7 @@
     {
       "key": "ben",
       "name": "Ben closes it",
+      "means": "Ben sends or presents it; that closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends or presents",

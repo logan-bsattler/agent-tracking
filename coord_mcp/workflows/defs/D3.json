@@ -9,6 +9,7 @@
     {
       "key": "sweep",
       "name": "Sweep mail and Teams",
+      "means": "The hourly routine sweeps mail and Teams and proposes intents.",
       "who": "code",
       "kinds": [],
       "gate": "routine",
@@ -20,6 +21,7 @@
     {
       "key": "recap",
       "name": "Recap",
+      "means": "The morning routine writes a recap for Ben to read.",
       "who": "code",
       "kinds": [],
       "gate": "routine",

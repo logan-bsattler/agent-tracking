@@ -8,6 +8,7 @@
     {
       "key": "ingest",
       "name": "Ingest",
+      "means": "The hourly sweep spots the status question in mail or Teams; master then asks the client agent to read the status.",
       "who": "code",
       "kinds": [],
       "gate": "hourly triage proposes the intent",
@@ -19,6 +20,7 @@
     {
       "key": "status_read",
       "name": "Status read",
+      "means": "The client agent reads where the work stands and hands back what it found.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -34,6 +36,7 @@
     {
       "key": "draft",
       "name": "Draft reply",
+      "means": "The client agent writes the reply from that read; nothing is sent.",
       "who": "agent",
       "kinds": [
         "draft_reply"
@@ -66,6 +69,7 @@
     {
       "key": "review",
       "name": "Review",
+      "means": "A fresh agent checks the draft against the client-email checklist (when that gate is on).",
       "who": "code",
       "kinds": [
         "dod_review"
@@ -79,6 +83,7 @@
     {
       "key": "outlook",
       "name": "Outlook draft",
+      "means": "Master types the approved draft into Ben's Outlook Drafts folder.",
       "who": "code",
       "kinds": [],
       "gate": "minder lists finished drafts; master types it into Drafts",
@@ -90,6 +95,7 @@
     {
       "key": "send",
       "name": "Send",
+      "means": "Ben reads the draft in Outlook and sends it; that closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben reads and sends",

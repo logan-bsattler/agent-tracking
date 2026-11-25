@@ -8,6 +8,7 @@
     {
       "key": "ingest",
       "name": "Ingest",
+      "means": "Ben is assigned an FDD to review; master tasks a read.",
       "who": "code",
       "kinds": [],
       "gate": "triage proposes the intent",
@@ -19,6 +20,7 @@
     {
       "key": "read",
       "name": "Read FDD and code",
+      "means": "The client agent reads the FDD and the code behind it.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -34,6 +36,7 @@
     {
       "key": "findings",
       "name": "Findings and questions",
+      "means": "The client agent writes up findings and questions as a document.",
       "who": "agent",
       "kinds": [
         "deliverable",
@@ -67,6 +70,7 @@
     {
       "key": "review",
       "name": "Review",
+      "means": "A fresh agent checks the document against its checklist.",
       "who": "code",
       "kinds": [
         "dod_review"
@@ -80,6 +84,7 @@
     {
       "key": "ben",
       "name": "Promote",
+      "means": "The board promotes the approved document to deliverables; if it refuses, Ben clicks Promote.",
       "who": "code",
       "kinds": [],
       "gate": "auto-promoted when the dod_review approves (auto_promote switch); Promote on /deliverables if refused",
@@ -91,6 +96,7 @@
     {
       "key": "reply",
       "name": "Reply or tracker comment",
+      "means": "The client agent drafts the email or tracker comment that carries the findings; nothing is sent.",
       "who": "agent",
       "kinds": [
         "draft_reply",
@@ -105,6 +111,7 @@
     {
       "key": "send",
       "name": "Send or paste",
+      "means": "Ben sends the email or pastes the comment; that closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends or pastes",

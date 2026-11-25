@@ -8,6 +8,7 @@
     {
       "key": "draft",
       "name": "Draft text",
+      "means": "The client agent writes the text for the tracker (Jira, ServiceNow, CVC).",
       "who": "agent",
       "kinds": [
         "deliverable",
@@ -23,6 +24,7 @@
     {
       "key": "review",
       "name": "Review",
+      "means": "A fresh agent checks the text against its checklist.",
       "who": "code",
       "kinds": [
         "dod_review"
@@ -36,6 +38,7 @@
     {
       "key": "paste",
       "name": "Paste",
+      "means": "Ben pastes it into the tracker; nothing posts on its own. That closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben pastes; nothing posts in code",

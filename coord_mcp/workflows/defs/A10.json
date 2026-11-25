@@ -8,6 +8,7 @@
     {
       "key": "ingest",
       "name": "Ingest",
+      "means": "Triage picks up a note Ben left himself; master turns it into a task.",
       "who": "code",
       "kinds": [],
       "gate": "triage",
@@ -19,6 +20,7 @@
     {
       "key": "work",
       "name": "Task it",
+      "means": "The client agent does what the note asks; the case closes when its result lands.",
       "who": "agent",
       "kinds": [
         "investigation",

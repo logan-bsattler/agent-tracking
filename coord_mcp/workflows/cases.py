@@ -366,7 +366,7 @@ def task_steps(conn: sqlite3.Connection, task_ids: list[str] | tuple[str, ...]) 
 
     Each value: workflow, workflow_name, case_id, root_task_id, case_state,
     step (key or None), step_name, n (1-based, 0 when unknown), of (step
-    count), steps ([{key, name, who}]), and the case's own current step and
+    count), steps ([{key, name, who, means, optional}]), and the case's own current step and
     waits_on, which differ from the task's once the case has moved on."""
     ids = [t for t in dict.fromkeys(task_ids) if t]
     if not ids or not have_workflows(conn):
@@ -381,7 +381,8 @@ def task_steps(conn: sqlite3.Connection, task_ids: list[str] | tuple[str, ...]) 
                     FROM tasks t JOIN workflow_cases c ON c.id = t.case_id
                     WHERE t.id IN ({marks})""", chunk):
             d = defs.get(r["workflow"])
-            steps = [{"key": s["key"], "name": s.get("name") or s["key"], "who": s.get("who")}
+            steps = [{"key": s["key"], "name": s.get("name") or s["key"], "who": s.get("who"),
+                      "means": defs.means(s), "optional": bool(s.get("optional"))}
                      for s in (d or {}).get("steps") or []]
             names = {s["key"]: s["name"] for s in steps}
             n = defs.step_index(d, r["case_step"]) + 1 if d and r["case_step"] else 0

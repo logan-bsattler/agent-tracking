@@ -8,6 +8,7 @@
     {
       "key": "draft",
       "name": "Draft dod/<type>.md",
+      "means": "A client agent drafts the done-checklist for a deliverable type.",
       "who": "agent",
       "kinds": [
         "code_change",
@@ -22,6 +23,7 @@
     {
       "key": "review",
       "name": "Review",
+      "means": "A fresh agent checks the draft checklist.",
       "who": "code",
       "kinds": [
         "dod_review"
@@ -35,6 +37,7 @@
     {
       "key": "approve",
       "name": "Ben approves",
+      "means": "Ben approves what counts as client-ready; that closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "what counts as client-ready is Ben's",

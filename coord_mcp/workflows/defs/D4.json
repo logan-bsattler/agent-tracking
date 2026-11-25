@@ -8,6 +8,7 @@
     {
       "key": "setup",
       "name": "Folder, scripts, key, session",
+      "means": "The new client gets its folder, scripts, SSH key and session.",
       "who": "code",
       "kinds": [],
       "gate": "qad-client-onboard skill",
@@ -19,6 +20,7 @@
     {
       "key": "key",
       "name": "Key install",
+      "means": "Ben installs the public key on the client's server and checks it works.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben installs the public key",
@@ -30,6 +32,7 @@
     {
       "key": "characterize",
       "name": "Characterize",
+      "means": "The client agent fills in the facts its CLAUDE.md does not know yet; that closes the case.",
       "who": "agent",
       "kinds": [
         "investigation",

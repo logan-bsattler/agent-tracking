@@ -146,6 +146,8 @@ def validate(d: dict[str, Any], kinds: tuple[str, ...] | list[str] | None = None
         for f in ("name", "gate", "next"):
             if not st.get(f):
                 errs.append(f"{where}: no {f}")
+        if "means" in st and not (isinstance(st["means"], str) and st["means"].strip()):
+            errs.append(f"{where}: means is a non-empty line of plain words")
         if "fallback" in st and (st.get("who") != "code" or st["fallback"] not in ("ben", "agent")):
             errs.append(f"{where}: fallback goes on a code step and names ben or agent")
         if "optional" in st and not isinstance(st["optional"], bool):
@@ -220,6 +222,18 @@ def load(path: Path | None = None) -> dict[str, dict[str, Any]]:
 
 def get(code: str | None) -> dict[str, Any] | None:
     return load().get(code or "")
+
+
+_WHO_WORDS = {"agent": "A client agent", "code": "The board", "ben": "Ben"}
+
+
+def means(st: dict[str, Any]) -> str:
+    """What a step means in practice, in plain words: its own `means` line,
+    or one put together from who acts, its gate and what moves it on."""
+    if st.get("means"):
+        return str(st["means"])
+    who = _WHO_WORDS.get(st.get("who") or "", "Someone")
+    return f"{who} acts: {st.get('gate') or st.get('name') or st.get('key')}. Moves on when: {st.get('next') or 'done'}."
 
 
 def step_index(d: dict[str, Any], key: str | None) -> int:

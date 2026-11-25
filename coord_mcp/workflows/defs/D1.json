@@ -8,6 +8,7 @@
     {
       "key": "check",
       "name": "Evidence check",
+      "means": "The client agent checks open items against outside evidence (sent mail, trackers).",
       "who": "agent",
       "kinds": [
         "investigation"
@@ -22,6 +23,7 @@
     {
       "key": "close",
       "name": "Close on evidence",
+      "means": "Master closes what is done, with a decision citing the evidence.",
       "who": "code",
       "kinds": [],
       "gate": "decisions cite the evidence",

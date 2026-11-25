@@ -8,6 +8,7 @@
     {
       "key": "work",
       "name": "Investigate or build",
+      "means": "An agent investigates or builds the tooling.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -24,6 +25,7 @@
     {
       "key": "review",
       "name": "Review",
+      "means": "A fresh agent checks it against its checklist.",
       "who": "code",
       "kinds": [
         "dod_review"
@@ -37,6 +39,7 @@
     {
       "key": "read",
       "name": "Ben reads it",
+      "means": "Ben reads the result; that closes the case.",
       "who": "ben",
       "passive": true,
       "kinds": [],

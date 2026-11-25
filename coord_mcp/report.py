@@ -95,6 +95,30 @@ td.n,th.n { text-align:right; font-variant-numeric:tabular-nums; white-space:now
 .wrap { overflow-x:auto; }
 .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:0; }
 .muted { color:var(--muted); }
+.wf-steps { list-style:none; display:flex; flex-wrap:wrap; align-items:flex-start; gap:10px 0; margin:8px 0 4px; padding:0; }
+.wf-node { display:flex; flex-direction:column; align-items:center; text-align:center; width:96px; position:relative; cursor:help; --c:var(--s1); }
+.wf-node.ben { --c:var(--s2); }
+.wf-node + .wf-node::before { content:""; position:absolute; top:11px; right:calc(50% + 14px); width:calc(100% - 28px);
+  height:2px; background:var(--grid); }
+.wf-node.done + .wf-node::before, .wf-node.done + .wf-node.cur::before { background:var(--s1); }
+.wf-dot { width:24px; height:24px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+  font-size:11px; font-weight:600; border:2px solid var(--axis); color:var(--muted); background:var(--surface); }
+.wf-node.ben .wf-dot { border-color:color-mix(in srgb, var(--s2) 55%, var(--axis)); }
+.wf-node.opt .wf-dot { border-style:dashed; }
+.wf-node.done .wf-dot { background:var(--c); border-color:var(--c); color:#fff; }
+.wf-node.cur .wf-dot { border-color:var(--c); color:var(--c); box-shadow:0 0 0 4px color-mix(in srgb, var(--c) 22%, transparent); }
+.wf-name { font-size:12px; line-height:1.25; margin-top:5px; color:var(--ink2); padding:0 3px; }
+.wf-node.todo .wf-name { color:var(--muted); }
+.wf-node.cur .wf-name { color:var(--ink); font-weight:600; }
+.wf-who { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.wf-node.ben .wf-who { color:var(--s2); font-weight:600; }
+.wf-status { font-size:11px; margin-top:3px; padding:1px 6px; border-radius:9px; color:var(--ink);
+  background:color-mix(in srgb, var(--c) 18%, transparent); }
+.wf-this { font-size:11px; margin-top:3px; color:var(--muted); font-style:italic; }
+.wf-means { font-size:13px; color:var(--ink2); margin-top:4px; }
+.wf-all { font-size:12px; color:var(--ink2); margin-top:4px; }
+.wf-all summary { cursor:pointer; color:var(--muted); }
+.wf-all ol { margin:4px 0 0; padding-left:20px; } .wf-all li { margin:2px 0; }
 #tip { position:fixed; pointer-events:none; background:var(--ink); color:var(--page); padding:6px 9px;
   border-radius:6px; font-size:12px; display:none; z-index:9; white-space:pre; }
 .hit { opacity:0; }
@@ -1502,16 +1526,58 @@ def _workflow_kv(w: dict[str, Any] | None, tid: str) -> str:
     else:
         step = '<span class="muted">not placed yet</span>'
     if w["steps"]:
-        step += ('<div class="muted" style="font-size:12px">' + " → ".join(
-            f'<b>{esc(s["name"])}</b>' if s["key"] == w["step"] else esc(s["name"]) for s in w["steps"]) + "</div>")
-    if w["case_state"] != "open":
+        step += workflow_stepper(w)
+    elif w["case_state"] != "open":
         step += f'<div class="muted">case {esc(w["case_state"])}</div>'
-    elif w["case_at"] and w["case_at"] != w["step"]:
-        step += (f'<div class="muted">case now at {esc(w["case_at_name"] or "")}'
-                 + (f', waiting on {esc(w["waits_on"])}' if w["waits_on"] else "") + "</div>")
     elif w["waits_on"]:
         step += f'<div class="muted">waiting on {esc(w["waits_on"])}</div>'
     return f"<dt>workflow</dt><dd>{wf}</dd><dt>step</dt><dd>{step}</dd>"
+
+
+_WHO_LABEL = {"agent": "agent", "code": "board", "ben": "Ben"}
+_WAITS_LABEL = {"ben": "Ben", "agent": "agent", "master": "master"}
+
+
+def workflow_stepper(w: dict[str, Any]) -> str:
+    """The case's steps as a row of nodes: done steps filled, the step the
+    case is at highlighted with what it waits on, later steps muted, and
+    Ben's steps in their own colour. Each node carries what the step means
+    in practice (hover), and the step the case is at says it in a caption."""
+    steps = w["steps"]
+    keys = [s["key"] for s in steps]
+    at = w["case_at"] if w["case_at"] in keys else w["step"] if w["step"] in keys else None
+    done_case = w["case_state"] != "open"
+    cur = len(steps) if w["case_state"] == "done" else keys.index(at) if at else -1
+    items = []
+    for i, s in enumerate(steps):
+        state = "done" if i < cur else "cur" if i == cur and not done_case else "todo"
+        cls = f"wf-node {state}" + (" ben" if s.get("who") == "ben" else "") + (" opt" if s.get("optional") else "")
+        mark = "✓" if state == "done" else str(i + 1)
+        who = _WHO_LABEL.get(s.get("who") or "", s.get("who") or "")
+        sub = []
+        if state == "cur":
+            sub.append(f'<span class="wf-status">waiting on {esc(_WAITS_LABEL.get(w["waits_on"], w["waits_on"]))}</span>'
+                       if w["waits_on"] else '<span class="wf-status">now</span>')
+        if s["key"] == w["step"] and s["key"] != at:
+            sub.append('<span class="wf-this">this task</span>')
+        means = s.get("means") or ""
+        tip = f'{who}: {means}' + (" (only when needed)" if s.get("optional") else "")
+        items.append(
+            f'<li class="{cls}" title="{esc(tip)}"><span class="wf-dot" aria-hidden="true">{mark}</span>'
+            f'<span class="wf-name">{esc(s["name"])}</span><span class="wf-who">{esc(who)}</span>'
+            + "".join(sub) + "</li>")
+    out = '<ol class="wf-steps">' + "".join(items) + "</ol>"
+    if done_case:
+        out += f'<div class="muted">case {esc(w["case_state"])}</div>'
+    elif 0 <= cur < len(steps):
+        lead = ("<b>Now:</b>" if steps[cur]["key"] == w["step"]
+                else f'case now at {esc(steps[cur]["name"])}:')
+        out += f'<div class="wf-means">{lead} {esc(steps[cur].get("means") or "")}</div>'
+    out += ('<details class="wf-all"><summary>What each step means</summary><ol>' + "".join(
+        f'<li><b>{esc(s["name"])}</b> <span class="muted">({esc(_WHO_LABEL.get(s.get("who") or "", ""))}'
+        + (", only when needed" if s.get("optional") else "") + f')</span> {esc(s.get("means") or "")}</li>'
+        for s in steps) + "</ol></details>")
+    return out
 
 
 def task_page(d: dict[str, Any] | None, task_id: str = "", queued: bool = False) -> str:

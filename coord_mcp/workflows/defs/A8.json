@@ -9,6 +9,7 @@
     {
       "key": "ingest",
       "name": "Ingest",
+      "means": "Triage finds a promise Ben made; master records it as a commitment.",
       "who": "code",
       "kinds": [],
       "gate": "triage",
@@ -20,6 +21,7 @@
     {
       "key": "link",
       "name": "Link work",
+      "means": "A client agent does the work behind the promise.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -37,6 +39,7 @@
     {
       "key": "deliver",
       "name": "Deliver",
+      "means": "Ben delivers; the commitment closes only on evidence he did.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben delivers",

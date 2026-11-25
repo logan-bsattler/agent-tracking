@@ -93,8 +93,16 @@ def _has(conn: sqlite3.Connection, table: str) -> bool:
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
 
 
+def _no_means(d: dict[str, Any]) -> dict[str, Any]:
+    """A definition without its steps' `means` lines: wording, not behaviour,
+    so adding or rewording one leaves an open proposal current."""
+    if "steps" not in d:
+        return d
+    return {**d, "steps": [{k: v for k, v in st.items() if k != "means"} for st in d["steps"] or []]}
+
+
 def _sha(d: dict[str, Any] | None) -> str | None:
-    return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()[:12] if d else None
+    return hashlib.sha1(json.dumps(_no_means(d), sort_keys=True).encode()).hexdigest()[:12] if d else None
 
 
 def _sla_for(seconds: list[int]) -> dict[str, Any]:
@@ -539,6 +547,11 @@ def adopt(conn: sqlite3.Connection, ref: str, folder: Path | None = None,
         if _sha(cur) != p["base_sha"]:
             raise ValueError(f"{code} changed since proposal {pid} was drafted; re-run propose")
         d["engine"] = bool((cur or {}).get("engine"))
+        # Keep each step's plain-words line; a proposal drafted before it
+        # existed does not carry it.
+        said = {st["key"]: st["means"] for st in (cur or {}).get("steps") or [] if st.get("means")}
+        d["steps"] = [st if st.get("means") or st.get("key") not in said
+                      else {**st, "means": said[st["key"]]} for st in d.get("steps") or []]
     else:
         if target.exists() or code in CATALOG:
             raise ValueError(f"{code} already exists; re-run propose to draft it under a free code")

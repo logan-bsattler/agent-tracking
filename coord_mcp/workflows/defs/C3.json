@@ -8,6 +8,7 @@
     {
       "key": "input",
       "name": "New input",
+      "means": "The client agent reads the new input (a file, an email, a meeting) and says whether the workbook needs regenerating.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -22,6 +23,7 @@
     {
       "key": "input_rulings",
       "name": "Ben rules on the input",
+      "means": "Only if the input raised choices: Ben rules on them; earlier rulings may settle some.",
       "who": "ben",
       "kinds": [],
       "optional": true,
@@ -35,6 +37,7 @@
     {
       "key": "regen",
       "name": "Regenerate workbook",
+      "means": "The client agent rebuilds the workbook with the new input, as one workbook.",
       "who": "agent",
       "kinds": [
         "code_change",
@@ -50,6 +53,7 @@
     {
       "key": "review",
       "name": "Review",
+      "means": "A fresh agent checks the workbook against its checklist.",
       "who": "code",
       "kinds": [
         "dod_review"
@@ -63,6 +67,7 @@
     {
       "key": "rulings",
       "name": "Ben rules",
+      "means": "Ben rules on the rows that need him; earlier rulings may settle some.",
       "who": "ben",
       "kinds": [],
       "gate": "per-row rulings; precedent may settle covered rows (build step 6)",
@@ -75,6 +80,7 @@
     {
       "key": "apply",
       "name": "Apply rulings",
+      "means": "The client agent applies Ben's rulings to the workbook.",
       "who": "agent",
       "kinds": [
         "code_change",
@@ -90,6 +96,7 @@
     {
       "key": "use",
       "name": "Ben uses the result",
+      "means": "Ben sends, presents or acts on the finished workbook; that closes the case.",
       "who": "ben",
       "passive": true,
       "kinds": [],

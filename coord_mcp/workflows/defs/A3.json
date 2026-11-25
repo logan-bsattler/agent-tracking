@@ -8,6 +8,7 @@
     {
       "key": "ingest",
       "name": "Ingest",
+      "means": "A defect or change request comes in; master tasks an investigation.",
       "who": "code",
       "kinds": [],
       "gate": "triage proposes the intent",
@@ -19,6 +20,7 @@
     {
       "key": "investigate",
       "name": "Investigate",
+      "means": "The client agent finds the cause and names the fix.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -34,6 +36,7 @@
     {
       "key": "fix",
       "name": "Fix",
+      "means": "The client agent builds the fix and dev-compiles it; nothing is checked in yet.",
       "who": "agent",
       "kinds": [
         "code_change"
@@ -63,6 +66,7 @@
     {
       "key": "review",
       "name": "Review",
+      "means": "A fresh agent checks the code against the CVC code checklist.",
       "who": "code",
       "kinds": [
         "dod_review"
@@ -76,6 +80,7 @@
     {
       "key": "checkin_ok",
       "name": "Check-in approval",
+      "means": "The board approves the check-in on its own once the review passes, the files are unchanged and the compile is clean; otherwise Ben approves it.",
       "who": "code",
       "fallback": "ben",
       "kinds": [],
@@ -88,6 +93,7 @@
     {
       "key": "checkin",
       "name": "Check-in",
+      "means": "The client agent checks the approved code into CVC.",
       "who": "agent",
       "kinds": [
         "code_change"
@@ -104,6 +110,7 @@
     {
       "key": "note",
       "name": "Pipeline note",
+      "means": "Master adds a note to the SharePoint pipeline item saying what landed.",
       "who": "code",
       "kinds": [],
       "gate": "pipeline-note claim",
@@ -115,6 +122,7 @@
     {
       "key": "reply",
       "name": "Reply",
+      "means": "The client agent drafts the reply telling the client it is fixed; nothing is sent.",
       "who": "agent",
       "kinds": [
         "draft_reply"
@@ -148,6 +156,7 @@
     {
       "key": "send",
       "name": "Send",
+      "means": "Ben sends the reply; that closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben sends",

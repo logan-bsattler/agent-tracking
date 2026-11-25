@@ -8,6 +8,7 @@
     {
       "key": "ingest",
       "name": "Ingest",
+      "means": "A technical question arrives by mail, Teams or a meeting; master tasks an investigation.",
       "who": "code",
       "kinds": [],
       "gate": "triage or meeting",
@@ -19,6 +20,7 @@
     {
       "key": "answer",
       "name": "Investigate",
+      "means": "The client agent works out the answer and hands it back.",
       "who": "agent",
       "kinds": [
         "investigation",
@@ -34,6 +36,7 @@
     {
       "key": "answer_ruling",
       "name": "Ben rules on the answer",
+      "means": "Only if the answer raised a choice: Ben rules on it, or takes the answer as it is.",
       "who": "ben",
       "kinds": [],
       "optional": true,
@@ -47,6 +50,7 @@
     {
       "key": "reply",
       "name": "Reply",
+      "means": "The client agent drafts the reply (or the document or fix the answer calls for); nothing is sent.",
       "who": "agent",
       "kinds": [
         "draft_reply",
@@ -62,6 +66,7 @@
     {
       "key": "ben",
       "name": "Ben reads or sends",
+      "means": "Ben reads it, or sends the reply; that closes the case.",
       "who": "ben",
       "kinds": [],
       "gate": "Ben",

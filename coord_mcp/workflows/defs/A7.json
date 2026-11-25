@@ -9,6 +9,7 @@
     {
       "key": "ingest",
       "name": "Ingest",
+      "means": "Triage finds mail or Teams showing that open items are done.",
       "who": "code",
       "kinds": [],
       "gate": "triage",
@@ -20,6 +21,7 @@
     {
       "key": "match",
       "name": "Match loose ends",
+      "means": "The board and master match it to the open items, record why, and close them.",
       "who": "code",
       "kinds": [],
       "gate": "id-match in code; topic-match by master",
