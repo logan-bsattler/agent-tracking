@@ -416,7 +416,7 @@ def test_text_is_built_from_rows_only(conn):
             "untracked, 0 questions superseded unanswered, 0 cases past step limit for master, "
             "0 cases past step limit for Ben." in text)
     assert text.endswith("Run the Board check procedure for these ids only, then reply Done / Next for you.")
-    assert "ignore the above" not in text and len(text) < 760  # 600 before the case step-limit labels, 680 before idle (11-14)
+    assert "ignore the above" not in text and len(text) < 940  # +Do-now batch (11-25); 760 before; 600 before the case step-limit labels, 680 before idle (11-14)
     assert r["prompt_id"] == conn.execute("SELECT MAX(id) FROM operator_prompts").fetchone()[0]
 
 
@@ -424,7 +424,37 @@ def test_long_id_lists_are_capped(conn):
     ids = [_task(conn, "LNK") for _ in range(8)]
     text = store.minder_text(store.minder_owed(conn, now() + (store.MINDER_UNDELIVERED + 1) * MIN), now())
     assert f"8 never delivered ({', '.join(ids[:5])}, +3 more)" in text
-    assert ids[6] not in text and len(text) < 800  # +ben_direct label (11-16)  # 650 before the case step-limit labels, 720 before idle (11-14)
+    assert ids[6] not in text and len(text) < 980  # +Do-now batch (11-25)  # +ben_direct label (11-16)  # 650 before the case step-limit labels, 720 before idle (11-14)
+
+
+def test_batch_leads_with_the_oldest_intents_and_caps_the_rest():
+    owed = {"intents": [f"i{n}" for n in range(9)], "loose": [f"f{n}" for n in range(6)],
+            "undrafted": ["d1", "d2"]}
+    b = store.minder_batch(owed)
+    assert b.startswith("Do now, all this turn (only Outlook drafting is one at a time): ")
+    assert "5 oldest intents to task or dismiss (i0, i1, i2, i3, i4)" in b and "i5" not in b
+    assert "3 loose ends to task (f0, f1, f2)" in b and "f3" not in b
+    assert "1 draft to put in Outlook (d1)" in b and "d2" not in b
+    assert b.endswith(". Full list: ")
+    text = store.minder_text(owed, now())
+    assert text.index("Do now") < text.index("Full list: ") < text.index("9 open intents (i0")
+
+
+def test_no_batch_when_nothing_is_owed():
+    assert store.minder_batch({}) == ""
+    assert "Do now" not in store.minder_text({}, now())
+
+
+def test_no_batch_for_ben_only_items():
+    owed = {"case_sla_ben": ["c1 (MAG reply +2d Ben)"], "upkeep": ["u1"]}
+    assert store.minder_batch(owed) == ""
+    assert "Do now" not in store.minder_text(owed, now())
+
+
+def test_batch_cuts_trailing_text_to_the_id():
+    b = store.minder_batch({"unread": ["abc (unread)"], "case_sla": ["c9 (MAG reply +1d master)"]})
+    assert "1 results to read (abc)" in b and "(unread)" not in b
+    assert "1 cases to chase (c9)" in b and "+1d" not in b
 
 
 def test_a_page_cannot_queue_a_minder_prompt(conn):

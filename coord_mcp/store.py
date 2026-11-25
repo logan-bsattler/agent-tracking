@@ -2641,7 +2641,7 @@ OPERATOR_ACTIONS = {
               "Done / Next for you."),
     # Queued by the minder (minder_check), never by a page: {owed} is built
     # from board rows in minder_text.
-    "minder": ("Minder {hhmm}: master owes work -- {owed}. Run the Board check procedure for these "
+    "minder": ("Minder {hhmm}: master owes work -- {batch}{owed}. Run the Board check procedure for these "
                "ids only, then reply Done / Next for you."),
 }
 # The middle of the draft prompt: a reply all into the original's thread
@@ -3158,8 +3158,38 @@ def superseded_questions(conn: sqlite3.Connection) -> list[str]:
     return out
 
 
+# The "Do now" batch at the head of a minder prompt: the oldest few of each
+# kind master can clear alone, in this order. A full list of 400 ids read as
+# status, and the worker worked only what a prompt named (2026-11-25). Ben's
+# own items (case_sla_ben) and what upkeep handles are not in it. One
+# Outlook draft, since drafting is the only serial step.
+_MINDER_BATCH = (("ben_direct", 99, "Ben's direct asks"), ("holds", 3, "holds to supersede"),
+                 ("unread", 3, "results to read"), ("undelivered", 3, "tasks to deliver"),
+                 ("idle", 3, "idle sessions to dispatch"), ("stalled", 3, "silent sessions to check"),
+                 ("parked", 3, "parks to split or re-send"), ("failed", 3, "failures to decide"),
+                 ("intents", 5, "oldest intents to task or dismiss"), ("loose", 3, "loose ends to task"),
+                 ("unreviewed", 3, "dod_reviews to create"), ("commitments", 3, "commitments to move"),
+                 ("pipeline", 3, "pipeline notes to add"), ("superseded", 1, "questions to re-present"),
+                 ("case_sla", 2, "cases to chase"), ("undrafted", 1, "draft to put in Outlook"))
+
+
+def minder_batch(owed: dict[str, list[str]]) -> str:
+    """'Do now, all this turn: ...; then the full list: ' or '' when nothing is owed
+    that master clears alone."""
+    parts = []
+    for key, n, label in _MINDER_BATCH:
+        ids = [i.split(" ")[0] for i in (owed.get(key) or [])[:n]]
+        if ids:
+            parts.append(f"{len(ids)} {label} ({', '.join(ids)})")
+    if not parts:
+        return ""
+    return ("Do now, all this turn (only Outlook drafting is one at a time): " + "; ".join(parts)
+            + ". Full list: ")
+
+
 def minder_text(owed: dict[str, list[str]], now_ts: int) -> str:
-    """The prompt for what is owed: a count per condition and up to MINDER_IDS ids each.
+    """The prompt for what is owed: a Do-now batch (minder_batch), then a count per
+    condition and up to MINDER_IDS ids each.
     Ids only, never their labels (lookup.annotate): the prompt reaches master
     as Ben's words, and a title or loose end's text can carry an email's."""
     from datetime import datetime
@@ -3172,7 +3202,7 @@ def minder_text(owed: dict[str, list[str]], now_ts: int) -> str:
         shown = ", ".join(ids[:MINDER_IDS]) + (f", +{len(ids) - MINDER_IDS} more" if len(ids) > MINDER_IDS else "")
         parts.append(f"{len(ids)} {label} ({shown})")
     return OPERATOR_ACTIONS["minder"].format(hhmm=datetime.fromtimestamp(now_ts).strftime("%H:%M"),
-                                             owed=", ".join(parts))
+                                             batch=minder_batch(owed), owed=", ".join(parts))
 
 
 def minder_last(conn: sqlite3.Connection) -> int | None:
