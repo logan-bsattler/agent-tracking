@@ -194,18 +194,30 @@ def ben_queue(conn: sqlite3.Connection) -> dict[str, Any]:
         d["due"] = best["due_at"] if best else None
         d["due_basis"] = best["due_basis"] if best else None
         by.setdefault(r["client"] or "unassigned", []).append(d)
+    # Each item takes its task's priority (priority.py); no task means normal.
+    from . import priority
+    tids = [d["task_id"] for items in by.values() for d in items if d["task_id"]]
+    rank = priority.ranks(conn, tids)
+    for items in by.values():
+        for d in items:
+            d["rank"] = rank.get(d["task_id"], priority.RANK[priority.DEFAULT])
+            d["priority"] = priority.LEVELS[d["rank"]]
 
     def order(d: dict[str, Any]) -> tuple:
-        # Overdue first, then soonest due, then today's order (oldest first).
+        # Overdue first, then soonest due, then priority, then oldest first.
         if d["due"] is None:
-            return (2, 0, d["created_at"])
-        return (0 if d["due"] < t else 1, d["due"], d["created_at"])
+            return (2, 0, d["rank"], d["created_at"])
+        return (0 if d["due"] < t else 1, d["due"], d["rank"], d["created_at"])
 
     for items in by.values():
         items.sort(key=order)
-    # Groups holding due items first, by their earliest due; the rest by oldest item, as before.
-    groups = sorted(by.items(), key=lambda kv: (0, kv[1][0]["due"], 0) if kv[1][0]["due"] is not None
-                    else (1, 0, min(i["created_at"] for i in kv[1])))
+    # Groups holding due items first, by their earliest due; the rest by their
+    # best priority, then oldest item.
+    groups = sorted(by.items(), key=lambda kv: (0, kv[1][0]["due"], 0, 0) if kv[1][0]["due"] is not None
+                    else (1, 0, kv[1][0]["rank"], min(i["created_at"] for i in kv[1])))
+    for items in by.values():
+        for d in items:
+            del d["rank"]
     ensure_routes(conn)
     moved = [dict(r) for r in conn.execute(
         """SELECT r.follow_up_id id, r.to_who client, r.why, r.created_at, f.what, f.state, f.task_id

@@ -149,7 +149,7 @@ def _busy_sessions(conn: sqlite3.Connection, reg: dict[str, dict[str, str]], t: 
 
 def _candidates(conn: sqlite3.Connection, t: int, *, paced: bool = True) -> list[sqlite3.Row]:
     """Open, never picked up, never parked tasks with a client, earliest-due
-    commitment first (commitments.due_map), then oldest. paced adds the
+    commitment first (commitments.due_map), then priority, then oldest. paced adds the
     send timers: DISPATCH_AFTER old, not sent in RESEND_AFTER, no attempt in
     RETRY_AFTER."""
     from .commitments import due_map
@@ -174,10 +174,13 @@ def _candidates(conn: sqlite3.Connection, t: int, *, paced: bool = True) -> list
         dues = due_map(conn)
     except sqlite3.Error:
         dues = {}
+    from .priority import ranks
+    rank = ranks(conn, [r["id"] for r in rows])
     inf = float("inf")
-    # Direct asks first, then earliest due, then oldest. sorted() is stable:
-    # equal keys keep the created_at order.
-    return sorted(rows, key=lambda r: (r["id"] not in direct, (dues.get(r["id"]) or {}).get("due_at") or inf))
+    # Direct asks first, then earliest due, then priority (priority.py), then
+    # oldest. sorted() is stable: equal keys keep the created_at order.
+    return sorted(rows, key=lambda r: (r["id"] not in direct, (dues.get(r["id"]) or {}).get("due_at") or inf,
+                                       rank[r["id"]]))
 
 
 def next_dispatch(conn: sqlite3.Connection, now_ts: int | None = None,

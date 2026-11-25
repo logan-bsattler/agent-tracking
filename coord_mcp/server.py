@@ -123,6 +123,11 @@ class CreateTaskInput(Strict):
     ben_direct: bool = Field(default=False,
                              description="Ben asked for this himself (the Desk, from his own prompt): top "
                                          "priority, handed back to him finished. Sets spec.from = 'ben-direct'.")
+    priority: Literal["high", "normal", "low"] | None = Field(
+        default=None,
+        description="Orders undated work: auto-dispatch sends direct asks, then earliest due, then high before "
+                    "normal before low, then oldest. Never beats a due date. Omitted: inherited from the parent "
+                    "chain, else normal. Sets spec.priority.")
 
 
 @tool("coord_create_task", title="Create task")
@@ -144,6 +149,8 @@ async def coord_create_task(params: CreateTaskInput) -> str:
     """
     try:
         spec = {**params.spec, "from": store.BEN_DIRECT} if params.ben_direct else params.spec
+        if params.priority:
+            spec = {**spec, "priority": params.priority}
         return _ok(store.create_task(
             db(), params.kind, params.title, spec,
             params.assigned_to, params.parent_id, params.from_intent, params.pipeline_task_id,

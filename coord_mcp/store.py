@@ -161,7 +161,8 @@ def create_task(
         )
     if len(title) > 80:
         raise ValueError(f"title is {len(title)} chars; cap is 80")
-    from . import gate
+    from . import gate, priority
+    priority.check(spec)
     gate.check_checkin(conn, kind, spec)  # a CVC check-in needs its code approved
     from . import pipeline
     line_warnings = pipeline.check_create(conn, kind, spec, assigned_to, parent_id, pipeline_task_id,
