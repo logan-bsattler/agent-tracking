@@ -24,12 +24,21 @@ direct asks are exempt: they inherit, or go first anyway. high: Ben said it
 is urgent, or a client is waiting. low: nice-to-have or internal tooling.
 Otherwise normal. Rule P1 has no code: a task has a date only when a
 commitment or the request states one.
+
+Rule P3 (Ben, 2026-11-25; switch ``estimate_high``): an estimate is high, so
+sizings come back fast. coord_create_task sets priority high on a task that
+is a sizing (spec deliverable_type "sizing", or a title naming a sizing,
+estimate or ballpark), whatever priority it was given, and says so in its
+warnings. Code changes are left alone ("fix the estimate calc" is not one).
+``python -m coord_mcp.priority estimates`` lists open estimate tasks below
+high; ``--yes`` raises them.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 from typing import Any, Iterable
@@ -65,6 +74,46 @@ def check_create(conn: sqlite3.Connection, spec: Any, assigned_to: str | None, p
         return
     if _required(conn):
         raise ValueError(REFUSAL)
+
+
+ESTIMATE = re.compile(r"\bsizings?\b|\bsized\b|\bestimat\w*|\bballpark\b", re.I)
+ESTIMATE_SWITCH = "estimate_high"
+
+
+def is_estimate(kind: str | None, title: str | None, spec: Any) -> bool:
+    """A sizing or estimate task (rule P3). Code is never one."""
+    if kind == "code_change":
+        return False
+    s = spec if isinstance(spec, dict) else {}
+    return str(s.get("deliverable_type") or "").lower() == "sizing" or bool(ESTIMATE.search(title or ""))
+
+
+def raise_estimate(conn: sqlite3.Connection, kind: str, title: str, spec: Any) -> tuple[Any, list[str]]:
+    """(spec, warnings): an estimate task's spec with priority high (rule P3)."""
+    from . import queue
+    if not isinstance(spec, dict) or spec.get("priority") == "high" or not is_estimate(kind, title, spec):
+        return spec, []
+    if not queue.switch(conn, ESTIMATE_SWITCH):
+        return spec, []
+    was = spec.get("priority")
+    note = ((f"priority set to high (was {was}): " if was else "priority set to high: ")
+            + "estimates go high so they come back fast (rule P3, switch estimate_high)")
+    return {**spec, "priority": "high"}, [note]
+
+
+def open_estimates(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Open estimate tasks whose effective priority is below high."""
+    rows = conn.execute("SELECT id, kind, title, spec, assigned_to FROM tasks WHERE state='open' "
+                        "ORDER BY created_at").fetchall()
+    out = []
+    for r in rows:
+        try:
+            spec = json.loads(r["spec"] or "{}")
+        except ValueError:
+            spec = {}
+        if is_estimate(r["kind"], r["title"], spec) and (p := of(conn, r["id"])) != "high":
+            out.append({"task_id": r["id"], "client": r["assigned_to"], "title": r["title"], "priority": p})
+    return out
 
 
 def _own(raw: Any) -> str | None:
@@ -127,12 +176,26 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--because", default="")
     g = sub.add_parser("get", help="a task's effective priority")
     g.add_argument("task_id")
+    e = sub.add_parser("estimates", help="open estimate tasks below high (rule P3); --yes raises them")
+    e.add_argument("--yes", action="store_true")
     a = p.parse_args(argv)
     conn = connect()
     try:
         if a.cmd == "set":
             out = set_priority(conn, a.task_id, a.level, a.because)
             print(f"{out['task_id']} priority {out['priority']} (decision {out['decision_id']})")
+        elif a.cmd == "estimates":
+            rows = open_estimates(conn)
+            for r in rows:
+                line = f"{r['task_id']} {r['client'] or '-'} {r['priority']}: {r['title']}"
+                if a.yes:
+                    d = set_priority(conn, r["task_id"], "high", "estimates go high (rule P3)")
+                    line += f" -> high (decision {d['decision_id']})"
+                print(line)
+            if not rows:
+                print("no open estimate tasks below high")
+            elif not a.yes:
+                print(f"{len(rows)} to raise; rerun with --yes")
         else:
             print(of(conn, a.task_id))
         return 0

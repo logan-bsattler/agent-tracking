@@ -163,6 +163,7 @@ def create_task(
         raise ValueError(f"title is {len(title)} chars; cap is 80")
     from . import gate, priority
     priority.check(spec)
+    spec, estimate_warnings = priority.raise_estimate(conn, kind, title, spec)  # estimates go high (P3)
     gate.check_checkin(conn, kind, spec)  # a CVC check-in needs its code approved
     from . import pipeline
     line_warnings = pipeline.check_create(conn, kind, spec, assigned_to, parent_id, pipeline_task_id,
@@ -196,7 +197,7 @@ def create_task(
     if pipeline_task_id:
         out["pipeline_task_id"] = pipeline_task_id
     from . import queue
-    warnings = line_warnings + queue.create_warnings(conn, kind, spec, pipeline_task_id, parent_id)
+    warnings = estimate_warnings + line_warnings + queue.create_warnings(conn, kind, spec, pipeline_task_id, parent_id)
     if dup:
         warnings.append(f"draft_reply {dup} already answers this email; this one duplicates it")
     # Case-step advice (workflows/checks.py, 2026-11-14): never a refusal.

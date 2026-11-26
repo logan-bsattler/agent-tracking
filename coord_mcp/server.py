@@ -128,7 +128,8 @@ class CreateTaskInput(Strict):
         description="Orders undated work: auto-dispatch sends direct asks, then earliest due, then high before "
                     "normal before low, then oldest. Never beats a due date. Required on a root client task "
                     "(high: Ben said urgent or a client waits; low: nice-to-have or internal tooling; else normal). "
-                    "A child or check-in inherits its chain's. Sets spec.priority.")
+                    "A child or check-in inherits its chain's. A sizing or estimate is set to high "
+                    "whatever is given (rule P3). Sets spec.priority.")
 
 
 @tool("coord_create_task", title="Create task")

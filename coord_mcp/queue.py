@@ -509,6 +509,8 @@ SWITCHES = {"ben_test": True, "ben_dedupe": True, "ben_cover": True, "ben_group_
             # rule P2 (coord_mcp/priority.py, Ben 2026-11-25): a root client
             # task names its priority; children, check-ins and engine steps inherit
             "require_priority": True,
+            # rule P3 (priority.py, Ben 2026-11-25): a sizing or estimate task is high
+            "estimate_high": True,
             # the idle-session reaper (coord_mcp/reaper.py, Ben 2026-11-20): off is a
             # dry run that only logs; keep_rc leaves sessions with Remote Control on
             "idle_reaper": False, "idle_reaper_keep_rc": True,
