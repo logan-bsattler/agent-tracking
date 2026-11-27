@@ -2709,10 +2709,12 @@ def loop_error(connect, where: str, log: Path | None = None) -> None:
     tb = traceback.format_exc()
     try:
         log = log or Path.home() / ".coord" / "dashboard-errors.log"
-        if not log.exists() or log.stat().st_size < ERROR_LOG_MAX:
-            log.parent.mkdir(parents=True, exist_ok=True)
-            with log.open("a", encoding="utf-8") as f:
-                f.write(f"--- {datetime.now().isoformat(timespec='seconds')} {where}\n{tb}\n")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        if log.exists() and log.stat().st_size >= ERROR_LOG_MAX:
+            # Rotate, keeping one old file: a full log once hid every new error.
+            log.replace(log.with_name(log.name + ".1"))
+        with log.open("a", encoding="utf-8") as f:
+            f.write(f"--- {datetime.now().isoformat(timespec='seconds')} {where}\n{tb}\n")
     except Exception:
         pass
     try:
@@ -2869,7 +2871,12 @@ def serve(connect, port: int = 8765, days: int = 7, open_browser: bool = False) 
                     # switch auto_task_loose (off); never a dispatch.
                     try:
                         from . import autotask
-                        autotask.run_loose(conn)
+                        # run_loose returns a failed group with its error
+                        # instead of raising; raise here so loop_error logs it.
+                        errs = [g for g in autotask.run_loose(conn) if g.get("error")]
+                        if errs:
+                            raise RuntimeError("; ".join(f"{g['client']} from {g['source']}: {g['error']}"
+                                                         for g in errs)[:500])
                     except Exception:
                         loop_error(connect, "autotask")
                     # Check-in auto-approval (checkin_auto.py): inactive until

@@ -411,8 +411,10 @@ class savepoint:
     def __init__(self, conn: sqlite3.Connection, name: str, immediate: bool = True):
         self.conn, self.name, self.immediate = conn, name, immediate
         self.began = False
+        self.outer = False
 
     def __enter__(self):
+        self.outer = not self.conn.in_transaction
         # Outermost, a bare SAVEPOINT is a deferred BEGIN: a block that reads
         # and then writes on a stale WAL snapshot fails at once with
         # "database is locked", and busy_timeout never applies. So the
@@ -432,6 +434,17 @@ class savepoint:
             self.conn.execute(f"RELEASE {self.name}")
         except sqlite3.OperationalError:
             pass  # already committed by an executescript inside the block
+        if self.outer and not self.began and self.conn.in_transaction:
+            # A bare outermost SAVEPOINT (immediate=False) is its own
+            # transaction. If ROLLBACK TO / RELEASE failed above ("database is
+            # locked"), it is still open: end it, or every later BEGIN on this
+            # connection fails (autotask went silent 2026-11-25 this way).
+            try:
+                self.conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            if exc_type is None:
+                raise sqlite3.OperationalError(f"savepoint {self.name}: release failed, rolled back")
         if self.began and self.conn.in_transaction:
             try:
                 self.conn.execute("COMMIT" if exc_type is None else "ROLLBACK")

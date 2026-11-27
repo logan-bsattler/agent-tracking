@@ -90,7 +90,8 @@ def test_loop_error_logs_and_keeps_going(tmp_path):
         assert _keys(p) == ["loop_error"] and "boom" in p[0]["detail"]
     finally:
         c.close()
-    # Over the cap nothing more is written, and a connect that fails is swallowed.
+    # Over the cap the log rotates to .1 and the new error is still written;
+    # a connect that fails is swallowed.
     log.write_bytes(b"x" * (report.ERROR_LOG_MAX + 1))
 
     def broken():
@@ -99,7 +100,8 @@ def test_loop_error_logs_and_keeps_going(tmp_path):
         raise RuntimeError("again")
     except RuntimeError:
         report.loop_error(broken, "ingest", log=log)
-    assert log.stat().st_size == report.ERROR_LOG_MAX + 1
+    assert (tmp_path / "errors.log.1").stat().st_size == report.ERROR_LOG_MAX + 1
+    assert "RuntimeError: again" in log.read_text(encoding="utf-8")
 
 
 def test_two_failed_triage_runs(conn, tmp_path):
